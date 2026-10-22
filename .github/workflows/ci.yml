@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests and evaluations
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Pinned to a full commit SHA so a moved tag cannot inject code into CI.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: npm
+
+      # The project has no runtime dependencies; the lockfile still pins the
+      # dependency graph so an accidental addition is visible in review.
+      - name: Install from lockfile
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Syntax check
+        run: git ls-files -z '*.js' '*.mjs' | xargs -0 -n1 node --check
+
+      - name: Public files and documentation
+        run: npm run check:public
+
+      - name: Behavioural suite
+        run: npm test
+
+      - name: Generalisation evaluation
+        run: npm run eval
+
+      - name: Framework evaluation
+        run: npm run eval:framework
+
+      - name: Product-value evaluation
+        run: npm run eval:value

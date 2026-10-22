@@ -1,0 +1,23 @@
+{
+  "name": "unprompted-prototype",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "A proactive work partner: it notices work that was never assigned, gathers evidence, prepares an action, asks before acting, and verifies the result.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "demo": "node scripts/demo.mjs",
+    "start": "node server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test:fast": "node --test --test-concurrency=1 $(find test -name '*.test.js' ! -name 'api.test.js' ! -name 'framework-eval.test.js' ! -name 'generalization.test.js')",
+    "test:workflow": "node --test test/workflow.test.js",
+    "test:api": "node --test test/api.test.js",
+    "eval": "node eval/run.js",
+    "eval:value": "node eval/value.js",
+    "eval:framework": "node eval/framework-run.js",
+    "check:public": "node scripts/check-public.mjs",
+    "release:prepare": "node scripts/prepare-public-release.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

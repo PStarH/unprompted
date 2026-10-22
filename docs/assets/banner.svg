@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-labelledby="title desc">
+<title id="title">Unprompted — Work without the prompt.</title><desc id="desc">A proactive AI agent. A continuous green line connects notice, prepare, and verify.</desc>
+<rect width="1280" height="340" rx="14" fill="#0c241c"/>
+<g fill="#b9eea3"><circle cx="84" cy="67" r="6"/><circle cx="105" cy="83" r="6"/><circle cx="84" cy="99" r="6"/></g>
+<text x="131" y="94" fill="#f1f1e7" font-family="system-ui,Segoe UI,sans-serif" font-size="32" font-weight="650" letter-spacing="-1">unprompted.</text>
+<text x="72" y="180" fill="#f1f1e7" font-family="system-ui,Segoe UI,sans-serif" font-size="52" font-weight="600" letter-spacing="-1.8">Work without the prompt.</text>
+<text x="75" y="222" fill="#bdcbbd" font-family="system-ui,Segoe UI,sans-serif" font-size="22">Useful initiative. Evidence behind every action.</text>
+<path d="M72 286 H720 C790 286 795 120 865 120 S920 218 985 218 S1090 120 1208 120" fill="none" stroke="#b9eea3" stroke-width="2.5"/>
+<g fill="#b9eea3"><circle cx="865" cy="120" r="7"/><circle cx="985" cy="218" r="7"/><circle cx="1208" cy="120" r="7"/></g>
+<g fill="#bdcbbd" font-family="system-ui,Segoe UI,sans-serif" font-size="15"><text x="838" y="90">Notice</text><text x="956" y="253">Prepare</text><text x="1180" y="90">Verify</text></g>
+</svg>

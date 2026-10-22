@@ -1,0 +1,24 @@
+{
+  "newStartPageToken": "p-shadow-2",
+  "changes": [
+    {
+      "fileId": "doc-shadow-1",
+      "time": "2026-10-16T09:30:00.000Z",
+      "file": {
+        "id": "doc-shadow-1",
+        "name": "Northstar project proposal",
+        "mimeType": "application/vnd.google-apps.document",
+        "modifiedTime": "2026-10-16T09:30:00.000Z",
+        "version": "4"
+      }
+    },
+    {
+      "fileId": "sheet-shadow-1",
+      "file": {
+        "id": "sheet-shadow-1",
+        "name": "Unrelated sheet",
+        "mimeType": "application/vnd.google-apps.spreadsheet"
+      }
+    }
+  ]
+}

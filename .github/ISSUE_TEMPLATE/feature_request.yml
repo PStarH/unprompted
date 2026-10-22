@@ -1,0 +1,20 @@
+name: Idea or contribution / 想法与贡献
+description: Propose a focused improvement or ask where to start. / 提议改进或寻找参与入口。
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What would help? / 希望改善什么？
+      description: Describe the user situation and the follow-through that is difficult today.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior / 建议的行为
+      description: What triggers discovery? What evidence is needed? What needs user approval? For docs or UI work, describe the confusing step.
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Would you like to work on it? / 是否希望参与实现？
+      description: It is fine to ask for guidance or suggest an idea without implementing it.

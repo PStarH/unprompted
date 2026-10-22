@@ -1,0 +1,8 @@
+# Northstar project proposal
+
+## Experiment results
+Run date: 2026-10-16
+Sample size: 1,200
+Control: 8.1% conversion
+Treatment: 10.4% conversion
+Conclusion: Treatment improved conversion.

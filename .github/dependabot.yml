@@ -1,0 +1,22 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit SHAs; Dependabot updates the SHA and keeps the
+  # version comment accurate.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # init and analyze must run the same version; updating one at a time
+      # produces a broken CodeQL run, so let Dependabot bump them together.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

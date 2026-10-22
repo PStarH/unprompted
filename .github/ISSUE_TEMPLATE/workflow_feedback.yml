@@ -1,0 +1,42 @@
+name: Workflow feedback / 场景反馈
+description: A useful discovery, a missed item, or unnecessary noise. / 有用、遗漏或多余的发现。
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the structure of the workflow with invented names and content. Do not upload real state, email, document links, credentials, or inbox screenshots.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Feedback / 反馈类型
+      options:
+        - Useful discovery / 有用的发现
+        - Missed work / 遗漏
+        - Unnecessary noise / 多余打扰
+        - Confusing evidence or action / 证据或行动不清楚
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Situation and trigger / 场景与触发变化
+      description: What existing work was involved? What changed?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected and observed / 预期与实际
+      description: What did the system notice, prepare, or miss? What evidence should justify action?
+    validations:
+      required: true
+  - type: dropdown
+    id: basis
+    attributes:
+      label: Basis / 来自哪种体验？
+      options:
+        - Built-in demo / 内置演示
+        - My synthetic scenario / 自建模拟场景
+        - Actual use, described with invented data / 实际使用，已改写为虚构数据
+    validations:
+      required: true

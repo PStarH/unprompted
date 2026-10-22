@@ -1,0 +1,45 @@
+name: Bug report / 问题反馈
+description: Something did not behave as expected. / 报告可复现的问题。
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Chinese is welcome. Use synthetic data. Never attach credentials, raw email, document links, or workspace state. For vulnerabilities, use SECURITY.md.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened? / 发生了什么？
+      description: Describe the result and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: Include the command and a minimal synthetic email/document example if relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode / 运行模式
+      options:
+        - Local demo (npm run demo)
+        - Normal simulation (npm start)
+        - Google read-only
+        - Explicitly enabled live send
+        - Other / unsure
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment / 环境
+      placeholder: Node version, OS, browser, commit if known
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: Redacted error or screenshot / 脱敏的错误或截图
+      description: Screenshots must use simulated data. Leave out real accounts and identifiers.
