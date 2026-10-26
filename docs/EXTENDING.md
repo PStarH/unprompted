@@ -44,7 +44,7 @@ focused and cover the boundary you modify.
 
 | Extend… | Start here | What the engine must retain |
 | --- | --- | --- |
-| An environmental event source | [Connector contract](../src/connectors/connector.js), [event normalization](../src/connectors/events.js) | Stable provider event IDs, provenance, explicit failures, incremental cursors |
+| An environmental event source | [Connector contract](../src/connectors/connector.js), [event normalization](../src/connectors/events.js), [connector guide](CONNECTORS.md) | Stable provider event IDs, provenance, explicit failures, incremental cursors |
 | A source-backed evidence check | [Probe planning](../src/probes/plan.js), [assessment](../src/probes/assess.js) | Quotes, versions and uncertainty; no invented support |
 | Optional interpretation or planning | [Reasoner boundary](../src/reasoning.js), [Pi adapter](../src/pi-runtime.js) | Task-scoped reads, budgets, validated proposals; the engine owns authority |
 | A consequential action provider | [Provider contract](../src/providers.js), [permissions](../src/permissions.js) | Idempotency, receipt lookup and readback; unknown outcomes stay unknown |

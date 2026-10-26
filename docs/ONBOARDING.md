@@ -19,9 +19,10 @@ separate Node.js or Git installation. The build defaults to `outputs/Unprompted.
 use `node scripts/build-macos-app.mjs --out OTHER_PATH` for another output.
 
 The launcher chooses a free local port and opens only the service started by
-that launch. Without a connected account, the app opens persistent model and Google setup.
-Normal startup does not schedule a sample. Authorization activates the real
-workspace without restarting; first access is read-only.
+that launch. The app opens persistent model and source setup; a local folder can
+be used without connecting a cloud account. Normal startup does not schedule a
+sample. A selected source activates without restarting; first access is
+read-only.
 
 The smoke command exercises the actual app launcher with isolated temporary
 setup, no opened browser and no saved account. It checks the full first-view →
@@ -47,17 +48,31 @@ for GitHub and Microsoft Outlook authorization, permissions and extension points
 
 ## Choose your first source
 
-The home page offers Google, GitHub and Microsoft Outlook. One source is enough
-to start. GitHub and Outlook use official device OAuth and only need a registered
-public Client ID supplied once by the distribution or self-hosted operator.
-Users copy the short code and authorize on the official provider page; the app
-verifies identity and activates the connection. No access-token copying, client
-secret or public callback server is needed. See the [connector guide](CONNECTORS.md)
-for publisher registration and supported permissions.
+The home page offers local folders, Apple Notes on macOS, Google, GitHub and
+Microsoft Outlook. One source is enough to start. GitHub and Outlook use
+official device OAuth and need a registered public Client ID supplied by the
+distribution or self-hosted operator. Users copy the short code and authorize
+on the official provider page; the app verifies identity and activates the
+connection. No access-token copying, client secret or public callback server is
+needed. See the [connector guide](CONNECTORS.md) for exact scope and publisher
+requirements.
 
 Each connector keeps independent cursors and status. Observation can be paused
 globally. Disconnecting a source retains the others and local historical records.
 New integrations are read-only, and delivery is bound to the original source.
+
+## Connect local sources
+
+Choose **Local folders** to read Markdown and text files without OAuth or a
+cloud account. On macOS, use the folder picker; on other platforms, enter the
+folder path. Unprompted reads only the selected folders, skips hidden files and
+symlinks, and never asks for Full Disk Access.
+
+On macOS, **Apple Notes** asks for Automation permission for the host app (for
+example, Terminal when launched with `npm start`). Then choose the Notes folders
+to observe. Locked notes and attachments are not read. The connector is
+read-only; its real-account and signed-app permission flow still need manual
+acceptance. See [local-source behavior and limits](CONNECTORS.md#local-sources).
 
 ## Connect Google from the interface
 
@@ -140,7 +155,8 @@ rechecks existing work.
 
 Setup is kept in a private local file, and workspace records stay in local JSON
 state. The demo uses isolated temporary setup/state and does not inherit saved
-account credentials. A configured remote model can receive task content. The
+account credentials. Selected local-file and Notes content, like cloud-source
+content, can be included in requests to the configured model. The
 optional Pi runtime remains a bounded read-tool loop; document writing goes
 through the versioned document service and its independent authorization.
 

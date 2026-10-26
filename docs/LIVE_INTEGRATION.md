@@ -92,10 +92,10 @@ Google content or send mail.
 
 ## 4. Try a synthetic request
 
-In the dedicated account, create a document naming a project and its
-requirements. Send that account an email from another person/test account
-requesting the deliverable. Use the [built-in scenario](QUICKSTART.md#what-you-will-see)
-as an example of wording and evidence.
+In the dedicated account, create a small document naming a project and one or
+two clear requirements. From a second test account, email a request for the
+deliverable using the same project terms. Keep the test content fictional and
+limited to those records.
 
 Check whether discovery, correlation, missing evidence and the prepared reply
 match the sources. The run registry is simulated in the built-in demo; a Google

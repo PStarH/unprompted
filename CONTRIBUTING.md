@@ -89,7 +89,6 @@ These starter tasks include code entry points, scope and acceptance checks:
 
 - [Remember the selected connection panel · #6](https://github.com/PStarH/unprompted/issues/6)
 - [Show the next observation time · #7](https://github.com/PStarH/unprompted/issues/7)
-- [Write the Chinese connector setup guide · #8](https://github.com/PStarH/unprompted/issues/8)
 
 Start from the current `main` branch. Larger connector tasks are
 [GitHub repository selection · #9](https://github.com/PStarH/unprompted/issues/9),

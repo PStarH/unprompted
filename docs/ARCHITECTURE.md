@@ -24,7 +24,7 @@ after a verified action result.
 
 | Layer | Responsibility | Main files |
 | --- | --- | --- |
-| Environment | Connector input, normalization, incremental sync, provenance | `src/connectors/`, `src/simulation.js` |
+| Environment | Cloud and native connector input, normalization, incremental sync, provenance | `src/connectors/`, `src/simulation.js` |
 | Context | Requests, document identity, state, freshness | `src/requests.js`, `src/correlation.js`, `src/store.js`, `src/freshness.js` |
 | Discovery and planning | Interpret requests, select bounded probes, identify narrow opportunities | `src/reasoning.js`, `src/pi-runtime.js`, `src/probes/plan.js`, `src/opportunities.js` |
 | Evidence and policy | Assess criteria, preserve uncertainty, enforce authority | `src/evidence.js`, `src/probes/assess.js`, `src/permissions.js`, `src/calibration.js` |
@@ -152,6 +152,7 @@ they cannot authorize another send or create a verified completion. See the
 | Event engine, correlation, evidence checks, policy, UI, persistence | Implemented with automated coverage |
 | Built-in email/document/run scenario and outbox | Simulated; exercises the real engine |
 | GitHub assigned issues and Microsoft Outlook inbox | Official device OAuth, bounded read-only sync and source-specific task handling |
+| Native local sources | Selected Markdown/text folders and macOS Notes bridge; read-only. Real Notes account and signed-app permission acceptance remain outstanding |
 | Gmail / Drive / Docs incremental connector | Implemented; read-only setup is available for local testing |
 | Gmail send and read-back | Implemented and tested against scripted transports; not a production-validation claim |
 | Primary model interpretation and legacy assist mode | Primary blocks readiness until a grounded review; assist retains deterministic fallback |

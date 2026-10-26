@@ -1,6 +1,9 @@
 # Local API
 
-Local source endpoints are read only with respect to source content:
+[← Documentation](README.md)
+
+These local-source endpoints manage read access; they do not modify source
+content:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -15,8 +18,6 @@ Notes account identifiers stay in the private setup store. Picker cancellation
 does not change saved grants. Notes has no write operation. Its native macOS
 permission flow still requires real-account acceptance.
 
-[← Documentation](README.md)
-
 Base URL: the address printed by the launcher, normally `http://127.0.0.1:4173`.
 The API has no authentication and is intended
 for local use only. POST bodies must be JSON with `Content-Type:
@@ -29,7 +30,7 @@ checks permissions and current evidence on every action.
 | --- | --- | --- |
 | GET | `/api/health` | Mode, shadow policy, provider and schema status |
 | GET | `/api/runtime` | Connector state, missing configuration and simulation availability |
-| GET | `/api/setup` | Redacted account, OAuth session and continuous-observation status |
+| GET | `/api/setup` | Redacted model/source status, selected local scopes, OAuth sessions and observation settings |
 | GET | `/api/state` | Events, tasks, evidence, documents, outbox and history |
 | GET | `/api/stream` | Server-sent state updates |
 | GET | `/api/metrics` | Metrics derived from recorded outcomes |
@@ -54,8 +55,8 @@ verification/runtime status. Neither it nor workspace/SSE responses returns keys
 
 Primary interpretation records a source-grounded model review before readiness.
 An original verifiable requirement cannot be removed by the model. Model setup
-does not grant real-world write permissions or start sample events. Connect
-Google to supply actual workspace context.
+does not grant real-world write permissions or start sample events. Connect at
+least one [source](CONNECTORS.md) to supply actual workspace context.
 
 Normal product mode with no model blocks action readiness. Explicit
 `UNPROMPTED_RULE_ONLY=true` is available for rule-only API/engine fixtures;
@@ -110,7 +111,7 @@ curl -X POST http://127.0.0.1:4173/api/connectors/sync -H "Content-Type: applica
 
 Use this for a one-off live pull when automatic polling is disabled. Review
 connector status and errors; a failure must not be interpreted as a simulated
-success. [Google setup →](LIVE_INTEGRATION.md)
+success. [Connector setup →](CONNECTORS.md)
 
 ## Actions and feedback
 

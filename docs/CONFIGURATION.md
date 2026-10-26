@@ -7,14 +7,14 @@
 | Command | Workspace | Credentials | Sending |
 | --- | --- | --- | --- |
 | `npm run demo` | Fresh temporary simulation | Google and model configuration ignored | Simulated local outbox only |
-| `npm start` | Persistent account-specific local workspace | Saved in-app model setup or inherited environment; `.env` is not automatically loaded | Real workspace read-only; no automatic sample |
+| `npm start` | Persistent local workspace; Google accounts have separate state | Saved in-app model setup or inherited environment; `.env` is not automatically loaded | Real workspace read-only; no automatic sample |
 | `node --env-file=.env server.js` | Persistent, or your configured state file | Explicit local `.env` file | Read-only unless explicitly enabled |
 
-Normal mode switches to the Google connector only when all required Google
-credentials are present. UI authorization applies those credentials immediately
-and starts the first observation, without restarting. Missing context does not
-start a simulation. Check `/api/health` and `/api/runtime` to see what is
-actually connected. Missing credentials do not produce a live connection.
+Normal mode reads only the sources you explicitly connect or configure. In-app
+authorization applies immediately and starts the first observation without a
+restart. Missing context does not start a simulation. Check `/api/health` and
+`/api/runtime` to see what is actually connected; missing credentials never
+produce a live connection.
 
 ## Loading a local env file
 
@@ -66,9 +66,9 @@ access but cannot expand locally selected/granted scopes or enable unapproved
 writes.
 
 The browser connection flow and the bundled local app are described in the
-[app and connection guide](ONBOARDING.md). Disconnecting stops observation and
-disables this process's Google credentials and writes immediately; external
-environment configuration remains the operator's responsibility on a later boot.
+[app and connection guide](ONBOARDING.md). Disconnecting an in-app source stops
+its observation immediately. Environment-managed credentials remain the
+operator's responsibility on a later boot.
 
 ## GitHub and Outlook client provisioning
 
@@ -92,6 +92,14 @@ accounts through Google. The app builder’s `--google-client` option includes
 only that metadata, never user tokens. Registration, audience and verification
 remain the distributor’s responsibility. Without a provisioned client, the
 interface guides self-hosted users through their one-time Cloud setup.
+
+## Local source permissions
+
+Local folders are limited to the paths you select. The app does not request Full
+Disk Access. On macOS, Apple Notes uses the host app's Automation permission and
+only reads selected Notes folders. Revoking a folder or Automation grant makes
+its evidence unavailable; it does not count as completed work. Limits and
+supported file types are listed in [Connectors](CONNECTORS.md#local-sources).
 
 ## Connect your model
 
@@ -216,11 +224,12 @@ See [the quality report](TESTING.md) for measurements and fault coverage.
 ## What stays on your machine
 
 There is no project-hosted backend or analytics endpoint. The server binds to
-localhost. In normal mode, the local JSON state contains synchronized email and
-document content, requests, evidence excerpts, drafts, and action history.
+localhost. In normal mode, the local JSON state can contain synchronized email,
+document and selected local-source content, requests, evidence excerpts, drafts,
+and action history.
 **Treat that state as personal data.** Do not attach it to an issue or PR.
 
-Google OAuth credentials can be entered in the local Connections setup panel or
+OAuth credentials can be entered in the local Connections setup panel or
 provided through the environment. The setup panel stores them separately from
 workspace state. Model keys can also be saved in that private setup file, with
 mode 0600 on systems supporting those permission bits, or provided through the
@@ -229,7 +238,8 @@ written atomically with restrictive file permissions and an exclusive process lo
 The permission bits depend on operating-system support; the state is not
 encrypted. Don't put it in a public or shared directory.
 
-Google mode contacts Google. An enabled model contacts its configured endpoint.
+Connected cloud sources contact their providers. An enabled model contacts its
+configured endpoint.
 The interface uses system fonts and makes no third-party font requests.
 The local demo makes no provider, model, or external font calls.
 

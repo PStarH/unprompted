@@ -51,7 +51,8 @@ of a real inbox, or account identifiers. If the problem cannot be reproduced
 without sensitive content, describe its structure and follow the
 [private reporting policy](../SECURITY.md) when appropriate.
 
-Optional account connections are explained in [Google Workspace](LIVE_INTEGRATION.md).
+Local and cloud source options are described in [Connectors](CONNECTORS.md),
+with detailed setup for [Google Workspace](LIVE_INTEGRATION.md).
 Read the [data-handling section](CONFIGURATION.md#what-stays-on-your-machine)
 before trying one. You can disconnect at any time.
 
@@ -124,6 +125,6 @@ fails the check. A successful sync is an operational result, not a participant
 case. This narrow check disables remote reasoning and does not measure optional
 model discovery quality.
 
-This implementation round tests the checker with local scripted services and
-invented records. It does not conduct a real participant trial or the actual
-actual product-comparison trial, and records no new validated real-user case.
+The checker has scripted coverage with local services and invented records.
+No real participant trial or product-comparison trial has been conducted, and
+there are no validated real-user cases yet.

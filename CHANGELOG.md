@@ -9,8 +9,11 @@ action → verified result loop for framework contributors.
 
 ### First experience
 
-- Choose Google Workspace, GitHub or Microsoft Outlook from the home page.
-  GitHub and Outlook use official device OAuth and verify the signed-in account
+- Choose local folders, Apple Notes on macOS, Google Workspace, GitHub or
+  Microsoft Outlook from the home page. Local file access is limited to selected
+  Markdown/text folders; Apple Notes is read-only and its real-account
+  permission flow still needs manual acceptance.
+- GitHub and Outlook use official device OAuth and verify the signed-in account
   before activation. Distributions can provision public Client IDs once;
   self-hosted installs can enter them in the application.
 - GitHub assignments retain native issue identity, repository, source link and

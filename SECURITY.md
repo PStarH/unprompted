@@ -31,8 +31,12 @@ basis; no response-time guarantee or bounty is offered.
   outcomes are reconciled before retrying.
 - Model output cannot approve an action, expand permission, or establish evidence
   on its own. An enabled remote model may receive request content.
+- Local folders and Apple Notes are limited to selected scopes and are read-only.
+  Apple Notes requires macOS Automation permission. Revoking access invalidates
+  source evidence; it does not establish that work is complete.
 - Local state contains synchronized content and evidence. It is not encrypted.
-  Credentials are read from the environment; don't store them in issues or fixtures.
+  OAuth and model credentials are kept in the private local setup file or
+  supplied by the environment; don't store them in issues or fixtures.
 
 See [configuration and data handling](docs/CONFIGURATION.md) for the complete
 mode and storage behavior.

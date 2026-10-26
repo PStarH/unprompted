@@ -36,19 +36,18 @@ connect model**. The application sends one real structured inference using
 invented content. Only a successful response saves the key locally and activates
 the connection; no restart is required. Keys are not returned by the API.
 
-Next, choose **Local folders, Apple Notes (macOS), Google Workspace, GitHub or Microsoft Outlook on the same page**.
-Local folders need no cloud account: select a folder containing Markdown or text.
-Apple Notes uses macOS Automation permission and selected folders; its real-account
-acceptance is still pending. [Source permissions and limits →](docs/CONNECTORS.md)
-GitHub and Outlook use official device OAuth: copy a short code, confirm it on
-the provider’s page, and the connection activates automatically. No access-token
-pasting is needed. A source can be disconnected without stopping the others.
-[Connector setup and extension guide](docs/CONNECTORS.md).
+Next, choose a source on the same page. **Local folders** work without a cloud
+account: select a folder containing Markdown or text. **Apple Notes** is
+macOS-only and asks for Automation permission; real-account acceptance is still
+pending. Google, GitHub and Outlook use your provider account. GitHub and Outlook
+use device authorization, so you confirm a short code on the provider’s page
+instead of copying tokens. Sources can be paused or disconnected independently.
+[Source permissions and limits →](docs/CONNECTORS.md)
 
-For Google, a distribution with a registered Desktop OAuth client opens Google consent directly. For a self-hosted
-checkout without that client, the page guides you through the one-time Google
-Cloud setup and accepts its downloaded JSON. No refresh-token copying or
-service restart is required.
+For Google, a distribution with a registered Desktop OAuth client opens Google
+consent directly. A self-hosted checkout without that client guides you through
+the one-time Google Cloud setup and accepts its downloaded JSON. No refresh-token
+copying or service restart is required.
 
 Authorization starts the first read immediately. Actual email and document
 content become model context; assigned GitHub issues retain their native source,
@@ -64,14 +63,6 @@ The interface supports English and Chinese. A busy default port is replaced
 automatically; `npm start -- --port 4180` chooses a specific port.
 [Download a source ZIP](https://github.com/PStarH/unprompted/archive/refs/heads/main.zip)
 if you prefer not to use Git.
-
-### Inspect the rule-based example separately
-
-`npm run demo` is an explicitly **rule-based local example**, with no model
-calls, saved accounts or external effects. It is useful for inspecting engine
-contracts. It is not the real-model agent experience or evidence of model quality.
-
-[First-run details and troubleshooting →](docs/QUICKSTART.md)
 
 ## What makes it proactive?
 
@@ -91,15 +82,6 @@ An email arrives → a commitment is discovered → evidence changes
   previously stated, explicitly scoped authorization. Uncertain outcomes are
   reconciled before a retry.
 
-<details>
-<summary>See connections in the current application</summary>
-
-![Actual connection interface, shown with synthetic provider accounts.](docs/assets/connections.png)
-
-Connection interface from the running application, shown with synthetic accounts.
-
-</details>
-
 ## What works today
 
 Unprompted is an **early, local-first prototype**. The event engine, evidence
@@ -109,9 +91,8 @@ is separate from model-backed operation.
 
 | Area | Current scope |
 | --- | --- |
-| Local demo | Self-starting scenario, evidence checks, prepared reply, simulated approval and verification |
 | Context | Email requests, native assigned issues, document updates and run records |
-| Local sources | Selected Markdown/text folders and a macOS Notes scripting bridge; read-only, explicit to-dos and document evidence |
+| Local sources | Selected Markdown/text folders (explicit to-dos) and a read-only macOS Notes bridge; real Notes account acceptance is pending |
 | GitHub | Device OAuth, assigned-issue discovery, update/reassignment tracking; read-only |
 | Microsoft Outlook | Device OAuth, inbox delta sync and model-backed request discovery; read-only |
 | Google Workspace | Optional Gmail / Drive / Docs connector; read-only setup is documented |
@@ -166,10 +147,11 @@ Connector events → WorkEngine → evidence / policy → provider → verified 
 boundaries, contracts and tests. The optional
 [Pi harness](docs/CONFIGURATION.md#pi-tool-loop) adds bounded document-reading
 tool calls; it requires Node.js 22.19+ and the optional packages. The core example
-and demo require neither.
+and demo require neither. To inspect the disposable browser simulation, run
+`npm run demo`; it does not use saved accounts or contact external services.
 
-Try the demo and tell us what you expected it to notice. Contribute a focused
-improvement; documentation, accessibility and synthetic regression cases all help.
+Contribute a focused improvement; documentation, accessibility and synthetic
+regression cases all help.
 
 - New to the code? Start with the [contributor guide](CONTRIBUTING.md) and
   [good first issues](https://github.com/PStarH/unprompted/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22).

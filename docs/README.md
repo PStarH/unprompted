@@ -1,14 +1,16 @@
 # Documentation
 
-Run `npm start`, connect your own model, then choose Google, GitHub or Microsoft
-Outlook. New sources apply without restarting. The explicit rule-only example
-is available to developers as `npm run demo`.
+Run `npm start`, connect your model, then choose a local or cloud source. Local
+folders need no cloud account; Apple Notes is available on macOS. New sources
+apply without restarting. The explicit rule-only example is available to
+developers as `npm run demo`.
 
 | I want to… | Read |
 | --- | --- |
 | Start using my real workspace | [Quick start](QUICKSTART.md) |
 | Connect accounts and recover authorization | [Account setup](ONBOARDING.md) |
 | Understand each connector and build another | [Connectors](CONNECTORS.md) |
+| Configure connectors in Chinese | [连接器配置](CONNECTORS.zh-CN.md) |
 | Configure a model, permissions or local storage | [Configuration](CONFIGURATION.md) |
 | Configure Google Workspace in detail | [Google integration](LIVE_INTEGRATION.md) |
 | Understand the engine and its boundaries | [Architecture](ARCHITECTURE.md) |

@@ -44,11 +44,11 @@ binary files are excluded. Observation is bounded to 500 text files, 512 KiB per
 file and 4 MiB of changed text per pass. Notes is bounded to 500 notes and
 512 Ki characters per note. Larger or inaccessible scopes produce a visible
 partial-read error; select a narrower folder. Only the first 100 explicit
-text to-dos in a document are tracked. `- [ ]`, `TODO:` and `☐` are supported;
-ordinary prose stays context. The Notes scripting interface does not expose
-native checklist completion reliably, so native Notes checkboxes are not a
-supported completion signal. A checked or removed source to-do never counts
-as verified agent completion.
+text to-dos in a supported local text document are tracked. `- [ ]`, `TODO:` and
+`☐` are supported; ordinary prose stays context. The Notes scripting interface
+does not expose native checklist completion reliably, so native Notes checkboxes
+are not a supported completion signal. A checked or removed source to-do never
+counts as verified agent completion.
 Local document viewing links work only on this computer. Local text can supply
 evidence, but external document delivery waits for a shareable document source;
 Unprompted does not send the recipient a loopback link.

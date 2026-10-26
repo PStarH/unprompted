@@ -28,29 +28,24 @@ npm start
 应用会用虚构内容发送一次真实的结构化推理请求；验证成功才保存并立即生效，无需重启。
 Key 只保存在本机，不会由 API 回传。
 
-接着在同一页选择 **Google Workspace、GitHub 或 Microsoft Outlook**。GitHub 和 Outlook
-使用官方设备 OAuth：复制短授权码，在官方页面确认后自动生效，无需手工粘贴访问令牌。
-可以同时连接多个来源，也可以单独断开其中一个。[连接器配置与开发指南](docs/CONNECTORS.md)。
+接着在同一页选择一个来源。**本地文件夹**无需云账号，选一个包含 Markdown 或文本文件的文件夹即可。**Apple 备忘录**仅支持 macOS，需要允许自动化访问；真实账号授权流程仍待人工验收。
+
+GitHub 和 Outlook 使用设备授权：复制短码并在官方页面确认，无需粘贴访问令牌。来源可分别暂停或断开。[连接器配置](docs/CONNECTORS.zh-CN.md) · [开发指南](docs/CONNECTORS.md)。
 
 Google 接入方面，预置了已注册桌面 OAuth 客户端的发行版可直接打开 Google 授权；
 自行部署且没有预置客户端时，页面会引导完成一次性的 Google Cloud 设置，并接收下载的 JSON。
 无需复制 refresh token，也无需重启服务。
 
-授权后立即切换到该账号独立的真实工作区，开始读取近期邮件和现有 Google Docs，交给已连接的模型理解。
-页面显示实际读取的邮件、文档和发现的工作；没有发现任务时如实说明。**正常启动不会播放样例或生成虚构任务。**
+Google 授权后会切换到该账号独立的真实工作区，并立即读取近期邮件和现有 Google Docs。
+选择本地文件夹或备忘录后，只读取你选定的范围。已连接的模型会处理实际读取的内容；页面显示读取量和发现的工作，没有发现时如实说明。
+
+**正常启动不会播放样例或生成虚构任务。**
 
 首次只申请读取，可以随时暂停观察。发送邮件与修改文档另行开启；每项操作仍需匹配你的批准或已有授权。
 模型失败时任务不会退回规则逻辑并显示可发送。
 
 界面支持中英文。默认端口被占用时会自动选择可用端口；也可运行 `npm start -- --port 4180` 指定。
 不使用 Git 时，可[下载源码 ZIP](https://github.com/PStarH/unprompted/archive/refs/heads/main.zip) 后运行相同命令。
-
-### 单独查看规则示例
-
-`npm run demo` 是明确标注的**本地规则示例**，不调用模型、不读取保存的账号、不产生外部效果。
-它用于检查框架契约，不代表真实模型 Agent 的能力。
-
-[首次运行与常见问题 →](docs/QUICKSTART.md)
 
 ## 主动性体现在哪里？
 
@@ -65,15 +60,6 @@ Google 接入方面，预置了已注册桌面 OAuth 客户端的发行版可直
 - **主动准备**：回复、文档链接、来源和已核对的要求一起备好，供你审阅。
 - **适时询问**：对外动作需要批准，或你事先明确授予、范围匹配的权限；结果未知时先核实，再决定是否重试。
 
-<details>
-<summary>查看当前应用的连接界面</summary>
-
-![当前应用的连接界面，使用合成账号展示。](docs/assets/connections.png)
-
-这是运行中的连接界面，截图使用合成账号。
-
-</details>
-
 ## 当前能做什么？
 
 这是一个**早期、本地优先的原型**。事件引擎、证据核对、审批、持久化、界面以及模拟工作闭环已经实现。
@@ -81,8 +67,8 @@ Google 接入方面，预置了已注册桌面 OAuth 客户端的发行版可直
 
 | 模块 | 当前范围 |
 | --- | --- |
-| 本地演示 | 自动开始、核对证据、准备回复、模拟审批与核验 |
 | 上下文 | 邮件请求、原生 GitHub issue、文档变更、运行记录 |
+| 本机来源 | 指定的 Markdown / 文本文件夹；macOS 上可选 Apple 备忘录，只读（真实账号验收待完成） |
 | GitHub | 官方设备 OAuth、分配给自己的 issue、更新及改派跟进；只读 |
 | Microsoft Outlook | 官方设备 OAuth、收件箱增量同步、模型理解邮件请求；只读 |
 | Google Workspace | 可选 Gmail / Drive / Docs 连接器，有只读配置指引 |
@@ -97,14 +83,13 @@ Google 接入方面，预置了已注册桌面 OAuth 客户端的发行版可直
 
 ## 接入自己的工作环境
 
-`npm start` 打开持久化模型与来源设置，用于处理**自己的真实工作**。可以选择 Google、GitHub 或 Outlook，来源**默认只读**。
+`npm start` 打开持久化模型与来源设置，用于处理**自己的真实工作**。可以选择本地文件夹、macOS 备忘录、Google、GitHub 或 Outlook，来源**默认只读**。
 首次连接、首轮观察、增量权限、暂停、重试和断开均可在界面完成，无需重启；不同 Google 账号使用独立工作区：
 
-- [本地应用与浏览器接入](docs/ONBOARDING.md)
-- [选择或开发连接器](docs/CONNECTORS.md)
-- [连接 Gmail 和 Drive](docs/LIVE_INTEGRATION.md)
-- [配置与数据处理](docs/CONFIGURATION.md)
-- [API 文档](docs/API.md)
+- [连接器配置](docs/CONNECTORS.zh-CN.md) · [连接器开发指南（English）](docs/CONNECTORS.md)
+- [桌面应用与 OAuth 进阶配置（English）](docs/ONBOARDING.md)
+- [Google Workspace 详细接入（English）](docs/LIVE_INTEGRATION.md)
+- [本机数据与隐私说明（English）](docs/CONFIGURATION.md)
 
 服务仅绑定 `127.0.0.1`，没有登录鉴权，适合在自己的电脑运行。
 工作上下文会发送给所选模型提供方。显式运行的规则示例不调用模型。
@@ -122,6 +107,8 @@ npm run example -- --approve
 第二条明确授权一次**模拟发送**，核验回执，并检查重复事件不会重复发送。
 修改[示例代码](examples/first-workflow.mjs)即可更换请求与证据；
 [扩展指南](docs/EXTENDING.md)说明实际模块边界、契约和测试入口。
+
+开发者可运行 `npm run demo` 查看本地规则模拟；它不调用模型、不读取保存的账号，也不会访问外部服务。
 
 可选 [Pi 内核](docs/CONFIGURATION.md#pi-tool-loop) 提供有预算的文档读取工具循环，
 需要 Node.js 22.19+ 和可选依赖。基础演示和示例都不需要。

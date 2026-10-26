@@ -101,10 +101,9 @@ macOS, and Linux. Node's `--test-*` options are forwarded. `test:fast` excludes
 `api.test.js`, `framework-eval.test.js`, and `generalization.test.js`.
 The syntax check uses Git's NUL-delimited list of tracked and unignored files,
 skips symlinks, and must be run from a Git working tree; it reports an explicit
-error when Git metadata is unavailable.
-GitHub CI has a lightweight Node 22 tooling job for Ubuntu, Windows, and macOS.
-This working session has only been verified locally on macOS; results from the
-new cross-platform matrix are pending execution by GitHub Actions.
+error when Git metadata is unavailable. GitHub Actions also runs the tooling
+check on Ubuntu, Windows, and macOS; check the latest workflow run for its
+current result.
 
 ## Full checks
 
@@ -194,4 +193,7 @@ reads and delivery isolation. `test/connections-api.test.js` runs the actual
 server against scripted local provider HTTP responses. `npm run test:connections`
 exercises the browser's provider selection, code copy, authorization, native work,
 pause, source disconnect and bilingual responsive layouts. No real account is
-used by these contracts; publishers still need actual registered-app acceptance.
+used by these contracts. Apple Notes uses injected responses, so a real Notes
+account and the signed app's macOS Automation prompt still need manual
+acceptance. Publishers also need to accept their registered cloud apps with
+real accounts.
