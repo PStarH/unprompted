@@ -85,6 +85,18 @@ and passes Node's `--test-*` filters through on Windows, macOS, and Linux.
 
 ## Choose useful work
 
+These starter tasks include code entry points, scope and acceptance checks:
+
+- [Remember the selected connection panel · #6](https://github.com/PStarH/unprompted/issues/6)
+- [Show the next observation time · #7](https://github.com/PStarH/unprompted/issues/7)
+- [Write the Chinese connector setup guide · #8](https://github.com/PStarH/unprompted/issues/8)
+
+They build on [the real-workspace connector PR](https://github.com/PStarH/unprompted/pull/5).
+Until it merges, use its branch as explained in each issue. Larger connector
+tasks are [GitHub repository selection · #9](https://github.com/PStarH/unprompted/issues/9),
+[Notion · #10](https://github.com/PStarH/unprompted/issues/10), and
+[Slack · #11](https://github.com/PStarH/unprompted/issues/11).
+
 | Contribution | A good starting point |
 | --- | --- |
 | Explain a confusing setup step | [First-run guide](docs/QUICKSTART.md), [configuration](docs/CONFIGURATION.md) |
