@@ -50,6 +50,9 @@ import { ingestAssignedIssue } from './external-work.js';
  */
 
 const stamp = () => new Date().toISOString();
+const setOwnRecord = (records, id, value) => {
+  Object.defineProperty(records, id, { value, enumerable: true, configurable: true, writable: true });
+};
 const record = (state, kind, text, taskId = null, eventId = null) => {
   state.history.push({ id: `h-${state.history.length + 1}`, at: stamp(), kind, text, taskId, eventId });
 };
@@ -838,7 +841,7 @@ export class WorkEngine {
     }
     this.store.mutate(state => {
       const previous = state.documents[docId];
-      state.documents[docId] = {
+      setOwnRecord(state.documents, docId, {
         id: docId,
         title: doc.title,
         kind: doc.kind || 'document',
@@ -852,12 +855,12 @@ export class WorkEngine {
         available: true,
         unavailableReason: null,
         unavailableAt: null
-      };
+      });
       state.events.push(event);
       event.summary = `Document changed · ${doc.title}`;
       const related = Object.values(state.tasks).filter(task =>
         !isSettled(task) && !this.#documentExcludedByFeedback(task, docId) &&
-        rankCandidates(task.request, { [docId]: state.documents[docId] }).best);
+        rankCandidates(task.request, Object.fromEntries([[docId, state.documents[docId]]])).best);
       event.relations = related.map(task => task.id);
       event.disposition = related.length ? 'related_change'
         : Object.keys(state.tasks).length ? 'unrelated_change' : 'context_only';
@@ -900,7 +903,7 @@ export class WorkEngine {
       const currentPrevious = state.documents[docId];
       const title = doc.title || previous?.title || docId;
       const unavailableAt = event.at || stamp();
-      state.documents[docId] = {
+      setOwnRecord(state.documents, docId, {
         ...(currentPrevious || {
           id: docId,
           kind: 'document',
@@ -916,13 +919,13 @@ export class WorkEngine {
         unavailableReason: doc.reason || 'unavailable',
         unavailableAt,
         observedAt: event.at || stamp()
-      };
+      });
       state.events.push(event);
       event.summary = `Document unavailable · ${title}`;
       relations = Object.values(state.tasks).filter(task =>
         !isSettled(task) && !this.#documentExcludedByFeedback(task, docId) && (
           task.documentId === docId ||
-          rankCandidates(task.request, { [docId]: state.documents[docId] }).best
+          rankCandidates(task.request, Object.fromEntries([[docId, state.documents[docId]]])).best
         )).map(task => task.id);
       event.relations = relations;
       event.disposition = relations.length ? 'evidence_invalidated' : 'unrelated_change';
@@ -945,11 +948,11 @@ export class WorkEngine {
     const incoming = runRecord(payload);
     this.store.mutate(state => {
       state.events.push(event);
-      state.runRecords[incoming.id] = incoming;
+      setOwnRecord(state.runRecords, incoming.id, incoming);
       event.summary = `Run recorded · ${incoming.label}`;
       const related = Object.values(state.tasks).filter(task =>
         !isSettled(task) &&
-        relevantRuns({ [incoming.id]: incoming }, task.request.subjectEntity).length > 0);
+        relevantRuns(Object.fromEntries([[incoming.id, incoming]]), task.request.subjectEntity).length > 0);
       event.relations = related.map(task => task.id);
       event.disposition = related.length ? 'related_change' : 'context_only';
       record(state, 'observation', related.length

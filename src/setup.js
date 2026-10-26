@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createServer } from 'node:http';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { connectionProvider, validPublicClientId } from './connection-catalog.js';
+import { readRegularFile } from './local-files.js';
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 const MIN_INTERVAL_MS = 15_000;
@@ -101,10 +102,7 @@ export class LocalSetupStore {
 
   #read() {
     try {
-      const stat = fs.lstatSync(this.filePath);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Local setup file must be a regular file.');
-      try { fs.chmodSync(this.filePath, 0o600); } catch { /* best effort */ }
-      this.state = normalise(JSON.parse(fs.readFileSync(this.filePath, 'utf8')));
+      this.state = normalise(JSON.parse(readRegularFile(this.filePath, { mode: 0o600 })));
     } catch (error) {
       if (error.code === 'ENOENT') this.state = clone(DEFAULT_STATE);
       else if (error instanceof SyntaxError) throw new Error('The local setup file is invalid JSON; move it aside to restore defaults.');

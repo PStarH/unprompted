@@ -20,6 +20,13 @@ export class EventValidationError extends Error {
   }
 }
 
+export function validateRecordId(value) {
+  if ((typeof value !== 'string' && typeof value !== 'number') || !String(value).trim() || String(value).length > 2048
+    || value === '__proto__' || value === 'constructor' || value === 'prototype') {
+    throw new EventValidationError('Payload id must be a non-reserved record identifier.');
+  }
+}
+
 /**
  * Build a normalized event. The id is namespaced by connector so two providers
  * cannot collide, and re-delivery of the same provider event is detectable.
@@ -71,6 +78,7 @@ export function validateRunPayload(payload) {
 }
 
 export function validateEventPayload(event) {
+  validateRecordId(event.payload?.id);
   if (event.type === 'issue.updated') {
     const issue = event.payload;
     if (!issue?.id || typeof issue.title !== 'string' || !issue.repository || !Number.isSafeInteger(issue.number)

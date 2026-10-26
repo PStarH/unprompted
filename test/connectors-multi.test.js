@@ -20,6 +20,32 @@ const issue = (patch = {}) => ({ id: 4, number: 7, title: 'Investigate retry beh
 function store(t) { const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-multi-source-')); const result = new JsonStore(path.join(directory, 'state.json'));
   t.after(() => { result.close(); fs.rmSync(directory, { recursive: true, force: true }); }); return result; }
 
+test('reserved external record identifiers cannot mutate record prototypes or advance state', t => {
+  const state = store(t), engine = new WorkEngine(state), revision = state.state.revision;
+  for (const type of ['document.modified', 'document.unavailable', 'record.published']) {
+    for (const id of ['__proto__', 'constructor', 'prototype', { nested: 'id' }]) {
+      assert.throws(() => engine.ingest({ id: `invalid-${type}-${JSON.stringify(id)}`, type,
+        payload: { id, title: 'Untrusted source', content: 'Actual text', completedAt: '2026-10-26T10:00:00Z' } }), /record identifier/);
+    }
+  }
+  assert.equal(state.state.revision, revision);
+  assert.deepEqual(state.state.documents, {});
+  assert.deepEqual(state.state.runRecords, {});
+  assert.equal(Object.getPrototypeOf(state.state.documents), Object.prototype);
+});
+
+test('Outlook HTML fallback extracts source text with quoted tags, comments, raw text and entities', async () => {
+  const connector = new OutlookConnector({ auth, account: { id: 'ms', label: 'reader@example.test' }, fetchImpl: async () => json({
+    value: [{ id: 'mail', subject: 'Plan', from: { emailAddress: { address: 'sender@example.test' } }, receivedDateTime: '2026-10-26T10:00:00Z',
+      body: { contentType: 'html', content: '<style>hidden</style><p title="1 > 0">Send the plan &amp; costs.</p><!-- secret > --><script>bad()</script><div>&lt;literal&gt; &#x96EA; &#38634; &#x110000;</div>' } }],
+    '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?token=fixture'
+  }) });
+  const result = await connector.pull(), body = result.events[0].payload.body;
+  assert.match(body, /Send the plan & costs\./);
+  assert.match(body, /<literal> 雪 雪 &#x110000;/);
+  assert.doesNotMatch(body, /hidden|secret|bad\(\)|title=/);
+});
+
 test('GitHub creates native assigned-issue events and follows reassignment without inventing mail or completion', async t => {
   let reassign = false;
   const connector = new GitHubConnector({ auth, account, fetchImpl: async url => url.includes('/issues?')

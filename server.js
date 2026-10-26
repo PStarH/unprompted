@@ -22,6 +22,7 @@ import { CONNECTION_PROVIDERS, publicClientConfiguration } from './src/connectio
 import { DeviceOAuth } from './src/device-oauth.js';
 import { connectedSources, sourceCounts } from './src/connected-sources.js';
 import { bindConnectionAccount } from './src/external-work.js';
+import { readRegularFile } from './src/local-files.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4173);
@@ -40,10 +41,8 @@ const localSetup = new LocalSetupStore({ filePath: process.env.UNPROMPTED_SETUP_
 let setupState = localSetup.get();
 const connectionClientFile = process.env.UNPROMPTED_CONNECTOR_CLIENTS_FILE || path.join(root, 'connector-clients.json');
 let provisionedConnections = {};
-if (fs.existsSync(connectionClientFile)) {
-  if (fs.statSync(connectionClientFile).size > 64 * 1024) throw new Error('Connector client configuration is too large.');
-  provisionedConnections = publicClientConfiguration(JSON.parse(fs.readFileSync(connectionClientFile, 'utf8')));
-}
+try { provisionedConnections = publicClientConfiguration(JSON.parse(readRegularFile(connectionClientFile, { maxBytes: 64 * 1024 }))); }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
 for (const provider of Object.values(CONNECTION_PROVIDERS)) {
   const clientId = process.env[provider.clientEnv] || provisionedConnections[provider.id]?.clientId;
   if (clientId && !localSetup.getConnection(provider.id).clientId) localSetup.saveConnectionClient(provider.id, clientId);

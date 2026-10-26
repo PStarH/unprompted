@@ -68,8 +68,10 @@ jobs:
 
   browser:
     name: First-run and interaction contracts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      UNPROMPTED_BROWSER_CHANNEL: chrome
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,7 +87,9 @@ jobs:
       - name: Install browser test tooling
         run: |
           npm install --prefix "$RUNNER_TEMP/unprompted-browser" --no-package-lock --ignore-scripts --no-audit --no-fund playwright@1.58.2
-          node "$RUNNER_TEMP/unprompted-browser/node_modules/playwright/cli.js" install --with-deps chromium
+          # The hosted image includes Chrome and its system dependencies.
+          # Avoid upgrading unrelated apt packages before every browser run.
+          google-chrome --version
 
       - name: Run actual first-use story
         env:

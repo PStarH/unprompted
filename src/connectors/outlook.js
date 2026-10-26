@@ -6,8 +6,43 @@ const DELTA = '/v1.0/me/mailFolders/inbox/messages/delta';
 function textBody(body) {
   const content = String(body?.content || '');
   if (String(body?.contentType).toLowerCase() !== 'html') return content;
-  return content.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<\s*(?:br\s*\/?|\/p|\/div)>/gi, '\n')
-    .replace(/<[^>]*>/g, '').replace(/&(amp|lt|gt|quot|apos|nbsp);/g, (_, name) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[name]);
+  // Extract text rather than attempting to sanitize HTML. This result is still
+  // untrusted source text and must be escaped by every HTML renderer.
+  let text = '', offset = 0, ignored = null;
+  while (offset < content.length) {
+    if (content.startsWith('<!--', offset)) {
+      const end = content.indexOf('-->', offset + 4);
+      offset = end < 0 ? content.length : end + 3;
+      continue;
+    }
+    if (content[offset] !== '<') {
+      if (!ignored) text += content[offset];
+      offset++;
+      continue;
+    }
+    let end = offset + 1, quote = null;
+    for (; end < content.length; end++) {
+      const character = content[end];
+      if (quote) { if (character === quote) quote = null; }
+      else if (character === '"' || character === "'") quote = character;
+      else if (character === '>') break;
+    }
+    if (end === content.length) { if (!ignored) text += content.slice(offset); break; }
+    const tag = content.slice(offset + 1, end).trim();
+    const match = tag.match(/^(\/?)\s*([a-z][a-z0-9:-]*)/i);
+    const closing = match?.[1] === '/', name = match?.[2]?.toLowerCase();
+    if (ignored) { if (closing && name === ignored) ignored = null; }
+    else if (!closing && (name === 'script' || name === 'style')) ignored = name;
+    else if (name === 'br' || closing && ['p', 'div', 'li'].includes(name)) text += '\n';
+    offset = end + 1;
+  }
+  return text.replace(/&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[\da-f]+);/gi, (entity, name) => {
+    const key = name.toLowerCase();
+    if (key[0] !== '#') return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[key];
+    const point = key[1] === 'x' ? Number.parseInt(key.slice(2), 16) : Number(key.slice(1));
+    return Number.isInteger(point) && point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff)
+      ? String.fromCodePoint(point) : entity;
+  });
 }
 
 export class OutlookConnector extends Connector {

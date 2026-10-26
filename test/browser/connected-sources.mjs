@@ -76,7 +76,7 @@ try {
   assert.equal(setup.monitoring.enabled, false);
   assert.doesNotMatch(await page.evaluate(() => JSON.stringify(localStorage)), /PRIVATE_/);
   assert.doesNotMatch(JSON.stringify(setup), /PRIVATE_|accessToken|refreshToken/);
-  assert.equal(fixture.calls.some(call => /\/send|\/comments$/.test(call.path)), false);
+  assert.equal(fixture.calls.some(call => /\/(?:send|comments)$/.test(call.path)), false);
   record('disconnecting-one-source-retains-the-other-and-no-provider-write-is-issued');
   assert.deepEqual(errors, []);
 } catch (error) {

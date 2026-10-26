@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { publicClientConfiguration } from '../src/connection-catalog.js';
+import { readRegularFile } from '../src/local-files.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NODE_VERSION = 'v22.23.4';
@@ -31,8 +32,7 @@ for (let index = 0; index < args.length; index++) {
 }
 let provisionedGoogleClient = null;
 if (googleClientFile) {
-  if (fs.statSync(googleClientFile).size > 64 * 1024) throw new Error('The Google Desktop client JSON must be smaller than 64 KB.');
-  const json = JSON.parse(fs.readFileSync(googleClientFile, 'utf8'));
+  const json = JSON.parse(readRegularFile(googleClientFile, { maxBytes: 64 * 1024 }));
   const client = json?.installed;
   if (typeof client?.client_id !== 'string' || !client.client_id.trim() || client.client_id.length > 512
     || typeof client?.client_secret !== 'string' || !client.client_secret.trim() || client.client_secret.length > 1024 || json.web
@@ -44,8 +44,7 @@ if (googleClientFile) {
 if (fs.existsSync(output)) throw new Error(`Output already exists; move it aside or choose --out PATH: ${output}`);
 let provisionedConnectorClients = null;
 if (connectorClientFile) {
-  if (fs.statSync(connectorClientFile).size > 64 * 1024) throw new Error('Connector client configuration is too large.');
-  provisionedConnectorClients = publicClientConfiguration(JSON.parse(fs.readFileSync(connectorClientFile, 'utf8')));
+  provisionedConnectorClients = publicClientConfiguration(JSON.parse(readRegularFile(connectorClientFile, { maxBytes: 64 * 1024 })));
 }
 
 const archiveName = `node-${NODE_VERSION}-darwin-${arch}.tar.gz`;

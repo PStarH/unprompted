@@ -375,8 +375,12 @@ test('setup API, state and SSE redact saved OAuth credentials and persist observ
   assert.equal(monitoring.enabled, false);
   assert.equal(monitoring.intervalMs, 60_000);
   const setupFile = path.join(configDir, 'setup.json');
-  assert.equal(fs.statSync(setupFile).mode & 0o777, 0o600);
-  const localFile = fs.readFileSync(setupFile, 'utf8');
+  const descriptor = fs.openSync(setupFile, 'r');
+  let localFile;
+  try {
+    assert.equal(fs.fstatSync(descriptor).mode & 0o777, 0o600);
+    localFile = fs.readFileSync(descriptor, 'utf8');
+  } finally { fs.closeSync(descriptor); }
   assert.match(localFile, /api-private-client-secret/);
   assert.match(localFile, /api-private-refresh-token/);
 });
