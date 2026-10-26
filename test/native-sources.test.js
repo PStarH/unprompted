@@ -14,6 +14,7 @@ import { WorkEngine } from '../src/engine.js';
 import { bindConnectionAccount } from '../src/external-work.js';
 import { LocalSetupStore } from '../src/setup.js';
 import { CursorStore } from '../src/connectors/connector.js';
+import { buildScenario } from '../src/connectors/simulated.js';
 
 function directory(t) { const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-native-'))); t.after(() => fs.rmSync(dir, { recursive: true, force: true })); return dir; }
 const scopeId = 'selected-scope';
@@ -131,4 +132,17 @@ test('public state and runtime cursor descriptions omit native provider IDs and 
   assert.doesNotMatch(JSON.stringify(new WorkEngine(store).publicState()), /PRIVATE_|"stamp"/);
   assert.doesNotMatch(JSON.stringify(new CursorStore(store).describe()), /PRIVATE_|"stamp"/);
   assert.equal(new CursorStore(store).get('apple_notes').documents['apple_notes:public'].providerId, 'PRIVATE_NOTE_ID');
+});
+
+test('local documents can supply evidence but never become an externally delivered loopback link', t => {
+  for (const source of ['local_files', 'apple_notes']) {
+    const dir = directory(t), store = new JsonStore(path.join(dir, 'state.json')); t.after(() => store.close());
+    const engine = new WorkEngine(store);
+    for (const { event } of buildScenario(Date.now())) engine.ingest(event.type === 'document.modified' ? { ...event, source, connectorId: source,
+      payload: { ...event.payload, url: `http://127.0.0.1:4173/api/local-sources/documents/${encodeURIComponent(event.payload.id)}` } } : event);
+    const task = Object.values(store.state.tasks)[0];
+    assert.equal(task.status, 'waiting_for_information'); assert.equal(task.draft, null);
+    assert.ok(task.evidence.completion.blockers.some(item => item.id === 'local_document_not_shared'));
+    assert.throws(() => engine.approve(task.id)); assert.equal(store.state.outbox.length, 0);
+  }
 });

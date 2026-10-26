@@ -1443,6 +1443,12 @@ export class WorkEngine {
     }
     if (ambiguous) freshnessBlockers.push({ id: 'ambiguous_document', detail: `Ambiguous document match: ${contenders.join(', ')}.` });
     if (!document) freshnessBlockers.push({ id: 'no_document', detail: 'No document with an identity link to this request has been observed.' });
+    if (['local_files', 'apple_notes'].includes(document?.source)) {
+      const detail = 'This document is only available on this computer. A shareable document is required before preparing an external delivery.';
+      freshnessBlockers.push({ id: 'local_document_not_shared', detail });
+      unknowns.push(unknownItem({ id: 'local_document_not_shared', question: 'How will the recipient access this document?', reason: detail,
+        whatWouldResolveIt: 'Connect a shared document source. Local viewing links cannot be delivered to an external recipient.' }));
+    }
 
     const completion = completionFromCriteria(criteria, { blockers: freshnessBlockers });
     const complete = completion.complete && !this.#primaryReviewMissing(task);

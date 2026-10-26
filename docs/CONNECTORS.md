@@ -49,6 +49,9 @@ ordinary prose stays context. The Notes scripting interface does not expose
 native checklist completion reliably, so native Notes checkboxes are not a
 supported completion signal. A checked or removed source to-do never counts
 as verified agent completion.
+Local document viewing links work only on this computer. Local text can supply
+evidence, but external document delivery waits for a shareable document source;
+Unprompted does not send the recipient a loopback link.
 
 The Notes bridge uses Apple's public scripting interface, not the private Notes
 database. Automated tests use injected Notes responses; a real Notes account and

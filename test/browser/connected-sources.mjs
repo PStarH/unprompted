@@ -97,7 +97,7 @@ try {
   record('selected-local-folder-produces-real-source-task-without-email-actions');
   await localTask.locator('[data-action="cancel"]').click();
   await page.waitForFunction(() => !document.querySelector('#taskContent [data-task-card^="observed:"]'));
-  record('local-task-stops-directly-from-its-card');
+  record('native-card-stop-without-navigation');
   await page.locator('[data-view="sources"]').click();
   await sources.locator('[data-connection-card="local_files"] [data-native-operation="remove-scope"]').click();
   await page.waitForFunction(() => !document.querySelector('#connectorContent [data-connection-card="local_files"] [data-native-operation="forget"]'));
