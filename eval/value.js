@@ -6,12 +6,12 @@
  *   npm run eval:value -- --json  machine-readable output
  *
  * The generalization suite asks "did the system decide correctly?". This runner
- * asks six product-value questions instead: how much of the discovered work was
+ * reports scripted workflow activity and quality proxies: how much discovered work was
  * valuable, how much was noise, how often a completion was independently
  * verified, how often the user was interrupted, how much follow-through was
  * absorbed, and how often the user had to take over.
  *
- * These are measurements, not a score — but one invariant is enforced, because it
+ * These fixtures do not establish real-user value. One invariant is enforced, because it
  * is a correctness guarantee rather than a target: a task must never be counted
  * complete without a verified result. The run fails if that is ever violated.
  */
@@ -76,16 +76,17 @@ const violated = totals.unverifiedCompletions !== 0
   || totals.verifiedCompletions !== totals.verifiedByReceipt;
 
 if (asJson) {
-  console.log(JSON.stringify({ totals, scenarios: perScenario }, null, 2));
+  console.log(JSON.stringify({ kind: 'scripted-workflow-outcomes', evidenceScope: 'synthetic', realUserValue: 'not_measured', totals, scenarios: perScenario }, null, 2));
 } else {
-  console.log(`Product-value evaluation — ${totals.scenarios} scenarios across ${totals.categories} categories\n`);
+  console.log(`Scripted workflow outcome evaluation — ${totals.scenarios} scenarios across ${totals.categories} categories\n`);
+  console.log('  evidence scope:         synthetic; real-user value is not measured\n');
   console.log(`  discovered work:        ${totals.discovered}`);
-  console.log(`  ├─ valuable:            ${totals.valuable} (${pct(totals.valuableRate)})`);
+  console.log(`  ├─ prepared/verified activity proxy: ${totals.valuable} (${pct(totals.valuableRate)})`);
   console.log(`  ├─ unservable (automatic proxy, not a user label): ${totals.unservable} (${pct(totals.unservableRate)})`);
   console.log(`  ├─ awaiting evidence:   ${totals.waiting}`);
   console.log(`  └─ closed by user:      ${totals.closed}`);
   console.log(`\n  taxonomy (from src/metrics.js):`);
-  console.log(`    valuable          = reached a prepared, evidence-backed action or a verified completion`);
+  console.log(`    legacy valuable   = prepared or verified activity; not user-recognized value`);
   console.log(`    unservable        = automatic proxy: no correlated document and no probe for the requested content`);
   console.log(`    awaiting evidence = a real discovery still missing evidence; filtered, not counted as noise`);
   console.log(`    closed            = the user ended a waiting request; neither noise nor unfinished work`);

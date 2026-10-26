@@ -115,6 +115,40 @@ test('the default runtime is read-only and names the documented way to watch the
   assert.doesNotMatch(optedOut.report.note, /UNPROMPTED_SHADOW_MODE/);
 });
 
+test('desktop simulation can complete local actions without persisting authority for a later live runtime', () => {
+  const store = storeIn();
+  const env = { UNPROMPTED_SHADOW_MODE: 'true' };
+  const local = buildRuntime(env, { store, allowSimulatedActions: true });
+  assert.equal(local.mode, 'simulation');
+  assert.equal(local.shadow, false);
+  assert.equal(local.policy.shadow, false);
+  assert.equal(local.provider.kind, 'simulated');
+  assert.equal(local.report.google.sendEnabled, false);
+  assert.equal(env.UNPROMPTED_SHADOW_MODE, 'true');
+  assert.equal(buildRuntime(env, { store }).shadow, true);
+});
+
+test('desktop simulation convenience never disables live read-only policy', () => {
+  const store = storeIn();
+  const runtime = buildRuntime({ GOOGLE_CLIENT_ID: 'cid', GOOGLE_CLIENT_SECRET: 'secret',
+    GOOGLE_REFRESH_TOKEN: 'refresh', GOOGLE_SEND_ENABLED: 'true' }, { store, allowSimulatedActions: true });
+  assert.equal(runtime.mode, 'live');
+  assert.equal(runtime.shadow, true);
+  assert.equal(runtime.policy.shadow, true);
+  assert.equal(runtime.provider.kind, 'gmail');
+  assert.equal(runtime.provider.canSend, false);
+  assert.equal(runtime.report.google.sendEnabled, false);
+});
+
+test('desktop simulation convenience cannot enable writes into a recorded real workspace', () => {
+  const store = storeIn();
+  store.mutate(state => { state.events.push({ id: 'recorded-real', source: 'google' }); });
+  const runtime = buildRuntime({}, { store, allowSimulatedActions: true });
+  assert.equal(runtime.shadow, true);
+  assert.equal(runtime.policy.shadow, true);
+  assert.equal(runtime.provider.kind, 'simulated');
+});
+
 test('runtime selects the live Google provider when credentials and send are configured', () => {
   const store = storeIn();
   const runtime = buildRuntime({
@@ -131,7 +165,8 @@ test('live mode is read-only unless send is explicitly enabled', () => {
   const store = storeIn();
   const runtime = buildRuntime({ GOOGLE_CLIENT_ID: 'cid', GOOGLE_CLIENT_SECRET: 's', GOOGLE_REFRESH_TOKEN: 'r' }, { store });
   assert.equal(runtime.mode, 'live');
-  assert.equal(runtime.provider.kind, 'simulated', 'a read-only live connector must not be able to send');
+  assert.equal(runtime.provider.kind, 'gmail', 'a read-only live connector retains its real provider identity');
+  assert.equal(runtime.provider.canSend, false, 'read-only never enables delivery');
   assert.match(runtime.report.note, /read-only/i);
 });
 
@@ -189,7 +224,8 @@ test('a rate-limited GET is retried with a bounded backoff', async () => {
     ['drive/v3/changes/startPageToken', () => {
       attempts += 1;
       return attempts === 1 ? jsonResponse({ error: 'rate limited' }, 429) : jsonResponse({ startPageToken: 'p-1' });
-    }]
+    }],
+    ['drive/v3/files?', jsonResponse({ files: [] })]
   ]);
   const connector = new GoogleWorkspaceConnector({
     config: {
@@ -446,13 +482,18 @@ test('an expired gmail history cursor falls back to a bounded query instead of l
 
 // ------------------------------------------------------------------ drive pull
 
-test('the first drive sync only establishes a baseline and replays nothing', async () => {
-  const { fetchImpl, calls } = scriptedFetch([tokenRoute, ['drive/v3/changes/startPageToken', jsonResponse({ startPageToken: 'p-1' })]]);
+test('the first drive sync captures its baseline before reading existing documents immediately', async () => {
+  const { fetchImpl, calls } = scriptedFetch([tokenRoute,
+    ['drive/v3/changes/startPageToken', jsonResponse({ startPageToken: 'p-1' })],
+    ['drive/v3/files?', jsonResponse({ files: [{ id: 'first-doc', name: 'Current proposal', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-10-26T08:00:00Z', version: '1' }] })],
+    ['drive/v3/files/first-doc/export', textResponse('Sample size: 1200. Conclusion: proceed.')]
+  ]);
   const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false }, fetchImpl });
   const result = await connector.pull({ cursor: null });
-  assert.equal(result.events.length, 0);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].payload.id, 'first-doc');
   assert.equal(result.cursor.drive.pageToken, 'p-1');
-  assert.equal(calls.some(call => call.url.includes('/files?')), false, 'the baseline must not list existing files');
+  assert.ok(calls.findIndex(call => call.url.includes('/changes/startPageToken')) < calls.findIndex(call => call.url.includes('/files?')), 'capture the baseline before listing so changes arriving during listing are retained');
 });
 
 test('drive change tracking exports google docs into normalized document events', async () => {
@@ -652,7 +693,8 @@ test('a gmail failure is reported and produces no synthetic events', async () =>
   const { fetchImpl } = scriptedFetch([
     tokenRoute,
     ['gmail/v1/users/me/history', jsonResponse({ error: 'unauthorised' }, 401)],
-    ['drive/v3/changes/startPageToken', jsonResponse({ startPageToken: 'p-1' })]
+    ['drive/v3/changes/startPageToken', jsonResponse({ startPageToken: 'p-1' })],
+    ['drive/v3/files?', jsonResponse({ files: [] })]
   ]);
   const connector = new GoogleWorkspaceConnector({ config: CREDENTIALS, fetchImpl });
   const result = await connector.pull({ cursor: { gmail: { historyId: 'h1' } } });

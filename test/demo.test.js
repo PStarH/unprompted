@@ -41,6 +41,13 @@ test('one-command demo ignores credentials and saved state, then verifies only a
     assert.equal(health.shadow, false);
     const runtime = await (await fetch(`${base}/api/runtime`)).json();
     assert.equal(runtime.google.sendEnabled, false);
+    assert.equal(runtime.demo.enabled, true);
+    const beforeViewing = await (await fetch(`${base}/api/state`)).json();
+    assert.equal(beforeViewing.events.length, 0);
+    const controller = new AbortController();
+    const stream = await fetch(`${base}/api/stream`, { signal: controller.signal });
+    await stream.body.getReader().read();
+    controller.abort();
     let ready;
     for (let i = 0; i < 90; i++) {
       ready = await (await fetch(`${base}/api/state`)).json();

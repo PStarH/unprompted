@@ -13,6 +13,8 @@ data/
 client_secret*.json
 credentials.json
 token.json
+google-oauth-client.json
+connector-clients.json
 *.pem
 *.key
 

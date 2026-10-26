@@ -39,6 +39,134 @@ const ready = env => {
   assert.equal(task(env).status, 'ready_for_approval');
 };
 
+test('approval refers to the reply the user saw, even when a replacement is already ready', () => {
+  const env = setup();
+  try {
+    ready(env);
+    const reviewed = env.engine.publicState().tasks.find(item => item.id === 'request:m1').reviewToken;
+    env.store.mutate(state => { state.tasks['request:m1'].draft.body += '\nA revised prepared reply.'; });
+    assert.throws(() => env.engine.approve('request:m1', { reviewToken: reviewed }), { code: 'REVIEW_CHANGED' });
+    assert.equal(env.store.state.outbox.length, 0);
+    assert.equal(task(env).status, 'ready_for_approval');
+    const updated = env.engine.publicState().tasks.find(item => item.id === 'request:m1').reviewToken;
+    assert.notEqual(updated, reviewed);
+    assert.equal(env.engine.approve('request:m1', { reviewToken: updated }).status, 'completed');
+    assert.equal(env.store.state.outbox.length, 1);
+  } finally { env.store.close(); }
+});
+
+test('unrelated workspace changes do not invalidate a reviewed reply', () => {
+  const env = setup();
+  try {
+    ready(env);
+    const reviewed = env.engine.publicState().tasks.find(item => item.id === 'request:m1').reviewToken;
+    env.engine.recordMiss({ note: 'An unrelated piece of work.' });
+    assert.equal(env.engine.publicState().tasks.find(item => item.id === 'request:m1').reviewToken, reviewed);
+    assert.equal(env.engine.approve('request:m1', { reviewToken: reviewed }).status, 'completed');
+  } finally { env.store.close(); }
+});
+
+test('malformed or mismatched provider lookups remain uncertain without sending', () => {
+  for (const lookupResult of [null, {}, { status: 'found', receipt: {} },
+    { status: 'found', receipt: { id: 'unrelated-receipt', idempotencyKey: 'another-operation' } }]) {
+    const env = setup();
+    try {
+      ready(env);
+      env.provider.lookup = () => lookupResult;
+      const result = env.engine.approve('request:m1');
+      assert.equal(result.status, 'blocked');
+      assert.equal(result.action.status, 'uncertain');
+      assert.match(result.reason, /unknown|confirm/i);
+      assert.equal(env.store.state.outbox.length, 0);
+      assert.ok(env.store.state.notifications.some(item => item.kind === 'blocker' && item.what));
+    } finally { env.store.close(); }
+  }
+});
+
+test('a late inconclusive reconciliation cannot downgrade a subsequently verified delivery', async () => {
+  const env = setup();
+  let release;
+  const lookup = env.provider.lookup.bind(env.provider);
+  let late;
+  try {
+    ready(env);
+    env.provider.lookupOverride = 'unknown';
+    env.engine.approve('request:m1');
+    env.provider.lookupOverride = null;
+    env.provider.lookup = () => new Promise(resolve => { release = resolve; });
+    late = env.engine.reconcile('request:m1');
+    env.provider.lookup = lookup;
+    env.engine.reconcile('request:m1');
+    env.engine.retry('request:m1');
+    assert.equal(task(env).status, 'completed');
+    const revision = env.store.state.revision;
+    release({ status: 'unknown' });
+    await late;
+    assert.equal(task(env).status, 'completed');
+    assert.equal(env.store.state.revision, revision);
+    assert.equal(env.store.state.outbox.length, 1);
+  } finally {
+    release?.({ status: 'unknown' });
+    if (late) await late;
+    await env.engine.whenSettled(); env.store.close();
+  }
+});
+
+test('a missing lookup during an active send cannot enable a second send', async () => {
+  const env = setup();
+  const send = env.provider.send.bind(env.provider);
+  let release, payload, sending, calls = 0;
+  try {
+    ready(env);
+    env.provider.send = input => { calls++; payload = input; return new Promise(resolve => { release = resolve; }); };
+    sending = env.engine.approve('request:m1');
+    env.engine.reconcile('request:m1');
+    assert.equal(task(env).action.status, 'uncertain');
+    assert.throws(() => env.engine.retry('request:m1'), /confirmed absence/);
+    release(send(payload));
+    await sending;
+    assert.equal(task(env).status, 'completed');
+    assert.equal(calls, 1);
+    assert.equal(env.store.state.outbox.length, 1);
+  } finally {
+    release?.(null);
+    if (sending) await sending;
+    await env.engine.whenSettled(); env.store.close();
+  }
+});
+
+test('restoring declined work rechecks current evidence without automatically sending inside a standing grant', () => {
+  const env = setup();
+  ready(env);
+  const scope = { entity: task(env).request.subjectEntity, deliverable: task(env).request.deliverable };
+  env.engine.recordCalibration({ key: 'permission:send_automation', kind: 'permission', value: 'allow', scope });
+  env.engine.reject('request:m1');
+  env.engine.ingest(doc('update-after-dismissal', 'Northstar', `${complete('Northstar')}\nReview completed.`));
+  assert.equal(task(env).status, 'blocked', 'evidence changes must respect a deliberate dismissal');
+  assert.equal(env.store.state.outbox.length, 0, 'a standing grant must not override dismissal');
+  const restored = env.engine.reopen('request:m1');
+  assert.equal(restored.status, 'ready_for_approval');
+  assert.ok(restored.draft);
+  assert.equal(env.store.state.outbox.length, 0);
+  assert.equal(restored.action, null);
+  assert.ok(env.store.state.history.some(item => item.kind === 'reopening'));
+});
+
+test('restoring a closed request assesses the updated document instead of reusing an old draft', () => {
+  const env = setup();
+  env.engine.ingest(email());
+  env.engine.cancel('request:m1');
+  env.engine.ingest(doc('updated-while-closed', 'Northstar', complete('Northstar')));
+  assert.equal(task(env).status, 'cancelled');
+  const restored = env.engine.reopen('request:m1');
+  assert.equal(restored.status, 'ready_for_approval');
+  assert.equal(restored.draft.documentVersion, env.store.state.documents['northstar-proposal'].version);
+  assert.equal(env.store.state.outbox.length, 0);
+  env.engine.approve('request:m1');
+  assert.throws(() => env.engine.reopen('request:m1'), /Only a declined or closed request/);
+  assert.equal(env.store.state.outbox.length, 1);
+});
+
 test('independent document change discovers a completed request and prepares a linked reply', () => {
   const env = setup();
   env.engine.ingest(doc('event-initial', 'Northstar', '# Northstar project proposal\nResults pending.'));

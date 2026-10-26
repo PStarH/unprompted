@@ -4,44 +4,71 @@
 
 **A proactive AI agent that notices what needs doing and moves it forward.**
 
-Unprompted follows changes in an environment you authorize, connects them to
-existing work, checks the evidence, and prepares the next useful action. You
+Unprompted follows changes in the work and personal environments you authorize,
+connects them to existing work, checks the evidence, and prepares the next useful action. You
 join in when a decision needs you. Work starts without another prompt.
 
-[简体中文](README.zh-CN.md) · [Quick start](#try-it-in-a-minute) · [Docs](docs/README.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/PStarH/unprompted/issues/new/choose)
+The current priority is learning whether users value an unrequested discovery
+enough to keep Unprompted in their workflow. Email/document flows are engineering
+samples for a general personal partner. [Product direction and current priority](docs/PRODUCT_DIRECTION.md)
+
+[简体中文](README.zh-CN.md) · [Quick start](#start-your-agent) · [Docs](docs/README.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/PStarH/unprompted/issues/new/choose)
 
 [![CI](https://github.com/PStarH/unprompted/actions/workflows/ci.yml/badge.svg)](https://github.com/PStarH/unprompted/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-b9eea3)](LICENSE)
 [![Node.js: 20+](https://img.shields.io/badge/Node.js-20%2B-174438)](package.json)
 
-## Try it in a minute
+## Start your agent
 
-You need **Node.js 20+** and Git. Node.js 22 or newer is recommended.
-No API key, account connection, package installation, or build step is needed.
+You need **Node.js 20+** and your model provider's API endpoint, model ID and
+API key. Local compatible models can work without a key. No dependency install
+or build step is needed for the standard harness.
 
 ```sh
 git clone https://github.com/PStarH/unprompted.git
 cd unprompted
-npm run demo
+npm start
 ```
 
-Open **[http://127.0.0.1:4173](http://127.0.0.1:4173)** and watch for about
-15 seconds. The scenario starts on its own.
+Open the address printed after **Ready**. An interactive terminal also opens
+your browser. Enter the endpoint, model ID and key, then choose **Verify and
+connect model**. The application sends one real structured inference using
+invented content. Only a successful response saves the key locally and activates
+the connection; no restart is required. Keys are not returned by the API.
 
-1. An email arrives asking Maya for an updated proposal. Unprompted discovers
-   the follow-through without receiving a task of its own.
-2. A related document changes. It checks what is present, what is still missing,
-   and whether the results match the latest known run. Unrelated edits are ignored.
-3. Once the evidence is sufficient, a reply and document link are ready.
-4. Click **Approve simulated send**. The action is recorded in the local
-   simulated outbox, and completion follows a verified simulated receipt.
+Next, choose **Google Workspace, GitHub or Microsoft Outlook on the same page**.
+GitHub and Outlook use official device OAuth: copy a short code, confirm it on
+the provider’s page, and the connection activates automatically. No access-token
+pasting is needed. A source can be disconnected without stopping the others.
+[Connector setup and extension guide](docs/CONNECTORS.md).
 
-**The demo is entirely local and uses simulated data.** It ignores Google and
-model credentials, uses a fresh temporary workspace, and sends no external
-email. **Replay scenario** starts it again; **Ctrl+C** stops it.
+For Google, a distribution with a registered Desktop OAuth client opens Google consent directly. For a self-hosted
+checkout without that client, the page guides you through the one-time Google
+Cloud setup and accepts its downloaded JSON. No refresh-token copying or
+service restart is required.
 
-Port busy? Run `npm run demo -- --port 4180`.
-See the [first-run guide](docs/QUICKSTART.md) for screenshots, normal mode, and troubleshooting.
+Authorization starts the first read immediately. Actual email and document
+content become model context; assigned GitHub issues retain their native source,
+assignee and state. The page reports actual emails read, documents read
+and work discovered. An empty result is shown as an empty result. **Normal
+startup never plays a sample or invents tasks.**
+
+Read access is the starting permission. Automatic observation can be paused,
+and sending or editing requires a separate explicit opt-in. Model failure
+keeps work unready; rules cannot silently substitute a successful model reading.
+
+The interface supports English and Chinese. A busy default port is replaced
+automatically; `npm start -- --port 4180` chooses a specific port.
+[Download a source ZIP](https://github.com/PStarH/unprompted/archive/refs/heads/main.zip)
+if you prefer not to use Git.
+
+### Inspect the rule-based example separately
+
+`npm run demo` is an explicitly **rule-based local example**, with no model
+calls, saved accounts or external effects. It is useful for inspecting engine
+contracts. It is not the real-model agent experience or evidence of model quality.
+
+[First-run details and troubleshooting →](docs/QUICKSTART.md)
 
 ## What makes it proactive?
 
@@ -62,11 +89,11 @@ An email arrives → a commitment is discovered → evidence changes
   reconciled before a retry.
 
 <details>
-<summary>See the reasoning chain in the current application</summary>
+<summary>See connections in the current application</summary>
 
-![Actual application: noticed email, linked proposal, verified requirements, prepared draft. Local simulated data.](docs/assets/reasoning-chain.png)
+![Actual connection interface, shown with synthetic provider accounts.](docs/assets/connections.png)
 
-This is the running prototype, using its built-in local simulation.
+Connection interface from the running application, shown with synthetic accounts.
 
 </details>
 
@@ -74,39 +101,71 @@ This is the running prototype, using its built-in local simulation.
 
 Unprompted is an **early, local-first prototype**. The event engine, evidence
 checks, approval boundary, persistence, interface, and simulated end-to-end
-workflow are implemented. The default experience is deterministic; an external
-model is optional.
+workflow are implemented. The primary experience connects your own model. The explicit rule-based example
+is separate from model-backed operation.
 
 | Area | Current scope |
 | --- | --- |
 | Local demo | Self-starting scenario, evidence checks, prepared reply, simulated approval and verification |
-| Context | Email requests, document updates, and run records |
+| Context | Email requests, native assigned issues, document updates and run records |
+| GitHub | Device OAuth, assigned-issue discovery, update/reassignment tracking; read-only |
+| Microsoft Outlook | Device OAuth, inbox delta sync and model-backed request discovery; read-only |
 | Google Workspace | Optional Gmail / Drive / Docs connector; read-only setup is documented |
 | Live sending | Implemented, explicitly gated, and covered by scripted tests; not claimed as validated in production |
+| Task management | Trusted commitment revisions/withdrawals, persisted waits, reversible corrections and shared dependencies |
+| Document changes | Source-backed, version-checked patches with separate authorization and readback |
+| Local app | Browser OAuth setup, continuous observation controls and an unsigned macOS app builder |
 | Storage | One user, one local JSON store, one server process |
 
-Calendar, Slack, general desktop control, autonomous document editing, and a
+Calendar, Slack, Notion, general desktop control, unrestricted autonomous rewriting, and a
 hosted multi-user service are not implemented. Real-world usefulness and error
 rates still need user feedback. [Architecture and limitations →](docs/ARCHITECTURE.md)
 
 ## Use your own workspace
 
-`npm start` runs the normal application with **read-only shadow mode on**.
-Without configured credentials, it uses the local simulation. Optional Google
-Workspace setup is separate from the one-command demo:
+`npm start` opens persistent model and source setup for **your real work**.
+Sources start **read-only**. The interface supports first connection, initial
+observation, incremental permissions, pause, retry and disconnect without
+restarting the service. Each Google account has its own local workspace:
 
+- [Local app and browser connection setup](docs/ONBOARDING.md)
+- [Choose or build a connector](docs/CONNECTORS.md)
 - [Connect Gmail and Drive](docs/LIVE_INTEGRATION.md)
 - [Configuration and data handling](docs/CONFIGURATION.md)
 - [API reference](docs/API.md)
 
 The server binds to `127.0.0.1` and has no authentication. Run it on your own
-machine. If you enable an external model, request content may be sent to that
-provider; the default demo makes no model calls.
+machine. Task context is sent to your selected model provider. The explicitly
+invoked rule-only example makes no model calls.
 
 ## Build it with us
 
-**Star** the project if the direction resonates. **Try** the demo and tell us
-what you expected it to notice. **Contribute** a focused improvement.
+Run a complete framework workflow without a server, account or model:
+
+```sh
+npm run example
+npm run example -- --approve
+```
+
+The first command discovers a follow-up and prepares a reply while keeping
+sends at zero. The second explicitly approves one **simulated** delivery,
+verifies its receipt and checks that a duplicate event does not resend it.
+Edit [the example](examples/first-workflow.mjs) to change the request or evidence.
+
+```text
+Connector events → WorkEngine → evidence / policy → provider → verified result
+                      ↕
+                  local store
+```
+
+[Extend your first workflow](docs/EXTENDING.md) explains the actual extension
+boundaries, contracts and tests. The optional
+[Pi harness](docs/CONFIGURATION.md#pi-tool-loop) adds bounded document-reading
+tool calls; it requires Node.js 22.19+ and the optional packages. The core example
+and demo require neither.
+
+Try the demo and tell us what you expected it to notice. Contribute a focused
+improvement; documentation, accessibility and synthetic regression cases all help.
 
 - New to the code? Start with the [contributor guide](CONTRIBUTING.md) and
   [good first issues](https://github.com/PStarH/unprompted/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22).

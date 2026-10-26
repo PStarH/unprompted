@@ -1,5 +1,6 @@
 import { resolveRequiredContent } from './criteria.js';
 import { isVerbatimQuote } from './probes/lexicon.js';
+import { unquotedMessageFields } from './commitments.js';
 
 /**
  * Request interpretation.
@@ -17,8 +18,36 @@ const DELIVERABLE_NOUNS = [
   'proposal', 'report', 'deck', 'plan', 'memo', 'brief', 'summary', 'write-up', 'writeup',
   'spec', 'one-pager', 'presentation', 'analysis', 'document', 'doc', 'review', 'roadmap'
 ];
+const CHINESE_DELIVERABLES = [
+  ['presentation', ['演示文稿', '演示稿', '幻灯片']],
+  ['proposal', ['提案', '方案']],
+  ['report', ['报告', '報告']],
+  ['plan', ['计划', '計劃']],
+  ['memo', ['备忘录', '備忘錄']],
+  ['brief', ['简报', '簡報']],
+  ['summary', ['摘要', '总结', '總結']],
+  ['spec', ['规格说明', '規格說明', '规范', '規範']],
+  ['one-pager', ['一页纸', '一頁紙']],
+  ['analysis', ['分析']],
+  ['document', ['文档', '文件', '文檔']],
+  ['review', ['评审', '審查', '复盘', '複盤']],
+  ['roadmap', ['路线图', '路線圖']]
+];
 const UPDATE_VERBS = ['update', 'revise', 'refresh', 'edit', 'rework', 'finalize', 'finalise', 'incorporate', 'add', 'append', 'complete', 'finish', 'prepare'];
 const SEND_VERBS = ['send', 'share', 'email', 'forward', 'deliver', 'return', 'circulate', 'hand over', 'submit'];
+const CHINESE_UPDATE_VERB = /(?:更新|修订|修訂|修改|刷新|改版|补充|補充|添加|增加|加入|纳入|納入|完善|定稿|准备|準備|完成|整理|编写|編寫)/u;
+const CHINESE_SEND_VERB = /(?:发送|發送|发给|發給|分享|提交|交付|递交|遞交|寄给|寄給)/u;
+const CHINESE_DELIVERABLE_LOOKUP = new Map(CHINESE_DELIVERABLES.flatMap(([canonical, aliases]) => aliases.map(alias => [alias, canonical])));
+const CHINESE_CONTENT_TERMS = [
+  { pattern: /(?:最新|最近|当前|目前)?(?:实验|實驗)(?:结果|結果|数据|數據)/u, text: 'experiment results', freshness: true },
+  { pattern: /(?:最新|最近|当前|目前)?(?:客户|客戶|用户|用戶)(?:反馈|回饋|意见|意見)/u, text: 'customer feedback', freshness: true },
+  { pattern: /(?:样本量|樣本數|样本数|样本数量)/u, text: 'sample size' },
+  { pattern: /(?:结论|結論)/u, text: 'conclusion' },
+  { pattern: /(?:转化率|轉換率)/u, text: 'conversion rate' },
+  { pattern: /(?:控制组|對照組|对照组)(?:结果|數據|数据)?/u, text: 'control result' },
+  { pattern: /(?:处理组|實驗組|实验组)(?:结果|數據|数据)?/u, text: 'treatment result' }
+];
+const CHINESE_NEGATION = /(?:不需要|不必|无需|無需|不用|不要|别再|別再|请勿|請勿|不是要|并非要|並非要|不再需要|不再要求)/u;
 
 const STOPWORDS = new Set([
   'hi', 'hello', 'hey', 'dear', 'thanks', 'thank', 'please', 'the', 'this', 'that', 'these', 'those',
@@ -99,7 +128,46 @@ export function isAutomatedSender(from) {
 const REQUEST_FORM = /\b(please|kindly|could you|can you|would you|will you|i need|i'?d like|i would like|we need|we'?d like|make sure|don'?t forget|remember to|let'?s|go ahead and)\b/i;
 
 export function hasRequestForm(text) {
-  return REQUEST_FORM.test(String(text || ''));
+  const source = String(text || '').normalize('NFKC');
+  const englishActions = [...source.matchAll(REQUEST_VERB_PATTERN_GLOBAL)];
+  const chineseActions = [...source.matchAll(new RegExp(`${CHINESE_UPDATE_VERB.source}|${CHINESE_SEND_VERB.source}`, 'gu'))];
+  const segmentFor = index => {
+    const separators = /[\r\n,.!?，、。！？；;]/g;
+    let start = 0;
+    let end = source.length;
+    for (const match of source.matchAll(separators)) {
+      if (match.index < index) start = match.index + match[0].length;
+      else { end = match.index; break; }
+    }
+    return { start, end, text: source.slice(start, end) };
+  };
+  const inheritsEnglishNegation = (match, actions) => {
+    const segment = segmentFor(match.index);
+    const segmentActions = actions.filter(item => item.index >= segment.start && item.index < segment.end);
+    const firstAction = segmentActions[0];
+    if (!firstAction || firstAction.index === match.index) return false;
+    const beforeFirst = source.slice(segment.start, firstAction.index);
+    const negatedFirst = /(?:\bdo\s+not|\bdon['’]?t|\bshould\s+not|\bshouldn['’]?t|\bcannot|\bcan['’]?t)\s+(?:please\s+)?$/i.test(beforeFirst);
+    if (!negatedFirst) return false;
+    const betweenActions = source.slice(firstAction.index + firstAction[0].length, match.index);
+    return /\b(?:and|or|nor)\b/i.test(betweenActions) && !/\bbut\b/i.test(betweenActions);
+  };
+  const positiveEnglish = englishActions.some(match => {
+    const segment = segmentFor(match.index);
+    const beforeAction = source.slice(segment.start, match.index);
+    const negated = /(?:\bdo\s+not|\bdon['’]?t|\bnever|\bshould\s+not|\bshouldn['’]?t|\bcannot|\bcan['’]?t)\s+(?:please\s+)?$/i.test(beforeAction);
+    return !negated && !inheritsEnglishNegation(match, englishActions) &&
+      (REQUEST_FORM.test(segment.text) || /(?:请|請|麻烦|麻煩|帮我|幫我|需要|能否|可以|务必|務必)/u.test(segment.text));
+  });
+  const positiveChinese = chineseActions.some(match => {
+    const segment = segmentFor(match.index);
+    const beforeAction = source.slice(segment.start, match.index);
+    return !CHINESE_NEGATION.test(beforeAction) &&
+      (REQUEST_FORM.test(segment.text) || /(?:请|請|麻烦|麻煩|帮我|幫我|请帮|請幫|需要|能否|可以|务必|務必)/u.test(segment.text));
+  });
+  if ((englishActions.length || chineseActions.length) && !positiveEnglish && !positiveChinese) return false;
+  if (CHINESE_NEGATION.test(source) && !positiveChinese) return false;
+  return REQUEST_FORM.test(source) || /(?:请|請|麻烦|麻煩|帮我|幫我|请帮|請幫|需要|能否|可以|务必|務必)/u.test(source);
 }
 
 /**
@@ -146,6 +214,10 @@ const REQUEST_VERB_PATTERN_GLOBAL = new RegExp(REQUEST_VERB_PATTERN.source, 'gi'
 export function deliverableIsGoverned(text, deliverable) {
   if (!deliverable) return false;
   const source = String(text || '');
+  if (deliverable.source === 'chinese') {
+    const window = source.slice(Math.max(0, deliverable.index - 70), Math.min(source.length, deliverable.index + deliverable.length + 70));
+    return hasRequestForm(window) && (CHINESE_UPDATE_VERB.test(window) || CHINESE_SEND_VERB.test(window));
+  }
   const before = source.slice(Math.max(0, deliverable.index - 80), deliverable.index);
   if (!DETERMINER_BEFORE.test(before)) return false;
   // The verb may follow the noun too: "I need the proposal updated by Friday".
@@ -185,6 +257,19 @@ function findDeliverable(text) {
     }
   }
 
+  const unicodeText = String(text || '').normalize('NFKC');
+  for (const [canonical, aliases] of CHINESE_DELIVERABLES) {
+    for (const alias of aliases) {
+      let from = 0;
+      while (candidates.length < 80) {
+        const index = unicodeText.indexOf(alias, from);
+        if (index === -1) break;
+        candidates.push({ noun: canonical, index, length: alias.length, source: 'chinese' });
+        from = index + alias.length;
+      }
+    }
+  }
+
   // A deliverable noun outside the list is still a deliverable. After a request
   // verb, skip the article and any capitalised name, then take the first
   // lowercase noun: "update the Helios playbook" yields playbook.
@@ -211,12 +296,12 @@ function findDeliverable(text) {
     ...candidate,
     governed: deliverableIsGoverned(text, candidate),
     determined: DETERMINER_BEFORE.test(text.slice(Math.max(0, candidate.index - 80), candidate.index)),
-    known: candidate.source === 'known' ? 1 : 0
+    known: candidate.source === 'known' || candidate.source === 'chinese' ? 1 : 0
   }));
   ranked.sort((a, b) =>
     (b.governed - a.governed) || (b.determined - a.determined) || (b.known - a.known) || (a.index - b.index));
   const best = ranked[0];
-  return { noun: best.noun, index: best.index, length: best.length };
+  return { noun: best.noun, index: best.index, length: best.length, source: best.source };
 }
 
 /** The last contiguous run of capitalised words in a fragment. */
@@ -234,6 +319,19 @@ function capitalisedRun(fragment) {
 }
 
 function extractEntity(text, deliverable) {
+  if (deliverable?.source === 'chinese') {
+    const before = String(text || '').normalize('NFKC').slice(0, deliverable.index);
+    const verbMatches = [...before.matchAll(new RegExp(`${CHINESE_UPDATE_VERB.source}|${CHINESE_SEND_VERB.source}`, 'gu'))];
+    const verb = verbMatches.at(-1);
+    if (verb) {
+      let candidate = before.slice(verb.index + verb[0].length)
+        .replace(/^(?:一下|一下子|把|将|將|的|我们|我們|你|我|请|請)+/u, '')
+        .replace(/(?:项目|專案|專案的|项目的|的)$/u, '')
+        .trim()
+        .replace(/^[\s:：,，、-]+|[\s:：,，、-]+$/gu, '');
+      if (candidate.length >= 2 && candidate.length <= 40 && !CHINESE_DELIVERABLE_LOOKUP.has(candidate)) return candidate;
+    }
+  }
   // 1. An explicit "project: X" or "the X project" declaration wins.
   const explicit = text.match(/\bproject\s*:\s*([A-Z][\w'-]{1,30})/) ||
     text.match(/\b(?:the\s+)?([A-Z][\w'-]{1,30})\s+project\b/) ||
@@ -262,6 +360,7 @@ function extractEntity(text, deliverable) {
 }
 
 const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const CHINESE_WEEKDAY_SUFFIX = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 0, 天: 0 };
 const MONTHS = {
   jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
   may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7, sep: 8, september: 8,
@@ -390,6 +489,31 @@ export function parseDeadline(phrase, reference = new Date(), { dateLocale = nul
     };
   };
 
+  const chinese = text.normalize('NFKC');
+  if (/^(?:今天|今日|今晚|当天)$/.test(chinese)) return resolvedDay(isoFromUtc(anchor));
+  if (/^(?:明天|明日)$/.test(chinese)) return resolvedDay(isoFromUtc(addUtcDays(anchor, 1)));
+  const chineseWeekday = chinese.match(/^(?:(下周|下星期|本周|这周|這週|本星期))?(?:周|星期)?([一二三四五六日天])$/u);
+  if (chineseWeekday) {
+    if (!chineseWeekday[1] && !/^(?:周|星期)/u.test(chinese)) return unresolved;
+    const wanted = CHINESE_WEEKDAY_SUFFIX[chineseWeekday[2]];
+    const delta = (wanted - anchor.getUTCDay() + 7) % 7;
+    const nextWeek = /^(?:下周|下星期)/u.test(chineseWeekday[1] || '');
+    return resolvedDay(isoFromUtc(addUtcDays(anchor, nextWeek ? (delta || 7) + 7 : delta)));
+  }
+  const chineseMonthDay = chinese.match(/^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?$/u);
+  if (chineseMonthDay) {
+    const year = Number(chineseMonthDay[1] || anchor.getUTCFullYear());
+    const month = Number(chineseMonthDay[2]);
+    const day = Number(chineseMonthDay[3]);
+    const iso = realUtcDay(year, month - 1, day);
+    if (!iso) return invalidDay(`“${text}” is not a real calendar date.`);
+    if (!chineseMonthDay[1] && new Date(`${iso}T00:00:00.000Z`) < addUtcDays(anchor, -1)) {
+      const next = realUtcDay(year + 1, month - 1, day);
+      return next ? resolvedDay(next) : invalidDay(`“${text}” is not a real calendar date.`);
+    }
+    return resolvedDay(iso, chineseMonthDay[1] ? 'explicit_date' : 'relative_resolved');
+  }
+
   const finishReadings = (readings, kind) => {
     if (!readings.length) return invalidDay(`“${text}” is not a real calendar date.`);
     const days = [...new Set(readings.map(reading => reading.iso))];
@@ -412,11 +536,12 @@ export function parseDeadline(phrase, reference = new Date(), { dateLocale = nul
   }
   if (text === 'next week') return resolvedDay(isoFromUtc(addUtcDays(anchor, 7)));
 
-  const weekday = text.match(/^(?:this\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
+  const weekday = text.match(/^(?:(?:this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
   if (weekday) {
     const wanted = WEEKDAYS.indexOf(weekday[1]); // Mon=0 … Sun=6
     const jsWanted = (wanted + 1) % 7; // Sun=0 … Sat=6
-    const delta = (jsWanted - anchor.getUTCDay() + 7) % 7;
+    let delta = (jsWanted - anchor.getUTCDay() + 7) % 7;
+    if (/^next\s+/i.test(text)) delta = delta || 7;
     return resolvedDay(isoFromUtc(addUtcDays(anchor, delta)));
   }
 
@@ -460,10 +585,21 @@ export function resolveDeadlineIso(phrase, reference = new Date(), options = {})
 }
 
 export function extractDeadline(text, { now = new Date(), dateLocale = null } = {}) {
+  const unicodeSource = String(text || '').normalize('NFKC');
+  const chineseMatch = unicodeSource.match(/(?:截止(?:日期)?(?:是|为|在|到)?|最晚(?:在|于)?|不晚于|于|在|到|改到|改为|改成|延期至|推迟到)?\s*((?:(?:下周|下星期|本周|这周|這週|本星期)(?:周|星期)?|(?:周|星期))[一二三四五六日天]|(?:今天|今日|明天|明日|今晚)|(?:\d{4}年)?\d{1,2}月\d{1,2}日?)/u);
+  if (chineseMatch) {
+    const phrase = chineseMatch[1].trim();
+    const reference = now instanceof Date ? now : new Date(now);
+    const outcome = parseDeadline(phrase, reference, { dateLocale });
+    const deadline = { text: phrase, iso: outcome.iso, kind: outcome.kind };
+    if (outcome.status === 'ambiguous') Object.assign(deadline, { ambiguous: true, candidates: outcome.candidates, readings: outcome.readings, reason: outcome.reason });
+    else if (outcome.status === 'invalid') deadline.reason = outcome.reason;
+    return deadline;
+  }
   const pattern = new RegExp(
-    `\\b(?:by|before|due(?:\\s+by)?|deadline\\s*[:\\s]|no\\s+later\\s+than)\\s+` +
+    `\\b(?:deadline\\s+(?:is\\s+now|moved\\s+to|changed\\s+to|pushed\\s+to|shifted\\s+to|extended\\s+to)|due\\s+date\\s+(?:is\\s+now|moved\\s+to|changed\\s+to|pushed\\s+to|shifted\\s+to|extended\\s+to)|by|before|due(?:\\s+by)?|deadline\\s*[:\\s]|no\\s+later\\s+than)\\s+` +
     `(today|tomorrow|tonight|eod|end\\s+of\\s+day|end\\s+of\\s+week|eow|next\\s+week|` +
-    `(?:this\\s+)?(?:${WEEKDAYS.join('|')})|` +
+    `(?:(?:this|next)\\s+)?(?:${WEEKDAYS.join('|')})|` +
     `\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|` +
     `(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+\\d{1,2})`,
     'i'
@@ -638,6 +774,10 @@ function contentQualifiers(text) {
     if (new RegExp(`\\b${qualifier}\\b`).test(lower)) found.push({ kind: 'status', text: qualifier });
   }
   if (FRESHNESS_QUALIFIER.test(lower)) found.push({ kind: 'freshness', text: lower.match(FRESHNESS_QUALIFIER)[0] });
+  else {
+    const chineseFreshness = String(text || '').match(/(?:最新|最近|当前|目前)/u);
+    if (chineseFreshness) found.push({ kind: 'freshness', text: chineseFreshness[0] });
+  }
   const set = coverageSet(lower.match(COMPLETENESS_QUALIFIER));
   if (set) found.push({ kind: 'completeness', text: set.text, noun: set.noun });
   return found;
@@ -664,6 +804,10 @@ export function extractRequestQualifiers(text, deadline = null) {
 
   const freshness = source.match(FRESHNESS_QUALIFIER);
   if (freshness) add({ id: 'qualifier:freshness', kind: 'freshness', text: freshness[0].toLowerCase(), span: freshness[0] });
+  else {
+    const chineseFreshness = source.match(/(?:最新|最近|当前|目前)/u);
+    if (chineseFreshness) add({ id: 'qualifier:freshness', kind: 'freshness', text: chineseFreshness[0], span: chineseFreshness[0] });
+  }
 
   for (const qualifier of STATUS_QUALIFIERS) {
     const match = source.match(new RegExp(`\\b${qualifier}\\b`, 'i'));
@@ -724,6 +868,22 @@ export function extractRequiredContent(text, { deliverable = null } = {}) {
       if (isRecipientPhrase(part, markerId)) continue;
       record(part);
     }
+  }
+  const unicodeSource = source.normalize('NFKC');
+  for (const concept of CHINESE_CONTENT_TERMS) {
+    const match = unicodeSource.match(concept.pattern);
+    if (!match) continue;
+    const key = concept.text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push({
+      text: concept.text,
+      span: match[0],
+      sourceQuote: match[0],
+      language: 'zh',
+      grounding: 'built_in_lexicon',
+      qualifiers: concept.freshness ? [{ kind: 'freshness', text: match[0] }] : []
+    });
   }
   return found;
 }
@@ -809,16 +969,19 @@ function slugFor(value) {
 function detectIntent(text) {
   const hasUpdate = new RegExp(`\\b(?:${verbForms(UPDATE_VERBS).join('|')})\\b`, 'i').test(text);
   const hasSend = new RegExp(`\\b(?:${verbForms(SEND_VERBS).join('|')})\\b`, 'i').test(text);
-  if (hasUpdate && hasSend) return 'update_and_send';
-  if (hasUpdate) return 'update';
-  if (hasSend) return 'send';
+  const unicodeText = String(text || '').normalize('NFKC');
+  const update = hasUpdate || CHINESE_UPDATE_VERB.test(unicodeText);
+  const send = hasSend || CHINESE_SEND_VERB.test(unicodeText);
+  if (update && send) return 'update_and_send';
+  if (update) return 'update';
+  if (send) return 'send';
   return 'informational';
 }
 
 /** Claims a request implicitly asks the system to be able to make. */
 function impliedClaims(text) {
   const claims = [];
-  if (/\b(latest|newest|most\s+recent|up[- ]to[- ]date|current)\b/i.test(text)) {
+  if (/\b(latest|newest|most\s+recent|up[- ]to[- ]date|current)\b/i.test(text) || /(?:最新|最近|当前|目前)/u.test(String(text || '').normalize('NFKC'))) {
     claims.push({
       id: 'results_are_latest',
       text: 'The results in the deliverable are the most recent available.',
@@ -843,8 +1006,9 @@ function impliedClaims(text) {
  * can act on; the codes are what the trace and the tests assert against.
  */
 export function explainRequest(message, options = {}) {
-  const subject = message.subject || '';
-  const body = message.body || '';
+  const active = unquotedMessageFields(message);
+  const subject = active.subject;
+  const body = active.body;
   const combined = `${subject}\n${body}`;
   const deliverable = findDeliverable(combined);
   const intent = detectIntent(combined);
@@ -910,11 +1074,14 @@ export function explainRequest(message, options = {}) {
       threadId: message.threadId || null,
       from: message.from,
       to: message.to || null,
+      cc: message.cc || null,
+      bcc: message.bcc || null,
       subject,
       receivedAt: message.receivedAt || null
     },
     interpretedBy: 'deterministic'
   };
+  request.deliveryRecipients = extractDeliveryRecipients(message);
   request.analysis = analyseRequest({
     text: combined, deliverable: request.deliverable, subjectEntity: entity,
     intent, requiredContent, deadline, impliedClaims: claims
@@ -923,9 +1090,138 @@ export function explainRequest(message, options = {}) {
   return { request, rejection: null };
 }
 
+/** Explicit delivery targets, kept separate from the message's participants. */
+export function extractDeliveryRecipients(message) {
+  const active = unquotedMessageFields(message);
+  const text = `${active.subject}\n${active.body}`.normalize('NFKC');
+  const found = [];
+  const add = raw => {
+    let target = String(raw || '').trim().replace(/[.!?。！？,，;；]+$/u, '');
+    target = target.replace(/\s+(?:by|before|due|no later than|并在|並在|在|截止|且在|然后|然後).+$/iu, '').trim();
+    target = target.replace(/^(?:the|a|an)\s+/i, '').trim();
+    if (!target || target.length > 100) return;
+    if (/^(?:me|myself|我|本人|自己)$/iu.test(target)) {
+      target = normalizeRequestAddress(message?.from);
+    }
+    const key = target.toLowerCase().replace(/\s+/g, ' ');
+    if (key && !found.some(item => item.toLowerCase().replace(/\s+/g, ' ') === key)) found.push(target);
+  };
+  const english = /\b(?:send|share|email|forward|deliver|return|circulate|submit)\b[^.!?\n]{0,90}?\bto\s+([^.!?\n,;]+)/gi;
+  for (const match of text.matchAll(english)) add(match[1]);
+  const chinese = /(?:发送给|發送給|发给|發給|分享给|分享給|交付给|交付給|提交给|提交給|寄给|寄給)([^，,。；;！？!?\n]+)/gu;
+  for (const match of text.matchAll(chinese)) add(match[1]);
+  return found.slice(0, 6);
+}
+
+function normalizeRequestAddress(value) {
+  const raw = String(value || '').trim();
+  const bracketed = raw.match(/<\s*([^<>]+)\s*>/);
+  const email = (bracketed?.[1] || raw).match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return email?.[0]?.toLowerCase() || raw.toLowerCase();
+}
+
 /** The request, or null. Kept as the single-value form callers already use. */
 export function interpretRequest(message, options = {}) {
   return explainRequest(message, options).request;
+}
+
+function modelQuoteIsInMessage(message, quote) {
+  const value = String(quote || '').replace(/\s+/g, ' ').trim();
+  const active = unquotedMessageFields(message);
+  return value.length >= 2 && value.length <= 180 &&
+    (isVerbatimQuote(active.subject, value) || isVerbatimQuote(active.body, value));
+}
+
+function modelEntityIsSpecific(value) {
+  const entity = String(value || '').normalize('NFKC').replace(/[“”"'.,:：;；()（）]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (entity.length < 2 || entity.length > 60) return false;
+  const lower = entity.toLowerCase();
+  if (STOPWORDS.has(lower) || ENTITY_NOISE.has(lower) || DELIVERABLE_NOUNS.includes(lower)) return false;
+  if (/^(?:更新|修改|补充|補充|发送|發送|分享|请|請|麻烦|麻煩|需要|最新|最近|报告|報告|提案|方案|文档|文件)$/u.test(lower)) return false;
+  const words = lower.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (words.length && words.every(word => STOPWORDS.has(word) || ENTITY_NOISE.has(word) || DELIVERABLE_NOUNS.includes(word))) return false;
+  return true;
+}
+
+function canonicalModelDeliverable(value, quote) {
+  const declared = String(value || '').toLowerCase().trim().replace(/[_\s]+/g, '-');
+  const quoted = String(quote || '').normalize('NFKC').trim();
+  const knownEnglish = DELIVERABLE_NOUNS.find(noun => noun === declared || noun.replaceAll('-', '') === declared.replaceAll('-', ''));
+  const quoteEnglish = DELIVERABLE_NOUNS.find(noun => new RegExp(`(?:^|[^a-z0-9])${escapeRegex(noun)}(?:$|[^a-z0-9])`, 'i').test(quoted));
+  const quoteChinese = CHINESE_DELIVERABLE_LOOKUP.get(quoted) || null;
+  const quoteCanonical = quoteChinese || quoteEnglish;
+  return knownEnglish && quoteCanonical === knownEnglish ? knownEnglish : null;
+}
+
+/**
+ * A bounded model rescue path for a deterministic miss. The model is consulted
+ * only for an explicit human request candidate, and every identity/action
+ * phrase must be copied from the original subject or body. It cannot turn a
+ * notification into work or introduce a new project or deliverable.
+ */
+export async function recoverRequestCandidateWithReasoner(message, reasoner, options = {}) {
+  if (explainRequest(message, options).request) return null;
+  if (!reasoner?.available?.() || isAutomatedSender(message?.from)) return null;
+  const active = unquotedMessageFields(message);
+  const text = `${active.subject}\n${active.body}`;
+  if (!hasRequestForm(text)) return null;
+  const deterministic = findDeliverable(text);
+  if (!deterministic && !REQUEST_FORM.test(text) && !/(?:请|請|麻烦|麻煩|帮我|幫我|需要|能否|可以)/u.test(text)) return null;
+  if (CHINESE_NEGATION.test(text)) return null;
+  if (typeof reasoner.discoverRequestCandidate !== 'function') return null;
+
+  try {
+    const suggestion = await reasoner.discoverRequestCandidate({ subject: active.subject, body: active.body }, `discover:${message.id || 'message'}`);
+    if (!suggestion || typeof suggestion !== 'object') return null;
+    const deliverable = canonicalModelDeliverable(suggestion.deliverable, suggestion.deliverableQuote);
+    const entityQuote = String(suggestion.entityQuote || '').replace(/\s+/g, ' ').trim();
+    const entity = String(suggestion.subjectEntity || '').replace(/\s+/g, ' ').trim();
+    const intentQuote = String(suggestion.intentQuote || '').replace(/\s+/g, ' ').trim();
+    if (!deliverable || !modelQuoteIsInMessage(message, suggestion.deliverableQuote) ||
+        !modelQuoteIsInMessage(message, entityQuote) || !modelQuoteIsInMessage(message, intentQuote) ||
+        !modelEntityIsSpecific(entity) || !isVerbatimQuote(entityQuote, entity) || !hasRequestForm(text)) return null;
+    const quoteCarriesAction = new RegExp(`(?:${verbForms([...UPDATE_VERBS, ...SEND_VERBS]).join('|')})`, 'i').test(intentQuote) ||
+      CHINESE_UPDATE_VERB.test(intentQuote) || CHINESE_SEND_VERB.test(intentQuote);
+    if (!quoteCarriesAction) return null;
+    if (isAutomatedSender(message.from)) return null;
+
+    const { accepted: requiredContent, dropped: droppedModelContent } = groundModelContentList(suggestion.requiredContent, message);
+    const combined = text;
+    const anchor = message.receivedAt || options.now || new Date();
+    const deadline = extractDeadline(combined, { now: anchor, dateLocale: options.dateLocale });
+    const intent = detectIntent(combined);
+    const requestedIntent = intent !== 'informational' ? intent : suggestion.intent;
+    if (!['update', 'send', 'update_and_send'].includes(requestedIntent)) return null;
+    const claims = impliedClaims(combined);
+    const request = {
+      id: `request:${message.id}`,
+      intent: requestedIntent,
+      deliverable,
+      subjectEntity: entity,
+      deadline,
+      requiredContent,
+      droppedModelContent,
+      explicitDocumentUrl: combined.match(/https?:\/\/[^\s<>"')\]]+/i)?.[0] || null,
+      deliveryRecipients: extractDeliveryRecipients(message),
+      impliedClaims: claims,
+      text: combined,
+      source: {
+        kind: 'email', id: message.id, threadId: message.threadId || null,
+        from: message.from, to: message.to || null, cc: message.cc || null, bcc: message.bcc || null,
+        subject: message.subject || '', receivedAt: message.receivedAt || null
+      },
+      interpretedBy: 'grounded_model_rescue'
+    };
+    request.analysis = analyseRequest({
+      text: combined, deliverable, subjectEntity: entity, intent: requestedIntent,
+      requiredContent, deadline, impliedClaims: claims
+    });
+    request.qualifiers = request.analysis.qualifiers;
+    return request;
+  } catch (error) {
+    options.onError?.(error);
+    return null;
+  }
 }
 
 /**
@@ -949,9 +1245,10 @@ export function groundModelContent(item, message) {
     ? (candidate.sourceField || candidate.field)
     : null;
   const fields = claimedField ? [claimedField] : ['subject', 'body'];
+  const active = unquotedMessageFields(message);
   const groundedIn = textToCheck => {
     for (const field of fields) {
-      if (message?.[field] && isVerbatimQuote(message[field], textToCheck)) {
+      if (active[field] && isVerbatimQuote(active[field], textToCheck)) {
         return { field, sourceQuote: textToCheck };
       }
     }
@@ -1017,15 +1314,16 @@ export async function interpretRequestWithReasoner(message, reasoner, options = 
 
   const resolution = deterministic ? resolveRequiredContent(deterministic.requiredContent) : null;
   const deterministicUsable = Boolean(resolution && resolution.probeIds.length && !resolution.unverifiable.length);
-  if (deterministic && deterministicUsable) return deterministic;
+  if (deterministic && deterministicUsable && options.preferModel !== true) return deterministic;
 
   try {
+    const active = unquotedMessageFields(message);
     // Each message gets its own reasoning budget key. Without this every
     // interpretation shared one key, so the first call exhausted the per-request
     // budget for the whole process.
     const suggestion = await reasoner.interpretRequest(
-      { subject: message.subject, body: message.body },
-      `interpret:${message.id || 'message'}`
+      { subject: active.subject, body: active.body },
+      options.reasoningRequestId || `interpret:${message.id || 'message'}`
     );
     if (!suggestion) return deterministic;
 
@@ -1040,14 +1338,17 @@ export async function interpretRequestWithReasoner(message, reasoner, options = 
       if (!grounded.length) return deterministic;
       const withModel = {
         ...deterministic,
-        requiredContent: grounded,
+        requiredContent: options.preferModel === true && deterministicUsable
+          ? [...new Map([...deterministic.requiredContent, ...grounded].map(item => [item.text.toLowerCase(), item])).values()]
+          : grounded,
         originalRequiredContent: deterministic.requiredContent,
         droppedModelContent,
         interpretedBy: 'deterministic+model'
       };
+      if (options.preferModel === true) withModel.modelInterpretation = { verified: true };
       withModel.analysis = analyseRequest({
         text: withModel.text, deliverable: withModel.deliverable, subjectEntity: withModel.subjectEntity,
-        intent: withModel.intent, requiredContent: grounded, deadline: withModel.deadline, impliedClaims: withModel.impliedClaims
+        intent: withModel.intent, requiredContent: withModel.requiredContent, deadline: withModel.deadline, impliedClaims: withModel.impliedClaims
       });
       withModel.qualifiers = withModel.analysis.qualifiers;
       return withModel;
@@ -1101,7 +1402,7 @@ export async function interpretRequestWithReasoner(message, reasoner, options = 
 }
 
 export const requestsApi = {
-  interpretRequest, explainRequest, interpretRequestWithReasoner, extractDeadline, extractRequiredContent,
-  extractRequestQualifiers, analyseRequest, escapeRegex,
+  interpretRequest, explainRequest, interpretRequestWithReasoner, recoverRequestCandidateWithReasoner, extractDeadline, extractRequiredContent,
+  extractRequestQualifiers, extractDeliveryRecipients, analyseRequest, escapeRegex,
   isAutomatedSender, hasRequestForm, deliverableIsGoverned
 };

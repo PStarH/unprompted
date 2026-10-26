@@ -71,7 +71,7 @@ test('metrics are derived from recorded outcomes, with a basis for every number'
   assert.ok(metrics.attention.basis.length > 0);
 });
 
-test('a discovered, prepared and verified task scores as valuable and complete', async () => {
+test('the legacy activity proxy counts prepared and verified work without proving user value', async () => {
   const { engine } = setup();
   engine.ingest(email());
   engine.ingest(doc());

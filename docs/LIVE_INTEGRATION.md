@@ -2,9 +2,23 @@
 
 [← Documentation](README.md)
 
-Try the [local demo](QUICKSTART.md) first. Connecting an account is optional and
-requires your own Google Cloud project. The connector is an early integration;
-start with a dedicated test account and synthetic email and documents.
+Start with `npm start`, connect your model, then connect Google on the same
+page. Choose which sources to read and whether to keep observing. Google
+consent activates the workspace immediately; no refresh-token copying or
+service restart is needed. The first pass reads recent email and existing Docs,
+and the page reports what was actually read and discovered.
+
+If your distribution provides a registered Desktop OAuth client, choose
+**Connect Google**. Self-hosted checkouts without one show a one-time Google
+Cloud guide and accept the downloaded Desktop client JSON. The
+[app and browser connection guide](ONBOARDING.md) covers both paths, popup
+fallback, pause, incremental permissions and disconnection. The command-line
+instructions below are an alternative for environment-managed installations.
+
+Normal startup observes real connected sources. It does not play a sample.
+The integration is early; production behavior and real-world usefulness still
+need real-account validation. Google Docs editing additionally needs the Docs
+API, its granted scope and explicit action authorization.
 
 ## 1. Prepare your Google project
 
@@ -57,8 +71,10 @@ UNPROMPTED_SYNC_INTERVAL_MS=60000
 UNPROMPTED_STATE_FILE=./data/google-readonly.json
 ```
 
-Keep model configuration unset to avoid sending request content to an external
-model. Use Node.js 22+ and load the file explicitly:
+For the actual agent, connect your model in the interface or supply its
+configuration in the same environment. Read-only mode prevents Google writes;
+it does not prevent task context being sent to your selected model. Use
+Node.js 22+ and load the file explicitly:
 
 ```sh
 node --env-file=.env server.js
@@ -90,11 +106,11 @@ An unsupported freshness claim should remain withheld.
 
 | Symptom | Check |
 | --- | --- |
-| Still in simulation | All three credential settings must be present, and `.env` must be explicitly loaded. Inspect `pendingConfiguration` in `/api/runtime`. |
+| Still waiting for a workspace | Finish Google consent. For environment setup, load `.env` explicitly and provide all three credential settings. |
 | Consent denied | Check the enabled APIs, consent configuration, test-user access and Desktop client type. |
 | Refresh fails | The token may be expired or revoked. Authorize again; Google consent/testing rules can limit token lifetime. |
 | No new events | Check the polling interval, Gmail query, document access and connector status. Incremental sync only processes its current window. |
-| Send is refused | This is expected in read-only mode. Use the built-in demo for simulated sending. |
+| Send is refused | Reading and drafting still work. Enable approved sending in Connections when you want Gmail delivery. |
 | State is locked | Stop the other process or choose a separate state file. |
 
 ## Live send testing for contributors
@@ -117,6 +133,34 @@ before conducting a live test.
 
 ## Disconnect
 
-Stop the process. Revoke the application in your Google account's connected-app
+Choose **Disconnect Google** in Connections to immediately stop this process’s
+reading and external actions. Existing local work records remain, and the client
+configuration is kept so reconnecting does not require creating another project.
+You can reconnect without restarting. For an environment-managed account,
+remove the launch credentials too if it should stay disconnected on a later boot.
+
+To also revoke the provider grant, revoke the application in your Google account's connected-app
 settings. Remove local credentials and state you no longer need, including any
 backups or logs containing account content. Never submit those files as feedback.
+
+## Distribution setup
+
+A product distribution can provision its registered Desktop OAuth client once:
+
+```sh
+UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE=/path/to/desktop-client.json npm start
+```
+
+For the macOS bundle:
+
+```sh
+node scripts/build-macos-app.mjs --out outputs/Unprompted-Connected.app --google-client /path/to/desktop-client.json
+```
+
+Users then choose their Google account and consent without creating a Cloud
+project. This option supplies client metadata; it does not manufacture Google
+registration or verification. Gmail and Drive read scopes are restricted scopes.
+Public distribution needs the applicable Google review unless an exception
+applies. External apps left in Testing can issue refresh tokens that expire
+after seven days. See Google’s [restricted-scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification)
+and [token expiration rules](https://developers.google.com/identity/protocols/oauth2#expiration).

@@ -446,6 +446,47 @@ export function applyModelProposals(plan, proposals, request) {
   };
 }
 
+/** Persist bounded model input, then validate it again under the current rules on restore. */
+export function checkpointPlan(plan) {
+  return {
+    version: 1,
+    signature: plan.signature,
+    rejected: rejectionSummaries(plan.rejected),
+    proposals: plan.specs.filter(spec => spec.origin === 'model').slice(0, MAX_MODEL_PROBES).map(spec => ({
+      criterionId: spec.criterionId.replace(/^model-/, ''),
+      concept: spec.concept,
+      criterionLabel: spec.criterionLabel,
+      provider: spec.provider,
+      strategies: spec.strategies,
+      keywords: spec.keywords.slice(0, 12),
+      requiredKeywords: spec.requiredKeywords,
+      justification: spec.justification,
+      expectedEvidence: spec.expectedEvidence,
+      constraints: spec.constraints
+    }))
+  };
+}
+
+function rejectionSummaries(rejected) {
+  return (Array.isArray(rejected) ? rejected : []).slice(0, MAX_MODEL_PROBES).map(item => ({
+    proposal: {
+      concept: String(item?.proposal?.concept ?? '').slice(0, MAX_CONCEPT_CHARS),
+      strategy: String(item?.proposal?.strategy ?? '').slice(0, 80)
+    },
+    reason: String(item?.reason ?? '').slice(0, 400)
+  }));
+}
+
+export function restorePlan(plan, checkpoint, request) {
+  if (checkpoint?.version !== 1 || checkpoint.signature !== plan.signature || !Array.isArray(checkpoint.proposals)) return plan;
+  const restored = applyModelProposals(plan, checkpoint.proposals, request);
+  return {
+    ...restored,
+    restoreBlocked: restored.rejected.length > 0,
+    rejected: [...rejectionSummaries(checkpoint.rejected), ...restored.rejected]
+  };
+}
+
 /**
  * Bounded plan cache. Reuses a valid plan for an identical request instead of
  * re-deriving it, and never grows without limit.
@@ -474,5 +515,5 @@ export class PlanCache {
 
 export const planApi = {
   MAX_PROBES_PER_PLAN, MAX_MODEL_PROBES, planSignature, buildDeterministicPlan,
-  validateProposal, applyModelProposals, PlanCache, slugify
+  validateProposal, applyModelProposals, checkpointPlan, restorePlan, PlanCache, slugify
 };

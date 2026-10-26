@@ -5,6 +5,21 @@ export class UncertainDeliveryError extends Error {
   }
 }
 
+export class ReadOnlyDeliveryProvider {
+  constructor(kind) { this.kind = kind; this.live = true; this.canSend = false; }
+  send() { throw new Error('This source is read-only; no delivery was attempted.'); }
+  lookup() { return { status: 'unknown', receipt: null, detail: 'This source has no authorized delivery transport.' }; }
+  verifyReceipt() { return this.lookup(); }
+}
+
+/** Select by the request's source; an Outlook request can never use Gmail. */
+export class SourceDeliveryRouter {
+  constructor(providers, fallback = new ReadOnlyDeliveryProvider('unavailable')) {
+    this.providers = providers; this.fallback = fallback; this.kind = 'connected-sources'; this.live = true;
+  }
+  forSource(source) { return this.providers[source] || this.fallback; }
+}
+
 /**
  * Mail provider contract (async):
  *   kind                        'simulated' | 'gmail'
@@ -83,6 +98,8 @@ export class GoogleMailAdapter {
     this.kind = 'gmail';
     this.live = true;
   }
+
+  get canSend() { return this.connector.sendEnabled === true && this.connector.shadow === false && this.connector.live === true; }
 
   async send({ idempotencyKey, to, subject, body, threadId = null }) {
     if (this.connector.shadow) {

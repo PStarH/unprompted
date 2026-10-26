@@ -6,12 +6,12 @@
  * identifiers and timestamps are preserved so evidence can cite them later.
  */
 
-export const EVENT_TYPES = ['email.received', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed'];
+export const EVENT_TYPES = ['email.received', 'issue.updated', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed'];
 
 /** Registry publications: the generalized name plus the original experiment-only one. */
 export const REGISTRY_EVENT_TYPES = ['record.published', 'experiment.run.completed'];
 
-export const SOURCES = ['simulated', 'google'];
+export const SOURCES = ['simulated', 'google', 'github', 'microsoft'];
 
 export class EventValidationError extends Error {
   constructor(message) {
@@ -71,6 +71,15 @@ export function validateRunPayload(payload) {
 }
 
 export function validateEventPayload(event) {
+  if (event.type === 'issue.updated') {
+    const issue = event.payload;
+    if (!issue?.id || typeof issue.title !== 'string' || !issue.repository || !Number.isSafeInteger(issue.number)
+      || typeof issue.assigned !== 'boolean' || !['open', 'closed', 'unavailable'].includes(issue.state)
+      || !Number.isFinite(Date.parse(issue.updatedAt)) || typeof issue.url !== 'string') throw new EventValidationError('Issue payload is incomplete or invalid.');
+    const url = new URL(issue.url);
+    if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.username || url.password) throw new EventValidationError('Issue source URL is invalid.');
+    return true;
+  }
   if (event.type === 'email.received') return validateEmailPayload(event.payload);
   if (event.type === 'document.modified') return validateDocumentPayload(event.payload);
   if (event.type === 'document.unavailable') return validateDocumentUnavailablePayload(event.payload);

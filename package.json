@@ -6,18 +6,35 @@
   "license": "Apache-2.0",
   "scripts": {
     "demo": "node scripts/demo.mjs",
-    "start": "node server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js",
-    "test:fast": "node --test --test-concurrency=1 $(find test -name '*.test.js' ! -name 'api.test.js' ! -name 'framework-eval.test.js' ! -name 'generalization.test.js')",
-    "test:workflow": "node --test test/workflow.test.js",
-    "test:api": "node --test test/api.test.js",
+    "example": "node examples/first-workflow.mjs",
+    "start": "node scripts/start.mjs",
+    "test": "node scripts/test-runner.mjs",
+    "test:fast": "node scripts/test-runner.mjs --exclude=api.test.js --exclude=framework-eval.test.js --exclude=generalization.test.js",
+    "test:workflow": "node scripts/test-runner.mjs --file=test/workflow.test.js",
+    "test:api": "node scripts/test-runner.mjs --file=test/api.test.js",
+    "test:browser": "node test/browser/interaction-contract.mjs",
+    "test:first-run": "node test/browser/first-run.mjs",
+    "test:model-onboarding": "node test/browser/model-onboarding.mjs",
+    "test:google-onboarding": "node test/browser/google-onboarding.mjs",
+    "test:connections": "node test/browser/connected-sources.mjs",
     "eval": "node eval/run.js",
     "eval:value": "node eval/value.js",
+    "study:value": "node scripts/value-study.mjs",
     "eval:framework": "node eval/framework-run.js",
     "check:public": "node scripts/check-public.mjs",
-    "release:prepare": "node scripts/prepare-public-release.mjs"
+    "check:syntax": "node scripts/check-syntax.mjs",
+    "release:prepare": "node scripts/prepare-public-release.mjs",
+    "build:macos-app": "node scripts/build-macos-app.mjs",
+    "smoke:macos-app": "node scripts/smoke-macos-app.mjs",
+    "eval:resilience": "node eval/resilience.js",
+    "eval:lifecycle": "node eval/lifecycle.js",
+    "eval:pi": "node eval/pi.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "optionalDependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0"
   }
 }

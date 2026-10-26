@@ -2,7 +2,7 @@ blank_issues_enabled: true
 contact_links:
   - name: First-run guide / 首次运行
     url: https://github.com/PStarH/unprompted/blob/main/docs/QUICKSTART.md
-    about: Start the credential-free local demo and troubleshoot setup.
+    about: Connect your model and a real workspace, or troubleshoot setup.
   - name: Security policy / 安全报告
     url: https://github.com/PStarH/unprompted/blob/main/SECURITY.md
     about: Report vulnerabilities privately; do not post exploit details in an issue.

@@ -404,7 +404,8 @@ test('the Gmail send method refuses in shadow mode without calling the network',
   }, { store });
   assert.equal(runtime.shadow, true);
   assert.equal(runtime.policy.shadow, true);
-  assert.equal(runtime.provider.kind, 'simulated');
+  assert.equal(runtime.provider.kind, 'gmail');
+  assert.equal(runtime.provider.canSend, false);
   assert.equal(runtime.connectors.find(item => item.id === 'google').shadow, true);
 });
 
@@ -482,12 +483,14 @@ async function startServer(extraEnv = {}, { seed = null } = {}) {
   const stateFile = path.join(dir, 'state.json');
   if (seed) fs.writeFileSync(stateFile, JSON.stringify(seed, null, 2) + '\n');
   const port = 25000 + (process.pid % 10000) + Math.floor(Math.random() * 500);
+  const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GOOGLE_|UNPROMPTED_)/i.test(key)));
   const child = spawn(node, [path.join(root, 'server.js')], {
     cwd: root,
     env: {
-      ...process.env,
+      ...inheritedEnv,
       PORT: String(port),
       UNPROMPTED_STATE_FILE: stateFile,
+      UNPROMPTED_CONFIG_DIR: path.join(dir, 'config'),
       UNPROMPTED_FORCE_SIMULATION: 'true',
       ...extraEnv
     },

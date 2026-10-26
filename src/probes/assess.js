@@ -178,6 +178,13 @@ export function executeSpec(spec, context) {
  */
 export function assessPlan(plan, context) {
   const observations = [];
+  if (plan?.restoreBlocked) {
+    const detail = 'A saved verification plan no longer passes validation; its requirements must be reviewed before execution.';
+    return {
+      criteria: [criterion({ id: 'model_plan_revalidation', label: 'Saved verification plan is valid', status: 'blocked', note: detail })],
+      observations: [{ id: 'model_plan_revalidation', detail }]
+    };
+  }
   if (!plan?.specs?.length) {
     return {
       criteria: [],
