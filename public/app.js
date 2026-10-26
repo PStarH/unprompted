@@ -19,6 +19,7 @@ let runtime = null;
 let busy = false;
 let toastTimer = null;
 let lastToast = null;
+let stateStream = null;
 
 function toast(message, isError = false, action = null) {
   const element = byId('toast');
@@ -936,7 +937,7 @@ function renderDashboard() {
   byId('connectionCatalogHome').hidden = !runtime || explicitDemo;
   if (!explicitDemo) updateContent('connectionCatalogHome', renderConnectors({ home: true }));
   workspaceOnboarding.hidden = !runtime || explicitDemo || selectedConnection !== 'google';
-  byId('googleSetupPanel').hidden = selectedConnection !== 'google';
+  byId('googleSetupPanel').hidden = !explicitDemo && selectedConnection !== 'google';
   byId('observationPanel').hidden = !setupState?.workspace?.ready;
   if (setupState?.workspace?.ready) updateContent('observationContent', renderObservation());
   if (!workspaceOnboarding.hidden) updateContent('workspaceOnboarding', renderSetupPanel({ home: true }));
@@ -1705,8 +1706,9 @@ function scheduleSnoozes() {
 }
 
 async function refreshState() {
-  const response = await fetch('/api/state');
-  if (!response.ok) throw new Error(copy('服务暂时没有返回工作空间。'));
+  const [response, report] = await Promise.all([fetch('/api/state'), fetch('/api/runtime')]);
+  if (!response.ok || !report.ok) throw new Error(copy('服务暂时没有返回工作空间。'));
+  renderRuntime(await report.json());
   render(await response.json());
 }
 
@@ -1744,7 +1746,7 @@ document.addEventListener('click', async event => {
     document.body.append(button); button.click(); button.remove(); return;
   }
   if (event.target.closest('[data-sync-state]')) {
-    try { await refreshState(); actionErrors.clear(); renderDashboard(); toast(copy('当前进展已同步。')); } catch (error) { toast(error.message, true); }
+    try { await refreshState(); connectStateStream(true); actionErrors.clear(); renderDashboard(); toast(copy('当前进展已同步。')); } catch (error) { toast(error.message, true); }
   }
 });
 byId('languageSelect').addEventListener('change', event => { setLocale(event.target.value); applyLocale(); });
@@ -1758,22 +1760,18 @@ document.addEventListener('visibilitychange', () => {
   else renderDashboard();
 });
 
-(async () => {
-  try {
-    const [stateResponse, runtimeResponse] = await Promise.all([fetch('/api/state'), fetch('/api/runtime')]);
-    if (!stateResponse.ok || !runtimeResponse.ok) throw new Error(copy('服务暂时没有返回工作空间。'));
-    renderRuntime(await runtimeResponse.json());
-    connected = true;
-    render(await stateResponse.json());
-  } catch (error) { toast(ui`无法载入工作空间：${error.message}`, true); }
+function connectStateStream(force = false) {
+  if (stateStream && !force && stateStream.readyState !== EventSource.CLOSED) return;
+  stateStream?.close();
   const stream = new EventSource('/api/stream');
+  stateStream = stream;
   stream.onopen = () => {
     connected = true;
     byId('connectionDot').className = 'connection-dot connected';
     byId('connectionText').textContent = copy('实时连接');
     renderDashboard();
     // Recover a failed initial runtime fetch without requiring a page reload.
-    if (!runtime) fetch('/api/runtime').then(response => {
+    if (!runtime?.demo) fetch('/api/runtime').then(response => {
       if (!response.ok) throw new Error('Runtime unavailable');
       return response.json();
     }).then(report => { renderRuntime(report); renderDashboard(); }).catch(() => {});
@@ -1794,4 +1792,13 @@ document.addEventListener('visibilitychange', () => {
     renderDashboard();
     if (!current) byId('agentStatus').innerHTML = ui`<span class="agent-mark" aria-hidden="true"><i></i><i></i></span><div><strong>暂时无法连接工作空间</strong><p>服务恢复后会自动重试。请确认本地服务仍在运行。</p></div><button class="secondary-button" data-sync-state>${copy('重新同步')}</button>`;
   };
+}
+
+(async () => {
+  try {
+    await refreshState();
+    connected = true;
+    renderDashboard();
+  } catch (error) { toast(ui`无法载入工作空间：${error.message}`, true); }
+  connectStateStream();
 })();
