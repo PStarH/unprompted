@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { startConnectedFixture } from '../fixtures/connected-workspace.mjs';
 const { chromium } = await import(process.env.UNPROMPTED_PLAYWRIGHT_MODULE || 'playwright');
 const output = process.env.UNPROMPTED_BROWSER_OUTPUT || 'outputs/connectors-validation';
@@ -8,6 +10,7 @@ const fixture = await startConnectedFixture();
 const browser = await chromium.launch({ channel: process.env.UNPROMPTED_BROWSER_CHANNEL || undefined, headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en-US', reducedMotion: 'reduce', permissions: ['clipboard-read', 'clipboard-write'] });
 const page = await context.newPage(), errors = [], checks = [];
+const localFolder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-browser-local-')));
 page.on('pageerror', error => errors.push(error.message));
 const record = id => checks.push({ id, passed: true });
 for (const [url, id] of [['https://github.com/login/device', 'github'], ['https://microsoft.com/devicelogin', 'microsoft']]) {
@@ -17,8 +20,10 @@ try {
   await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
   const home = page.locator('#connectionCatalogHome'); await home.waitFor();
   assert.equal(await home.locator('[data-connection-card]').count(), 5);
-  assert.equal(await home.locator('[data-native-source=local_files]').count(), 1);
-  assert.equal(await home.locator('[data-native-source=apple_notes]').count(), 1);
+  const native = (await (await page.request.get(fixture.base + '/api/setup')).json()).localSources;
+  if (native.local_files.nativePicker) assert.equal(await home.locator('[data-native-source=local_files]').isEnabled(), true);
+  else assert.equal(await home.locator('[data-native-path-form] [name=path]').isVisible(), true);
+  assert.equal(await home.locator('[data-native-source=apple_notes]').isEnabled(), native.apple_notes.available);
   assert.equal(await page.locator('#workspaceOnboarding').isVisible(), false, 'Google setup does not block selecting another source');
   const model = page.locator('[data-model-form]');
   await model.locator('[name="baseUrl"]').fill(fixture.endpoint + '/model/v1');
@@ -81,12 +86,30 @@ try {
   assert.doesNotMatch(JSON.stringify(setup), /PRIVATE_|accessToken|refreshToken/);
   assert.equal(fixture.calls.some(call => /\/(?:send|comments)$/.test(call.path)), false);
   record('disconnecting-one-source-retains-the-other-and-no-provider-write-is-issued');
+  fs.writeFileSync(path.join(localFolder, 'work.md'), '- [ ] Follow supplier delivery\nSelected local source text');
+  const selected = await page.request.post(fixture.base + '/api/setup/local-sources/local_files/select', { data: { path: localFolder } });
+  assert.equal(selected.status(), 200);
+  await page.locator('[data-view="home"]').click();
+  const localTask = page.locator('#taskContent [data-task-card^="observed:"]'); await localTask.waitFor();
+  assert.match(await localTask.innerText(), /Follow supplier delivery/); assert.equal(await localTask.locator('[data-action="approve"]').count(), 0);
+  const localUrl = await localTask.locator('a').getAttribute('href');
+  assert.match(await (await page.request.get(localUrl)).text(), /Selected local source text/);
+  record('selected-local-folder-produces-real-source-task-without-email-actions');
+  await localTask.locator('[data-action="cancel"]').click();
+  await page.waitForFunction(() => !document.querySelector('#taskContent [data-task-card^="observed:"]'));
+  record('local-task-stops-directly-from-its-card');
+  await page.locator('[data-view="sources"]').click();
+  await sources.locator('[data-connection-card="local_files"] [data-native-operation="remove-scope"]').click();
+  await page.waitForFunction(() => !document.querySelector('#connectorContent [data-connection-card="local_files"] [data-native-operation="forget"]'));
+  assert.equal((await page.request.get(localUrl)).status(), 404);
+  record('removing-local-scope-revokes-current-document-access');
   assert.deepEqual(errors, []);
 } catch (error) {
   checks.push({ passed: false, error: error.message, stack: error.stack }); process.exitCode = 1;
   await page.screenshot({ path: `${output}/failure.png`, fullPage: true, animations: 'disabled' });
 } finally {
   await browser.close(); await fixture.close();
+  fs.rmSync(localFolder, { recursive: true, force: true });
   const report = { checks, errors, providerKind: 'scripted-device-oauth-and-provider-http', realAccountsValidated: false };
   fs.writeFileSync(`${output}/connected-sources.json`, JSON.stringify(report, null, 2) + '\n'); console.log(JSON.stringify(report, null, 2));
 }
