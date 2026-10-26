@@ -86,7 +86,8 @@ try {
  assert.equal(await detail.evaluate(el=>el.open),true);
  record('chinese-composition-defers-render-and-then-catches-up');
  await page.keyboard.press('Escape');
- await page.waitForFunction(()=>!document.querySelector('#taskDialog').open);
+ // Native dialog closing queues its close event, which restores the opener.
+ await page.waitForFunction(()=>!document.querySelector('#taskDialog').open && document.activeElement.dataset.openTask==='human-a');
  assert.equal(await page.evaluate(()=>document.activeElement.dataset.openTask),'human-a');
  record('closing-refreshed-details-restores-task-focus');
  const order=await page.locator('#taskContent > [data-task-card]').evaluateAll(nodes=>nodes.map(n=>n.dataset.taskCard));
