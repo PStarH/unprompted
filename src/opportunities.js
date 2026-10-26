@@ -280,7 +280,13 @@ export const OPPORTUNITY_SIGNALS = [SIGNAL_FRESHNESS, SIGNAL_BLOCKED_SOURCE, SIG
  * an external system or the task list.
  */
 export function evaluateOpportunities(state, { now = new Date().toISOString(), signals = OPPORTUNITY_SIGNALS } = {}) {
-  const candidates = signals.flatMap(signal => signal.collect(state, now, signal));
+  // A decision to close or decline work also removes it from recurrence evidence.
+  const activeState = {
+    ...state,
+    tasks: Object.fromEntries(Object.entries(state.tasks || {}).filter(([, task]) =>
+      !['completed', 'cancelled'].includes(task.status) && task.userDismissed !== true))
+  };
+  const candidates = signals.flatMap(signal => signal.collect(activeState, now, signal));
   return candidates.map(decideOpportunity);
 }
 

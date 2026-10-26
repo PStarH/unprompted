@@ -1,7 +1,14 @@
-import { explainRequest, interpretRequestWithReasoner, normaliseDateLocale } from './requests.js';
+import {
+  explainRequest, interpretRequestWithReasoner, recoverRequestCandidateWithReasoner,
+  extractDeadline, extractRequiredContent, analyseRequest, hasRequestForm, isAutomatedSender, normaliseDateLocale
+} from './requests.js';
+import {
+  commitmentScope, sameCommitment, requestRevisionSignature, isWithdrawalMessage,
+  isRescheduleMessage, narrowCommitmentsByMessage, isTrustedThreadSender, unquotedMessageFields
+} from './commitments.js';
 import { rankCandidates } from './correlation.js';
 import { criteriaToHumanStrings, missingLabels } from './criteria.js';
-import { buildDeterministicPlan, applyModelProposals, PlanCache, planSignature } from './probes/plan.js';
+import { buildDeterministicPlan, applyModelProposals, checkpointPlan, restorePlan, PlanCache, planSignature } from './probes/plan.js';
 import { assessPlan, completionFromCriteria } from './probes/assess.js';
 import { PROVIDER_IDS, describeProviders } from './probes/providers.js';
 import { STRATEGY_IDS } from './probes/strategies.js';
@@ -23,6 +30,11 @@ import { evaluateOpportunities, mergeOpportunities, openOpportunities } from './
 import { computeProductMetrics, summariseSources } from './metrics.js';
 import { chooseVerificationDepth, compareAcrossSources, applySourceConflicts, CROSS_CHECK_LIMIT } from './verification.js';
 import { traceEntry, appendTrace, explainDecision, summariseDecision } from './trace.js';
+import { TaskServices } from './task-services.js';
+import { projectWorkspaceTaskManagement } from './task-management.js';
+import { draftReviewToken } from './draft-review.js';
+import { REASONING_RECOVERY, reasoningFailure, reasoningMayResume } from './reasoning-recovery.js';
+import { ingestAssignedIssue } from './external-work.js';
 
 /**
  * The work engine.
@@ -33,14 +45,34 @@ import { traceEntry, appendTrace, explainDecision, summariseDecision } from './t
  *   permissions checked -> action prepared or executed -> result verified
  *
  * Deterministic logic owns identity, deduplication, state transitions,
- * completeness comparison and permissions. A model, when configured, may only
- * help interpret an under-specified request; it can never assert completion.
+ * completeness comparison and permissions. Primary model mode interprets
+ * requests before readiness; the model can never assert verified completion.
  */
 
 const stamp = () => new Date().toISOString();
+const withRecord = (records, id, value) => {
+  const next = new Map(Object.entries(records));
+  next.set(id, value);
+  return Object.fromEntries(next);
+};
 const record = (state, kind, text, taskId = null, eventId = null) => {
   state.history.push({ id: `h-${state.history.length + 1}`, at: stamp(), kind, text, taskId, eventId });
 };
+const sourceTimestamp = (message, event) => {
+  const raw = message?.receivedAt || event?.at || stamp();
+  const time = Date.parse(raw);
+  return Number.isFinite(time) ? new Date(time).toISOString() : stamp();
+};
+const requestSnapshot = request => ({
+  intent: request?.intent || null,
+  deliverable: request?.deliverable || null,
+  subjectEntity: request?.subjectEntity || null,
+  deadline: request?.deadline ? { ...request.deadline } : null,
+  requiredContent: (request?.requiredContent || []).map(item => typeof item === 'string' ? item : ({ text: item.text, sourceQuote: item.sourceQuote || null })),
+  deliveryRecipients: [...(request?.deliveryRecipients || [])],
+  explicitDocumentUrl: request?.explicitDocumentUrl || null
+});
+const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 
 /**
  * How long a request may sit with no observable progress before the
@@ -68,7 +100,7 @@ function describeDay(iso) {
 }
 
 /** A task is finished — completed, or closed by the user — and inert to new evidence. */
-const isSettled = task => task.status === 'completed' || task.status === 'cancelled';
+const isSettled = task => task.status === 'completed' || task.status === 'cancelled' || task.userDismissed === true;
 
 /**
  * A document whose source says it was removed, trashed, or is inaccessible is
@@ -76,6 +108,21 @@ const isSettled = task => task.status === 'completed' || task.status === 'cancel
  * assessment, approval and retry all treat them as absent.
  */
 const documentAvailable = document => Boolean(document) && document.available !== false;
+
+/** Delivery progress follows requirements and blockers, independently of source revision churn. */
+function progressSignature(task) {
+  const evidence = task.evidence || {};
+  return evidenceSignature({
+    request: planSignature(task.request),
+    criteria: (evidence.criteria || []).map(item => [item.id, item.required !== false, item.status, item.strength || null])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    freshness: evidence.freshness?.status || null,
+    blockers: (evidence.completion?.blockers || []).map(item => item.id).sort(),
+    conflicts: (evidence.conflicts || []).map(item => [item.id, [...(item.contenders || [])].sort()])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    unverifiable: (evidence.plan?.unverifiable || []).map(item => item.text).sort()
+  });
+}
 
 export function resolveDocumentLink(document, baseUrl) {
   if (document?.url && /^https?:\/\//i.test(document.url)) return document.url;
@@ -89,6 +136,7 @@ export class WorkEngine {
     provider = null,
     policy = new PermissionPolicy(),
     reasoner = null,
+    documentProvider = null,
     mode = null,
     stallAfterMs = DEFAULT_STALL_AFTER_MS,
     dateLocale = null,
@@ -97,6 +145,7 @@ export class WorkEngine {
     this.store = store;
     this.baseUrl = baseUrl;
     this.provider = provider || new SimulatedMailProvider(store);
+    this.documentProvider = documentProvider;
     this.policy = policy;
     this.reasoner = reasoner || createReasoner(process.env);
     this.mode = mode || store.state.mode || 'simulation';
@@ -107,8 +156,13 @@ export class WorkEngine {
     // The last UTC day the periodic sweep refreshed time-driven conditions for.
     this.lastAttentionDay = null;
     this.onChange = onChange;
-    this.pending = [];
+    this.pending = new Set();
+    this.pendingReasoning = new Map();
+    this.threadGenerations = new Map();
+    this.pendingDiscovery = new Map();
+    this.executingActions = new Set();
     this.planCache = new PlanCache();
+    this.taskServices = new TaskServices(this, { documentProvider });
     this.recover();
   }
 
@@ -136,11 +190,15 @@ export class WorkEngine {
    */
   #track(value) {
     const promise = Promise.resolve(value);
-    this.pending.push(promise.catch(() => {}));
+    const observed = promise.catch(() => {}).finally(() => this.pending.delete(observed));
+    this.pending.add(observed);
     return promise;
   }
 
-  async whenSettled() { await Promise.allSettled(this.pending); }
+  async whenSettled() {
+    // Finishing one job can start another, such as a scoped send after model refinement.
+    while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
 
   /** Settle a provider call synchronously when the provider is synchronous. */
   #resolve(value, handler) {
@@ -150,13 +208,25 @@ export class WorkEngine {
 
   publicState() {
     const state = this.store.state;
+    const now = stamp();
+    const taskValues = Object.values(state.tasks);
+    const managementByTaskId = projectWorkspaceTaskManagement(taskValues, state, now);
     return {
       revision: state.revision,
       mode: this.mode,
       runtime: state.runtime,
       simulation: state.simulation,
       events: state.events.map(({ payload, ...event }) => event),
-      tasks: Object.values(state.tasks),
+      tasks: taskValues.map(task => ({
+        ...task,
+        reviewToken: draftReviewToken(task),
+        management: managementByTaskId.get(task.id)
+      })),
+      taskWaits: Object.values(state.taskWaits || {}),
+      taskFeedbackRules: Object.values(state.taskFeedbackRules || {}),
+      documentPatches: Object.values(state.documentPatches || {}),
+      followUps: Object.values(state.followUps || {}),
+      dependencyDecisions: Object.values(state.dependencyDecisions || {}),
       documents: Object.values(state.documents),
       runRecords: Object.values(state.runRecords || {}),
       inbox: state.inbox,
@@ -178,7 +248,7 @@ export class WorkEngine {
       opportunities: Object.values(state.opportunities || {}),
       misses: state.misses || [],
       attention: summarise(state.notifications || []),
-      metrics: computeProductMetrics(state),
+      metrics: computeProductMetrics(state, { now }),
       // Which sources have been observed, how often they ask for work and by
       // which check their messages are declined — the source-level view of the
       // discovery gate, so "why is this source silent?" has an answer.
@@ -222,83 +292,540 @@ export class WorkEngine {
     validateEventPayload(event);
     if (this.store.state.events.some(existing => existing.id === event.id)) return { duplicate: true, id: event.id };
 
-    if (event.type === 'email.received') return this.#ingestEmail(event);
-    if (event.type === 'document.modified') return this.#ingestDocument(event);
-    if (event.type === 'document.unavailable') return this.#ingestDocumentUnavailable(event);
-    if (REGISTRY_EVENT_TYPES.includes(event.type)) return this.#ingestRunRecord(event);
-    throw new Error(`Unhandled event type: ${event.type}`);
+    let result;
+    if (event.type === 'email.received') result = this.#ingestEmail(event);
+    else if (event.type === 'issue.updated') {
+      result = ingestAssignedIssue(this.store, event);
+      this.changed();
+    }
+    else if (event.type === 'document.modified') result = this.#ingestDocument(event);
+    else if (event.type === 'document.unavailable') result = this.#ingestDocumentUnavailable(event);
+    else if (REGISTRY_EVENT_TYPES.includes(event.type)) result = this.#ingestRunRecord(event);
+    else throw new Error(`Unhandled event type: ${event.type}`);
+    this.taskServices.processObservedEvent(event);
+    return result;
+  }
+
+  #requestHistoryEntry(request, message, event, kind, revision, at = sourceTimestamp(message, event)) {
+    return {
+      revision,
+      kind,
+      at,
+      sourceMessageId: message.id,
+      sourceEventId: event.id,
+      source: { threadId: message.threadId || null, from: message.from, to: message.to || null, subject: message.subject || '' },
+      signature: requestRevisionSignature(request),
+      request: requestSnapshot(request)
+    };
+  }
+
+  #appendCommitmentSource(task, request, message, event, kind = 'duplicate') {
+    const at = sourceTimestamp(message, event);
+    const revision = Number(task.commitment?.revision || 1);
+    task.commitment = task.commitment || commitmentScope(request || task.request, message);
+    task.commitment.sourceMessageIds = [...new Set([...(task.commitment.sourceMessageIds || []), message.id])].slice(-100);
+    const previousAt = Date.parse(task.commitment.lastSourceAt || '');
+    if (!Number.isFinite(previousAt) || Date.parse(at) > previousAt) task.commitment.lastSourceAt = at;
+    task.requestHistory = task.requestHistory || [];
+    if (!task.requestHistory.some(item => item.sourceMessageId === message.id && item.kind === kind)) {
+      task.requestHistory.push(this.#requestHistoryEntry(request || task.request, message, event, kind, revision, at));
+      if (task.requestHistory.length > 100) task.requestHistory.splice(0, task.requestHistory.length - 100);
+    }
+  }
+
+  #makeRequestTask(state, request, message, event) {
+    const id = request.id || `request:${message.id}`;
+    const canonicalRequest = { ...request, id };
+    const at = sourceTimestamp(message, event);
+    const commitment = commitmentScope(canonicalRequest, message);
+    Object.assign(commitment, {
+      sourceMessageIds: [message.id],
+      revision: 1,
+      signature: requestRevisionSignature(canonicalRequest),
+      lastSourceAt: at,
+      status: 'active'
+    });
+    state.tasks[id] = {
+      id,
+      status: 'newly_discovered',
+      request: canonicalRequest,
+      commitment,
+      requestHistory: [this.#requestHistoryEntry(canonicalRequest, message, event, 'initial', 1, at)],
+      sourceEmailId: message.id,
+      sourceConnectorId: event.connectorId,
+      sender: message.from,
+      subject: message.subject,
+      createdAt: stamp(),
+      updatedAt: stamp(),
+      actionVersion: 0,
+      actionHistory: [],
+      pendingCommitmentChange: null,
+      reasoningWork: null,
+      documentId: null,
+      progress: null,
+      evidence: null,
+      assessment: null,
+      draft: null,
+      action: null,
+      reason: null
+    };
+    record(state, 'discovery',
+      `Discovered a request to ${canonicalRequest.intent.replaceAll('_', ' ')} the ${canonicalRequest.subjectEntity} ${canonicalRequest.deliverable} in an incoming email.`,
+      id, event.id);
+    appendTrace(state.trace, traceEntry({
+      stage: 'discovery', taskId: id, eventId: event.id,
+      input: { eventType: event.type, source: event.source, messageId: message.id, threadId: message.threadId || null },
+      reasoning: {
+        interpretedBy: canonicalRequest.interpretedBy,
+        entity: canonicalRequest.subjectEntity,
+        deliverable: canonicalRequest.deliverable,
+        intent: canonicalRequest.intent,
+        requiredContent: (canonicalRequest.requiredContent || []).map(item => item.text)
+      },
+      outcome: { taskId: id, status: 'newly_discovered', commitmentKey: commitment.key }
+    }));
+    return state.tasks[id];
+  }
+
+  #reviseCommitment(task, request, message, event, kind = 'revision') {
+    const at = sourceTimestamp(message, event);
+    const oldRevision = Number(task.commitment?.revision || 1);
+    const nextRevision = oldRevision + 1;
+    const latestRequest = { ...request, id: task.id };
+    const oldSignature = requestRevisionSignature(task.request);
+    const nextSignature = requestRevisionSignature(latestRequest);
+    const activeAction = task.action && ['executing', 'uncertain', 'accepted_live'].includes(task.action.status);
+
+    if (activeAction) {
+      task.pendingCommitmentChange = {
+        revision: nextRevision,
+        withdrawn: false,
+        at,
+        sourceMessageId: message.id,
+        previousSignature: oldSignature,
+        nextSignature
+      };
+      task.action.pendingCommitmentRevision = nextRevision;
+      task.actionVersion = Number(task.actionVersion || 0) + 1;
+    } else if (task.action) {
+      task.actionHistory = task.actionHistory || [];
+      task.actionHistory.push({ ...task.action, archivedAt: stamp(), archiveReason: 'request revised' });
+      if (task.actionHistory.length > 50) task.actionHistory.splice(0, task.actionHistory.length - 50);
+      task.action = null;
+      task.actionVersion = Number(task.actionVersion || 0) + 1;
+      task.pendingCommitmentChange = null;
+    }
+
+    task.requestHistory = task.requestHistory || [];
+    task.requestHistory.push(this.#requestHistoryEntry(task.request, message, event, 'superseded', oldRevision, at));
+    task.request = latestRequest;
+    task.commitment = task.commitment || commitmentScope(latestRequest, message);
+    task.commitment.revision = nextRevision;
+    task.commitment.signature = nextSignature;
+    task.commitment.status = activeAction ? 'revision_pending_reconciliation' : 'active';
+    task.commitment.lastSourceAt = at;
+    task.commitment.sourceMessageIds = [...new Set([...(task.commitment.sourceMessageIds || []), message.id])].slice(-100);
+    task.requestHistory.push(this.#requestHistoryEntry(latestRequest, message, event, kind, nextRevision, at));
+    if (task.requestHistory.length > 100) task.requestHistory.splice(0, task.requestHistory.length - 100);
+    task.actionVersion = Number(task.actionVersion || 0) + 1;
+    task.updatedAt = stamp();
+    task.draft = null;
+    task.evidence = null;
+    task.assessment = null;
+    task.progress = null;
+    task.reason = activeAction ? 'The request changed while an approved action may still be in progress; reconcile that action before continuing.' : null;
+    task.userDismissed = false;
+    task.reasoningPlan = null;
+    task.reasoningAttemptedFor = null;
+    task.reasoning = null;
+    this.#supersedeReasoning(task, 'request_revised');
+    if (!activeAction) task.status = 'newly_discovered';
+    record(this.store.state, 'request_revision',
+      `The same thread and delivery scope revised this request (${kind}); revision ${nextRevision} replaced the old draft and invalidated its action version.`, task.id, event.id);
+    return !activeAction;
+  }
+
+  #withdrawCommitment(task, message, event) {
+    const at = sourceTimestamp(message, event);
+    const revision = Number(task.commitment?.revision || 1) + 1;
+    const oldSignature = requestRevisionSignature(task.request);
+    const pending = task.action && ['executing', 'uncertain', 'accepted_live'].includes(task.action.status);
+    this.#appendCommitmentSource(task, task.request, message, event, 'withdrawal');
+    task.commitment.revision = revision;
+    task.commitment.signature = oldSignature;
+    task.commitment.lastSourceAt = at;
+    task.commitment.status = pending ? 'withdrawn_pending_reconciliation' : 'withdrawn';
+    task.actionVersion = Number(task.actionVersion || 0) + 1;
+    task.draft = null;
+    task.reasoningPlan = null;
+    task.reasoningAttemptedFor = null;
+    this.#supersedeReasoning(task, 'request_withdrawn');
+    if (pending) {
+      task.pendingCommitmentChange = { revision, withdrawn: true, at, sourceMessageId: message.id, previousSignature: oldSignature };
+      task.action.pendingCommitmentRevision = revision;
+      task.reason = 'The trusted sender withdrew the request while an approved action may already be in progress. The outcome must be reconciled; the system will not claim that an in-flight send was undone.';
+      task.status = task.action.status === 'uncertain' || task.action.status === 'accepted_live' ? 'blocked' : 'verifying';
+    } else {
+      if (task.action && task.action.status !== 'verified_live' && task.action.status !== 'verified_simulated') {
+        task.actionHistory = task.actionHistory || [];
+        task.actionHistory.push({ ...task.action, archivedAt: stamp(), archiveReason: 'request withdrawn before delivery was confirmed' });
+        task.action = null;
+      }
+      task.pendingCommitmentChange = null;
+      task.status = 'cancelled';
+      task.userDismissed = false;
+      task.reason = task.action
+        ? 'The request was withdrawn after the approved action had already been verified. That action was not undone; no further work will run.'
+        : 'The trusted sender withdrew this request. No further work will run.';
+    }
+    task.updatedAt = stamp();
+    task.requestHistory = task.requestHistory || [];
+    task.requestHistory.push(this.#requestHistoryEntry(task.request, message, event, 'withdrawal', revision, at));
+    if (task.requestHistory.length > 100) task.requestHistory.splice(0, task.requestHistory.length - 100);
+    record(this.store.state, 'request_withdrawal', pending
+      ? 'The trusted sender withdrew the request while an approved action may be in flight; preserving the action for reconciliation.'
+      : task.action
+        ? 'The trusted sender withdrew a request whose action was already verified; the sent action remains in history and will not be represented as undone.'
+        : 'The trusted sender withdrew the request; its draft and any unsent action were invalidated.', task.id, event.id);
+  }
+
+  #amendedRequest(task, message, event, { deadline = null, content = null } = {}) {
+    const text = `${task.request.text || ''}\n${message.subject || ''}\n${message.body || ''}`.trim();
+    const request = {
+      ...task.request,
+      text,
+      source: { ...task.request.source, id: message.id, threadId: message.threadId || task.commitment?.threadId || null, receivedAt: message.receivedAt || task.request.source?.receivedAt || null },
+      ...(deadline ? { deadline } : {}),
+      ...(content ? { requiredContent: content } : {})
+    };
+    request.analysis = analyseRequest({
+      text,
+      deliverable: request.deliverable,
+      subjectEntity: request.subjectEntity,
+      intent: request.intent,
+      requiredContent: request.requiredContent,
+      deadline: request.deadline,
+      impliedClaims: request.impliedClaims || []
+    });
+    request.qualifiers = request.analysis.qualifiers;
+    return request;
   }
 
   #ingestEmail(event) {
     const message = event.payload;
+    const sourceAt = sourceTimestamp(message, event);
+    const threadKey = message.threadId ? String(message.threadId) : `message:${message.id}`;
+    const generation = (this.threadGenerations.get(threadKey) || 0) + 1;
+    this.threadGenerations.set(threadKey, generation);
     const { request, rejection } = explainRequest(message, { dateLocale: this.#dateLocale() });
-    this.store.mutate(state => {
-      state.events.push(event);
-      if (!state.inbox.some(item => item.id === message.id)) state.inbox.push({ ...message });
+    const activeMessage = unquotedMessageFields(message);
+    const activeText = `${activeMessage.subject}\n${activeMessage.body}`;
+    const state = this.store.state;
+    let taskToAssess = null;
+    let allowAutomation = true;
+    let shouldReason = false;
+    let shouldRecoverDiscovery = false;
+    let selected = null;
+    const trusted = Object.values(state.tasks || {}).filter(task => isTrustedThreadSender(task, message));
+    const namedTrusted = narrowCommitmentsByMessage(trusted, message);
+    const directiveCandidates = namedTrusted.length ? namedTrusted : trusted;
+    const withdrawalTarget = isWithdrawalMessage(message) && directiveCandidates.length === 1 ? directiveCandidates[0] : null;
+    const reschedule = isRescheduleMessage(message) && directiveCandidates.length === 1 && !request
+      ? extractDeadline(activeText, { now: message.receivedAt || event.at, dateLocale: this.#dateLocale() })
+      : null;
+    const supplementContent = !request && directiveCandidates.length === 1 &&
+      /\b(?:add|include|incorporate|supplement|also\s+need)\b|(?:补充|補充|添加|增加|加入|纳入|納入)/u.test(activeText)
+      ? extractRequiredContent(activeText)
+      : [];
+    const matchCandidates = request
+      ? Object.values(state.tasks || {}).filter(task => sameCommitment(task.request, request))
+      : [];
+    const feedbackMatches = request ? this.taskServices.matchingFeedbackRules({ request, message }) : [];
+    const feedbackSuppress = feedbackMatches.find(item => item.effect === 'suppress_scoped_candidate');
+    const feedbackHandled = feedbackMatches.find(item => item.effect === 'ignore_as_already_handled');
+    const feedbackDuplicate = feedbackMatches.find(item => item.effect === 'associate_with_existing_task');
+    selected = matchCandidates.length === 1 ? matchCandidates[0] : null;
+
+    this.store.mutate(current => {
+      current.events.push(event);
+      if (!current.inbox.some(item => item.id === message.id)) current.inbox.push({ ...message, connectorId: event.connectorId, source: event.source });
       event.summary = `Email received · ${message.subject}`;
-      if (!request) {
-        event.disposition = 'context_only';
-        // Record *which* check declined it, so an ignored message is
-        // explainable rather than a silent gap the user cannot audit.
-        event.rejection = rejection || { code: 'unknown', detail: 'No request was identified.' };
-        record(state, 'observation',
-          `Observed an email and did not treat it as a request: ${event.rejection.detail}`, null, event.id);
+
+      if (withdrawalTarget) {
+        const latestAt = Date.parse(withdrawalTarget.commitment?.lastSourceAt || '');
+        if (Number.isFinite(latestAt) && Date.parse(sourceAt) < latestAt) {
+          event.disposition = 'stale_change';
+          event.relations = [withdrawalTarget.id];
+          event.rejection = { code: 'stale_thread_message', detail: 'This withdrawal predates a newer message in the same thread, so the newer request state was kept.' };
+          record(current, 'observation', event.rejection.detail, withdrawalTarget.id, event.id);
+        } else {
+          this.#withdrawCommitment(current.tasks[withdrawalTarget.id], message, event);
+          event.disposition = 'request_withdrawn';
+          event.relations = [withdrawalTarget.id];
+        }
         return;
       }
+
+      if (request && feedbackSuppress) {
+        event.disposition = 'suppressed_by_feedback';
+        event.feedbackRuleId = feedbackSuppress.rule.id;
+        event.rejection = { code: 'user_scope_correction', detail: feedbackSuppress.rule.reason || 'A reversible user correction suppresses this exact sender/thread scope.' };
+        record(current, 'feedback_applied', `A reversible user correction suppressed this request candidate within its exact scope (${feedbackSuppress.rule.id}).`, feedbackSuppress.rule.taskId, event.id);
+        return;
+      }
+
+      if (request && feedbackHandled) {
+        event.disposition = 'already_handled';
+        event.relations = feedbackHandled.targetTaskId ? [feedbackHandled.targetTaskId] : [];
+        event.feedbackRuleId = feedbackHandled.rule.id;
+        event.rejection = { code: 'user_marked_already_handled', detail: feedbackHandled.rule.reason || 'The user marked this exact scope as already handled.' };
+        record(current, 'feedback_applied', `A reversible user correction marked this scoped candidate already handled (${feedbackHandled.rule.id}); no new work was created.`, feedbackHandled.rule.taskId, event.id);
+        return;
+      }
+
+      if (request && feedbackDuplicate) {
+        const target = current.tasks[feedbackDuplicate.targetTaskId];
+        if (target && !isSettled(target)) {
+          this.#appendCommitmentSource(target, request, message, event, 'feedback_duplicate');
+          event.disposition = 'duplicate_request';
+          event.relations = [target.id];
+          event.feedbackRuleId = feedbackDuplicate.rule.id;
+          record(current, 'feedback_applied', `A reversible user correction associated this candidate with existing task ${target.id} (${feedbackDuplicate.rule.id}).`, target.id, event.id);
+          return;
+        }
+      }
+
+      if (reschedule && directiveCandidates.length === 1) {
+        const target = current.tasks[directiveCandidates[0].id];
+        const latestAt = Date.parse(target.commitment?.lastSourceAt || '');
+        if (Number.isFinite(latestAt) && Date.parse(sourceAt) < latestAt) {
+          event.disposition = 'stale_change';
+          event.relations = [target.id];
+          event.rejection = { code: 'stale_thread_message', detail: 'This deadline change predates a newer message in the same thread, so the newer request state was kept.' };
+          record(current, 'observation', event.rejection.detail, target.id, event.id);
+        } else {
+          const amended = this.#amendedRequest(target, message, event, { deadline: reschedule });
+          taskToAssess = this.#reviseCommitment(target, amended, message, event, 'deadline_change') ? target.id : null;
+          allowAutomation = false;
+          event.disposition = 'request_revision';
+          event.relations = [target.id];
+        }
+        return;
+      }
+
+      if (supplementContent.length && directiveCandidates.length === 1) {
+        const target = current.tasks[directiveCandidates[0].id];
+        const latestAt = Date.parse(target.commitment?.lastSourceAt || '');
+        if (Number.isFinite(latestAt) && Date.parse(sourceAt) < latestAt) {
+          event.disposition = 'stale_change';
+          event.relations = [target.id];
+          event.rejection = { code: 'stale_thread_message', detail: 'This supplement predates a newer message in the same thread, so the newer request state was kept.' };
+          record(current, 'observation', event.rejection.detail, target.id, event.id);
+        } else {
+          const combined = [...(target.request.requiredContent || []), ...supplementContent];
+          const content = [...new Map(combined.map(item => [String(item.text || item).toLowerCase(), item])).values()];
+          const amended = this.#amendedRequest(target, message, event, { content });
+          taskToAssess = this.#reviseCommitment(target, amended, message, event, 'requirement_supplement') ? target.id : null;
+          allowAutomation = false;
+          event.disposition = 'request_revision';
+          event.relations = [target.id];
+        }
+        return;
+      }
+
+      if (!request) {
+        event.disposition = 'context_only';
+        event.rejection = rejection || { code: 'unknown', detail: 'No request was identified.' };
+        if (trusted.length > 1 && (isWithdrawalMessage(message) || isRescheduleMessage(message))) {
+          event.rejection = { code: 'ambiguous_thread_update', detail: 'This trusted thread update could apply to more than one open commitment; none was changed.' };
+        }
+        event.reasoning = { status: 'not_started', kind: 'discovery_candidate', attempts: 0, maxAttempts: 2 };
+        record(current, 'observation',
+          `Observed an email and did not treat it as a request: ${event.rejection.detail}`, null, event.id);
+        shouldRecoverDiscovery = Boolean(
+          this.reasoner?.available?.() && !isAutomatedSender(message.from) && hasRequestForm(activeText) &&
+          ['no_deliverable', 'no_request_verb', 'no_entity', 'deliverable_not_requested'].includes(event.rejection.code)
+        );
+        return;
+      }
+
+      if (matchCandidates.length > 1) {
+        event.disposition = 'context_only';
+        event.rejection = { code: 'ambiguous_commitment', detail: 'This request could match more than one delivery scope in the thread; no task was merged or duplicated.' };
+        record(current, 'observation', event.rejection.detail, null, event.id);
+        return;
+      }
+
+      if (selected) {
+        const target = current.tasks[selected.id];
+        const latestAt = Date.parse(target.commitment?.lastSourceAt || '');
+        if (Number.isFinite(latestAt) && Date.parse(sourceAt) < latestAt) {
+          event.disposition = 'stale_change';
+          event.relations = [target.id];
+          event.rejection = { code: 'stale_thread_message', detail: 'This request predates a newer message in the same thread, so the newer request state was kept.' };
+          record(current, 'observation', event.rejection.detail, target.id, event.id);
+          return;
+        }
+        event.relations = [target.id];
+        const nextSignature = requestRevisionSignature(request);
+        if (nextSignature === requestRevisionSignature(target.request)) {
+          this.#appendCommitmentSource(target, request, message, event, 'duplicate');
+          event.disposition = 'duplicate_request';
+          record(current, 'duplicate_request', 'A repeated message from the same sender names the same thread, deliverable and delivery participants; it was attached to the existing commitment.', target.id, event.id);
+          return;
+        }
+        taskToAssess = this.#reviseCommitment(target, request, message, event, 'request_revision') ? target.id : null;
+        allowAutomation = false;
+        event.disposition = 'request_revision';
+        return;
+      }
+
+      const task = this.#makeRequestTask(current, request, message, event);
       event.disposition = 'discovered_request';
-      event.relations = [request.id];
-      if (state.tasks[request.id]) return;
-      state.tasks[request.id] = {
-        id: request.id,
-        status: 'newly_discovered',
-        request,
-        sourceEmailId: message.id,
-        sender: message.from,
-        subject: message.subject,
-        createdAt: stamp(),
-        updatedAt: stamp(),
-        documentId: null,
-        // `progress` records when the evidence behind this task last changed:
-        // the clock that decides when waiting has become being stuck.
-        progress: null,
-        evidence: null,
-        assessment: null,
-        draft: null,
-        action: null,
-        reason: null
-      };
-      record(state, 'discovery',
-        `Discovered a request to ${request.intent.replaceAll('_', ' ')} the ${request.subjectEntity} ${request.deliverable} in an incoming email.`,
-        request.id, event.id);
-      appendTrace(state.trace, traceEntry({
-        stage: 'discovery', taskId: request.id, eventId: event.id,
-        input: { eventType: event.type, source: event.source, messageId: message.id },
-        reasoning: {
-          interpretedBy: request.interpretedBy,
-          entity: request.subjectEntity,
-          deliverable: request.deliverable,
-          intent: request.intent,
-          requiredContent: (request.requiredContent || []).map(item => item.text)
-        },
-        outcome: { taskId: request.id, status: 'newly_discovered' }
-      }));
+      event.relations = [task.id];
+      taskToAssess = task.id;
+      shouldReason = true;
     });
-    if (request) {
-      this.assess(request.id, event.id);
-      // Mutually exclusive: refine the request when nothing could be mapped,
-      // otherwise ask for probes covering the content that was not covered.
-      if (!this.#maybeRefineWithModel(request.id, message)) this.#maybeProposeProbes(request.id);
+
+    if (taskToAssess) {
+      this.assess(taskToAssess, event.id, { force: true, allowAutomation });
+      const needsPrimaryReview = this.reasoner.preferModelInterpretation && this.#primaryReviewMissing(this.store.state.tasks[taskToAssess]);
+      const reviewMessage = shouldReason ? message : this.#taskSourceMessage(this.store.state.tasks[taskToAssess]) || message;
+      if ((shouldReason || needsPrimaryReview) && !this.#maybeRefineWithModel(taskToAssess, reviewMessage)) this.#maybeProposeProbes(taskToAssess);
+      if (!shouldReason && allowAutomation === false) this.#maybeProposeProbes(taskToAssess);
     }
     this.changed();
+    if (shouldRecoverDiscovery) this.#maybeRecoverUnrecognizedMessage(event, generation);
     return { duplicate: false, id: event.id, disposition: event.disposition, relations: event.relations };
+  }
+
+  #isLatestThreadMessage(message) {
+    if (!message?.threadId) return true;
+    const latest = (this.store.state.inbox || []).filter(item => item.threadId === message.threadId).at(-1);
+    return latest?.id === message.id;
+  }
+
+  #maybeRecoverUnrecognizedMessage(event, generation = null, { now = Date.now(), dueOnly = false } = {}) {
+    if (!this.reasoner?.available?.()) return false;
+    if (this.pendingDiscovery.has(event.id)) return false;
+    const message = event.payload;
+    const threadKey = message.threadId ? String(message.threadId) : `message:${message.id}`;
+    const currentGeneration = generation ?? this.threadGenerations.get(threadKey) ?? 0;
+    const storedEvent = this.store.state.events.find(item => item.id === event.id);
+    if (!storedEvent || !['not_started', 'pending', 'running', 'failed'].includes(storedEvent.reasoning?.status)) return false;
+    const work = storedEvent.reasoning;
+    if (work.status === 'failed' && !reasoningMayResume(work, now, { automatic: dueOnly })) return false;
+    const maxAttempts = Math.max(1, Math.min(2, Number(work.maxAttempts) || 2));
+    const attempts = Math.max(0, Number(work.attempts) || 0);
+    if (attempts >= maxAttempts) return false;
+    const attempt = attempts + 1;
+    const requestId = `${event.id}:discover-attempt:${attempt}`;
+    this.store.mutate(state => {
+      const target = state.events.find(item => item.id === event.id);
+      if (!target) return;
+      target.reasoning = { ...target.reasoning, status: 'running', attempts: attempt, maxAttempts, startedAt: stamp(), lastError: null, retryAt: null, terminalReason: null };
+    });
+    this.changed();
+
+    let failure = null;
+    const pending = recoverRequestCandidateWithReasoner(message, this.reasoner, {
+      dateLocale: this.#dateLocale(),
+      onError: error => { failure = error; }
+    }).then(request => {
+      const current = this.store.state.events.find(item => item.id === event.id);
+      if (!current || current.reasoning?.status !== 'running' || current.reasoning.attempts !== attempt) return;
+      const latestGeneration = this.threadGenerations.get(threadKey) ?? currentGeneration;
+      if (latestGeneration !== currentGeneration || !this.#isLatestThreadMessage(message)) {
+        this.store.mutate(state => {
+          const target = state.events.find(item => item.id === event.id);
+          if (target?.reasoning?.attempts === attempt) {
+            target.reasoning = { ...target.reasoning, status: 'superseded', finishedAt: stamp(), detail: 'A newer message arrived before this candidate interpretation completed; the old result was discarded.' };
+            record(state, 'reasoning_discarded', 'A model discovery result was discarded because a newer message arrived in the same thread first.', null, event.id);
+          }
+        });
+        this.changed();
+        return;
+      }
+      if (!request) {
+        this.store.mutate(state => {
+          const target = state.events.find(item => item.id === event.id);
+          if (!target) return;
+          target.reasoning = {
+            ...target.reasoning,
+            status: failure ? 'failed' : 'no_candidate',
+            finishedAt: stamp(),
+            lastError: failure?.message || null,
+            ...(failure ? reasoningFailure(failure, { attempts: attempt, maxAttempts }) : {}),
+            detail: failure
+              ? `Grounded discovery did not complete (${failure.message}); no task was created.`
+              : 'No candidate could be fully anchored in the original message; no task was created.'
+          };
+          record(state, failure ? 'reasoning_failure' : 'reasoning', target.reasoning.detail, null, event.id);
+        });
+        this.changed();
+        return;
+      }
+
+      let taskId = null;
+      let assess = false;
+      let allowAutomation = false;
+      this.store.mutate(state => {
+        const targetEvent = state.events.find(item => item.id === event.id);
+        if (!targetEvent) return;
+        const existing = Object.values(state.tasks).filter(task => sameCommitment(task.request, request));
+        if (existing.length > 1) {
+          targetEvent.disposition = 'context_only';
+          targetEvent.rejection = { code: 'ambiguous_commitment', detail: 'The grounded request matches more than one delivery scope; no task was merged or created.' };
+          targetEvent.reasoning = { ...targetEvent.reasoning, status: 'no_candidate', finishedAt: stamp(), detail: targetEvent.rejection.detail };
+          return;
+        }
+        if (existing.length === 1) {
+          const task = state.tasks[existing[0].id];
+          targetEvent.relations = [task.id];
+          if (requestRevisionSignature(task.request) === requestRevisionSignature(request)) {
+            this.#appendCommitmentSource(task, request, message, event, 'duplicate');
+            targetEvent.disposition = 'duplicate_request';
+          } else {
+            assess = this.#reviseCommitment(task, request, message, event, 'grounded_model_revision');
+            taskId = assess ? task.id : null;
+            targetEvent.disposition = 'request_revision';
+          }
+        } else {
+          const task = this.#makeRequestTask(state, request, message, event);
+          taskId = task.id;
+          assess = true;
+          targetEvent.disposition = 'discovered_request';
+          targetEvent.relations = [task.id];
+        }
+        targetEvent.reasoning = { ...targetEvent.reasoning, status: 'accepted', finishedAt: stamp(), acceptedTaskId: targetEvent.relations?.[0] || taskId, detail: 'A candidate was accepted only after every identity and action field was anchored in the original message.' };
+        record(state, 'grounded_discovery', targetEvent.reasoning.detail, taskId || targetEvent.relations?.[0] || null, event.id);
+      });
+      if (taskId && assess) {
+        this.assess(taskId, event.id, { force: true, allowAutomation });
+        this.#maybeProposeProbes(taskId);
+      }
+      this.changed();
+    }).catch(error => {
+      this.store.mutate(state => {
+        const target = state.events.find(item => item.id === event.id);
+        if (!target) return;
+        target.reasoning = { ...target.reasoning, status: 'failed', finishedAt: stamp(), lastError: error.message, detail: `Grounded discovery failed (${error.message}); no task was created.` };
+        record(state, 'reasoning_failure', target.reasoning.detail, null, event.id);
+      });
+      this.changed();
+    });
+    this.pendingDiscovery.set(event.id, pending);
+    pending.then(() => { if (this.pendingDiscovery.get(event.id) === pending) this.pendingDiscovery.delete(event.id); });
+    this.#track(pending);
+    return true;
   }
 
   #ingestDocument(event) {
     const doc = event.payload;
     const docId = String(doc.id);
     const stored = this.store.state.documents[docId];
-    const incomingAt = doc.modifiedAt ? Date.parse(doc.modifiedAt) : NaN;
-    const storedAt = stored?.modifiedAt ? Date.parse(stored.modifiedAt) : NaN;
+    const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
+    const storedAt = Date.parse(stored?.modifiedAt || stored?.observedAt || '');
     if (stored && Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt) {
       // Out-of-order arrival: an older revision must never overwrite newer
       // state, or evidence a task was already verified against would appear to
@@ -316,24 +843,26 @@ export class WorkEngine {
     }
     this.store.mutate(state => {
       const previous = state.documents[docId];
-      state.documents[docId] = {
+      state.documents = withRecord(state.documents, docId, {
         id: docId,
         title: doc.title,
         kind: doc.kind || 'document',
         content: doc.content,
         url: doc.url || `/documents/${docId}`,
         externalId: doc.externalId || null,
-        modifiedAt: doc.modifiedAt || stamp(),
+        modifiedAt: doc.modifiedAt || event.at || stamp(),
+        observedAt: event.at || stamp(),
         version: (previous?.version || 0) + 1,
         source: event.source,
         available: true,
         unavailableReason: null,
         unavailableAt: null
-      };
+      });
       state.events.push(event);
       event.summary = `Document changed · ${doc.title}`;
       const related = Object.values(state.tasks).filter(task =>
-        !isSettled(task) && rankCandidates(task.request, { [docId]: state.documents[docId] }).best);
+        !isSettled(task) && !this.#documentExcludedByFeedback(task, docId) &&
+        rankCandidates(task.request, Object.fromEntries([[docId, state.documents[docId]]])).best);
       event.relations = related.map(task => task.id);
       event.disposition = related.length ? 'related_change'
         : Object.keys(state.tasks).length ? 'unrelated_change' : 'context_only';
@@ -357,13 +886,27 @@ export class WorkEngine {
   #ingestDocumentUnavailable(event) {
     const doc = event.payload;
     const docId = String(doc.id);
+    const previous = this.store.state.documents[docId];
+    const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
+    const storedAt = Date.parse(previous?.modifiedAt || previous?.observedAt || '');
+    if (previous && Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt) {
+      this.store.mutate(state => {
+        state.events.push(event);
+        event.summary = `Stale unavailability notice · kept the newer ${previous.title || docId}`;
+        event.disposition = 'stale_change';
+        event.relations = [];
+        record(state, 'observation', `An older unavailability notice for "${previous.title || docId}" arrived after a newer revision; the current document state was kept.`, null, event.id);
+      });
+      this.changed();
+      return { duplicate: false, id: event.id, disposition: 'stale_change', relations: [] };
+    }
     let relations = [];
     this.store.mutate(state => {
-      const previous = state.documents[docId];
+      const currentPrevious = state.documents[docId];
       const title = doc.title || previous?.title || docId;
       const unavailableAt = event.at || stamp();
-      state.documents[docId] = {
-        ...(previous || {
+      state.documents = withRecord(state.documents, docId, {
+        ...(currentPrevious || {
           id: docId,
           kind: 'document',
           content: '',
@@ -376,14 +919,15 @@ export class WorkEngine {
         title,
         available: false,
         unavailableReason: doc.reason || 'unavailable',
-        unavailableAt
-      };
+        unavailableAt,
+        observedAt: event.at || stamp()
+      });
       state.events.push(event);
       event.summary = `Document unavailable · ${title}`;
       relations = Object.values(state.tasks).filter(task =>
-        !isSettled(task) && (
+        !isSettled(task) && !this.#documentExcludedByFeedback(task, docId) && (
           task.documentId === docId ||
-          rankCandidates(task.request, { [docId]: state.documents[docId] }).best
+          rankCandidates(task.request, Object.fromEntries([[docId, state.documents[docId]]])).best
         )).map(task => task.id);
       event.relations = relations;
       event.disposition = relations.length ? 'evidence_invalidated' : 'unrelated_change';
@@ -406,11 +950,11 @@ export class WorkEngine {
     const incoming = runRecord(payload);
     this.store.mutate(state => {
       state.events.push(event);
-      state.runRecords[incoming.id] = incoming;
+      state.runRecords = withRecord(state.runRecords, incoming.id, incoming);
       event.summary = `Run recorded · ${incoming.label}`;
       const related = Object.values(state.tasks).filter(task =>
         !isSettled(task) &&
-        relevantRuns({ [incoming.id]: incoming }, task.request.subjectEntity).length > 0);
+        relevantRuns(Object.fromEntries([[incoming.id, incoming]]), task.request.subjectEntity).length > 0);
       event.relations = related.map(task => task.id);
       event.disposition = related.length ? 'related_change' : 'context_only';
       record(state, 'observation', related.length
@@ -427,23 +971,89 @@ export class WorkEngine {
    * identify verifiable content requirements. Runs after the deterministic
    * baseline is already persisted, so a model failure changes nothing.
    */
-  #maybeRefineWithModel(taskId, message) {
+  #supersedeReasoning(task, reason) {
+    if (!task.reasoningWork || !['pending', 'running', 'failed'].includes(task.reasoningWork.status)) return;
+    task.reasoningWork = { ...task.reasoningWork, status: 'superseded', retryAt: null, terminalReason: reason, updatedAt: stamp() };
+    if (task.reasoning) task.reasoning = { ...task.reasoning, status: 'superseded' };
+  }
+
+  #beginReasoningWork(taskId, kind, signature, { resume = false } = {}) {
+    const task = this.store.state.tasks[taskId];
+    if (!task || isSettled(task)) return { started: false, work: null };
+    const requestVersion = Number(task.commitment?.revision || 1);
+    const key = `${taskId}:${requestVersion}:${kind}:${signature}`;
+    const existing = task.reasoningWork;
+    if (existing?.key === key && !resume) return { started: false, work: existing };
+    const maxAttempts = Math.max(1, Math.min(3, Number(existing?.maxAttempts) || 2));
+    const attempts = existing?.key === key ? Number(existing.attempts) || 0 : 0;
+    if (existing?.key === key && !['pending', 'running', 'failed'].includes(existing.status)) return { started: false, work: existing };
+    if (attempts >= maxAttempts) return { started: false, work: existing };
+    const work = {
+      key, kind, signature, requestVersion, status: 'running', attempts: attempts + 1,
+      maxAttempts, updatedAt: stamp(), lastError: null
+    };
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      if (!current || isSettled(current) || Number(current.commitment?.revision || 1) !== requestVersion) return;
+      current.reasoningWork = work;
+      current.reasoning = { ...(current.reasoning || {}), status: 'pending', kind, attempts: work.attempts, maxAttempts, at: work.updatedAt };
+      if (current.evidence) current.evidence.reasoning = current.reasoning;
+      record(state, 'reasoning_started', `Started bounded ${kind} reasoning attempt ${work.attempts}/${maxAttempts} for request revision ${requestVersion}.`, taskId);
+    });
+    const current = this.store.state.tasks[taskId]?.reasoningWork;
+    return { started: current?.key === key && current?.attempts === work.attempts, work };
+  }
+
+  #finishReasoningWork(taskId, work, status, details = {}) {
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      if (!current || current.reasoningWork?.key !== work.key || current.reasoningWork?.attempts !== work.attempts) return;
+      current.reasoningWork = { ...current.reasoningWork, ...details, status, updatedAt: stamp() };
+      if (details.lastError != null) current.reasoningWork.lastError = String(details.lastError).slice(0, 500);
+      if (current.reasoning) {
+        current.reasoning.status = status === 'complete' ? (current.reasoning.status === 'pending' ? 'ok' : current.reasoning.status) : status;
+        current.reasoning.at = current.reasoningWork.updatedAt;
+        if (details.detail) current.reasoning.detail = details.detail;
+      }
+      if (current.evidence && current.reasoning) current.evidence.reasoning = current.reasoning;
+    });
+  }
+
+  #reasoningWorkIsCurrent(taskId, work) {
+    const task = this.store.state.tasks[taskId];
+    return Boolean(task && !isSettled(task) && task.reasoningWork?.key === work.key &&
+      task.reasoningWork?.attempts === work.attempts &&
+      task.reasoningWork?.status === 'running' &&
+      Number(task.commitment?.revision || 1) === work.requestVersion);
+  }
+
+  #maybeRefineWithModel(taskId, message, { resume = false } = {}) {
     const task = this.store.state.tasks[taskId];
     if (!task) return false;
     if (!this.reasoner?.available?.()) return false;
     const plan = this.#planFor(task);
     // Only when the request itself is under-specified: nothing in it could be
     // mapped to a probe. Otherwise the probe-proposal path handles it.
-    if (plan.specs.length || !plan.unverifiable.length) return false;
+    if (!this.reasoner.preferModelInterpretation && (plan.specs.length || !plan.unverifiable.length)) return false;
+    const begun = this.#beginReasoningWork(taskId, 'interpret', plan.signature, { resume });
+    if (!begun.started) return true;
+    const work = begun.work;
     // A model failure during interpretation is a reasoning failure, recorded as
     // such. The deterministic reading stands; the failure says nothing about
     // whether the work is done.
     const noteFailure = error => {
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
       const failure = { status: 'failed', at: stamp(), detail: error.message };
       this.store.mutate(state => {
         const current = state.tasks[taskId];
         if (!current) return;
         current.reasoning = failure;
+        if (this.reasoner.preferModelInterpretation) {
+          current.status = 'waiting_for_information';
+          current.draft = null;
+          current.reason = 'Model reasoning failed. Reconnect or retry before continuing.';
+        }
+        current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: String(error.message).slice(0, 500), updatedAt: failure.at, ...reasoningFailure(error, work) };
         // The evidence projection is refreshed on every assessment; without
         // this line the recorded failure would stay invisible until the next
         // one, and the eval harness reads the projection.
@@ -455,15 +1065,34 @@ export class WorkEngine {
     };
     const pending = interpretRequestWithReasoner(message, this.reasoner, {
       dateLocale: this.#dateLocale(),
+      reasoningRequestId: `${work.key}:attempt:${work.attempts}`,
+      preferModel: this.reasoner.preferModelInterpretation === true,
       // interpretRequestWithReasoner degrades to the deterministic result on
       // failure; without this callback the failure would have been invisible.
       onError: noteFailure
     }).then(refined => {
       const current = this.store.state.tasks[taskId];
-      if (!refined || !current || isSettled(current)) return;
-      if (refined.interpretedBy === current.request.interpretedBy) return;
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
+      if (!refined || !current || isSettled(current)) {
+        this.#finishReasoningWork(taskId, work, 'complete', { detail: 'No grounded request refinement was returned.' });
+        return;
+      }
+      if (refined.interpretedBy === current.request.interpretedBy && !(this.reasoner.preferModelInterpretation && refined.modelInterpretation?.verified)) {
+        if (this.reasoner.preferModelInterpretation) {
+          noteFailure(new Error('The model did not return a source-grounded interpretation.'));
+          return;
+        }
+        this.#finishReasoningWork(taskId, work, 'complete', { detail: 'The deterministic request stayed in place.' });
+        return;
+      }
       this.store.mutate(state => {
-        state.tasks[taskId].request = { ...state.tasks[taskId].request, ...refined };
+        const target = state.tasks[taskId];
+        const currentDeadline = target.request.deadline;
+        target.request = { ...target.request, ...refined, id: target.id };
+        if (this.reasoner.preferModelInterpretation) target.request.deadline = currentDeadline;
+        target.commitment.signature = requestRevisionSignature(target.request);
+        target.reasoningWork = { ...work, status: 'complete', updatedAt: stamp() };
+        if (this.reasoner.preferModelInterpretation) target.modelReview = { status: 'verified', requestVersion: work.requestVersion, at: stamp() };
       });
       record(this.store.state, 'interpretation',
         refined.droppedModelContent?.length
@@ -481,6 +1110,8 @@ export class WorkEngine {
       // A model failure must never disturb the deterministic baseline.
       noteFailure(error);
     });
+    this.pendingReasoning.set(work.key, pending);
+    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); });
     this.#track(pending);
     return true;
   }
@@ -491,9 +1122,28 @@ export class WorkEngine {
    */
   #planFor(task) {
     const signature = planSignature(task.request);
-    const cached = this.planCache.get(signature);
-    if (cached) return cached;
-    return this.planCache.set(signature, buildDeterministicPlan(task.request));
+    // Cache only deterministic plans. Model quotations belong to this task's request.
+    const baseline = this.planCache.get(signature) || this.planCache.set(signature, buildDeterministicPlan(task.request));
+    let checkpoint = task.reasoningPlan;
+    // Older states already hold bounded, validated model specs in the evidence projection.
+    if (!checkpoint && task.reasoningAttemptedFor === signature && Array.isArray(task.evidence?.plan?.specs) && task.evidence.plan.specs.some(spec => spec.origin === 'model')) {
+      checkpoint = checkpointPlan({ ...task.evidence.plan, signature });
+    }
+    return restorePlan({ ...baseline, requestId: task.id }, checkpoint, task.request);
+  }
+
+  #taskSourceMessage(task) {
+    return (this.store.state.inbox || []).find(message =>
+      message.id === task?.sourceEmailId || message.id === task?.request?.source?.id) || null;
+  }
+
+  #documentExcludedByFeedback(task, documentId) {
+    if (!task || !documentId) return false;
+    return this.taskServices.matchingFeedbackRules({
+      request: task.request,
+      message: this.#taskSourceMessage(task),
+      documentId
+    }).some(match => match.effect === 'exclude_document_association');
   }
 
   /**
@@ -505,7 +1155,7 @@ export class WorkEngine {
    * deterministic plan in place and is recorded as a reasoning failure, never as
    * a negative assessment result.
    */
-  #maybeProposeProbes(taskId) {
+  #maybeProposeProbes(taskId, { resume = false } = {}) {
     const task = this.store.state.tasks[taskId];
     if (!task) return;
     if (!this.reasoner?.available?.()) return;
@@ -515,31 +1165,50 @@ export class WorkEngine {
       plan.specs.every(spec => spec.origin === 'derived');
     if (!uncovered.length && !hasOnlyWeakCoverage) return;
     if (task.reasoningAttemptedFor === plan.signature) return; // do not re-ask for the same request
-
-    const pending = this.reasoner.proposeProbes({
+    const begun = this.#beginReasoningWork(taskId, 'probes', plan.signature, { resume });
+    if (!begun.started) return;
+    const work = begun.work;
+    const correlated = rankCandidates(task.request, Object.fromEntries(Object.entries(this.store.state.documents)
+      .filter(([, document]) => documentAvailable(document)))).ranked.slice(0, 8).map(entry => entry.document);
+    const reasoningKey = `${work.key}:attempt:${work.attempts}`;
+    const pending = Promise.resolve().then(() => {
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return null;
+      return this.reasoner.proposeProbes({
       request: task.request,
       uncovered,
       providers: PROVIDER_IDS,
       strategies: STRATEGY_IDS,
-      contextHints: Object.values(this.store.state.documents).slice(0, 5)
-        .map(document => `${document.title} (#${document.id})`)
-    }, plan.signature).then(proposals => {
+      contextHints: correlated.slice(0, 5).map(document => `${document.title} (#${document.id})`),
+      ...(this.reasoner.id === 'pi' ? { documents: () => {
+        const current = this.store.state.tasks[taskId];
+        if (!current || isSettled(current) || planSignature(current.request) !== plan.signature) return [];
+        return rankCandidates(current.request, Object.fromEntries(Object.entries(this.store.state.documents)
+          .filter(([, document]) => documentAvailable(document)))).ranked.slice(0, 8).map(entry => entry.document);
+      } } : {})
+    }, reasoningKey);
+    }).then(proposals => {
       const current = this.store.state.tasks[taskId];
-      if (!current || isSettled(current)) return;
+      if (!this.#reasoningWorkIsCurrent(taskId, work) || !current || isSettled(current) || planSignature(current.request) !== plan.signature) return;
       if (!proposals?.length) {
         this.store.mutate(state => {
           state.tasks[taskId].reasoningAttemptedFor = plan.signature;
-          state.tasks[taskId].reasoning = { status: 'no_proposal', at: stamp(), detail: 'The model proposed no usable probes.' };
+          state.tasks[taskId].reasoningWork = { ...work, status: 'complete', updatedAt: stamp(), detail: 'The model proposed no usable probes.' };
+          state.tasks[taskId].reasoning = {
+            status: 'no_proposal', at: stamp(), detail: 'The model proposed no usable probes.',
+            ...(this.reasoner.runSummary ? { runtime: this.reasoner.runSummary(reasoningKey) } : {})
+          };
           record(state, 'reasoning', 'The model proposed no additional probes; the deterministic plan stands.', taskId);
         });
         return;
       }
       const merged = applyModelProposals(plan, proposals, task.request);
-      this.planCache.set(plan.signature, merged);
       this.store.mutate(state => {
         state.tasks[taskId].reasoningAttemptedFor = plan.signature;
+        state.tasks[taskId].reasoningPlan = checkpointPlan(merged);
+        state.tasks[taskId].reasoningWork = { ...work, status: 'complete', updatedAt: stamp() };
         state.tasks[taskId].reasoning = {
           status: merged.rejected.length ? 'partial' : 'ok',
+          ...(this.reasoner.runSummary ? { runtime: this.reasoner.runSummary(reasoningKey) } : {}),
           at: stamp(),
           accepted: merged.specs.filter(spec => spec.origin === 'model').length,
           rejected: merged.rejected
@@ -556,11 +1225,16 @@ export class WorkEngine {
       // A reasoning failure is recorded as a reasoning failure. It is never a
       // statement about the work itself.
       const budgetExhausted = error.code === 'REASONING_BUDGET';
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
       this.store.mutate(state => {
         const current = state.tasks[taskId];
         if (!current) return;
+        if (current.reasoningWork?.key === work.key && current.reasoningWork?.attempts === work.attempts) {
+          current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: String(error.message).slice(0, 500), updatedAt: stamp(), ...reasoningFailure(error, work) };
+        }
         current.reasoning = {
           status: 'failed',
+          ...(this.reasoner.runSummary ? { runtime: this.reasoner.runSummary(reasoningKey) } : {}),
           at: stamp(),
           detail: error.message,
           budgetExhausted
@@ -571,7 +1245,10 @@ export class WorkEngine {
       });
       this.changed();
     });
+    this.pendingReasoning.set(work.key, pending);
+    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); });
     this.#track(pending);
+    return true;
   }
 
   // ---------------------------------------------------------------- assessment
@@ -583,17 +1260,25 @@ export class WorkEngine {
       criteria.find(item => item.date)?.date || null;
   }
 
-  assess(taskId, eventId = null, { force = false } = {}) {
+  assess(taskId, eventId = null, { force = false, allowAutomation = true } = {}) {
     const task = this.store.state.tasks[taskId];
-    if (!task || isSettled(task)) return;
+    if (!task || isSettled(task) || task.kind === 'external_issue') return;
     const state = this.store.state;
 
+    const feedbackExcluded = [];
+    const assessmentDocuments = Object.fromEntries(Object.entries(state.documents).filter(([id, entry]) => {
+      if (!documentAvailable(entry)) return false;
+      if (this.#documentExcludedByFeedback(task, id)) {
+        feedbackExcluded.push(id);
+        return false;
+      }
+      return true;
+    }));
     const { ranked, best, ambiguous, contenders, rejected } = rankCandidates(
       task.request,
-      // An unavailable document is not current evidence. Filtering here (the
-      // single entry point for ranking) covers assessment, cross-checks and
-      // ambiguity: a removed source cannot keep a task ready or create doubt.
-      Object.fromEntries(Object.entries(state.documents).filter(([, entry]) => documentAvailable(entry)))
+      // An unavailable or explicitly corrected association is not current
+      // evidence. Filtering here covers assessment, cross-checks and ambiguity.
+      assessmentDocuments
     );
     const document = best?.document || null;
     const plan = this.#planFor(task);
@@ -618,6 +1303,10 @@ export class WorkEngine {
       ...rejected.map(entry => ({
         id: `excluded_document:${entry.documentId}`,
         detail: `Document ${entry.documentId} was not used: ${entry.contradictions.map(contradiction => contradiction.detail).join(' ')}`
+      })),
+      ...feedbackExcluded.map(documentId => ({
+        id: `feedback_excluded_document:${documentId}`,
+        detail: `Document ${documentId} was excluded from this request by an active, scoped user correction.`
       }))
     ];
 
@@ -629,10 +1318,29 @@ export class WorkEngine {
       : { status: 'unverified', reason: 'No matching document has been observed yet.', evidence: [], newestRun: null, documentRunDate: null, unknowns: [] };
 
     const signature = evidenceSignature({
+      request: requestRevisionSignature(task.request),
+      primaryModelReviewed: this.reasoner.preferModelInterpretation ? !this.#primaryReviewMissing(task) : null,
       documentId: document?.id || null,
       version: document?.version ?? null,
-      runs: relevantRuns(state.runRecords || {}, task.request.subjectEntity).map(item => item.id).sort(),
-      probes: plan.specs.map(spec => spec.criterionId),
+      runs: relevantRuns(state.runRecords || {}, task.request.subjectEntity)
+        .map(item => ({ id: item.id, label: item.label, subjectEntity: item.subjectEntity, completedAt: item.completedAt, metrics: item.metrics || null }))
+        .sort((left, right) => String(left.id).localeCompare(String(right.id))),
+      probes: plan.specs.map(spec => ({
+        id: spec.id,
+        criterionId: spec.criterionId,
+        provider: spec.provider,
+        strategies: spec.strategies,
+        builtinProbe: spec.builtinProbe || null,
+        constraints: spec.constraints,
+        requiredKeywords: spec.requiredKeywords || [],
+        requiredAnyKeywords: spec.requiredAnyKeywords || [],
+        keywords: spec.keywords || [],
+        coverage: Boolean(spec.coverage),
+        origin: spec.origin
+      })),
+      unverifiable: plan.unverifiable.map(item => ({ text: item.text, reason: item.reason })),
+      feedbackExcluded: feedbackExcluded.sort(),
+      ...(plan.restoreBlocked ? { planValidity: 'blocked' } : {}),
       // The competing sources and their versions are part of what this
       // assessment depends on: a revision of a runner-up can change the
       // verification outcome even when the chosen document is untouched.
@@ -729,7 +1437,7 @@ export class WorkEngine {
     if (!document) freshnessBlockers.push({ id: 'no_document', detail: 'No document with an identity link to this request has been observed.' });
 
     const completion = completionFromCriteria(criteria, { blockers: freshnessBlockers });
-    const complete = completion.complete;
+    const complete = completion.complete && !this.#primaryReviewMissing(task);
     const missing = missingLabels(criteria);
 
     if (!criteria.length && document) {
@@ -756,13 +1464,11 @@ export class WorkEngine {
 
     this.store.mutate(current => {
       const target = current.tasks[taskId];
+      // Deriving the old signature also migrates legacy records without moving their clock.
+      const previousProgress = target.progress?.semanticSignature || progressSignature(target);
       target.documentId = document?.id || null;
       target.updatedAt = stamp();
       target.reason = null;
-      // The progress clock resets only when the evidence behind this task
-      // actually changes — reaching here means it did (the unchanged case
-      // returned early above).
-      if (target.progress?.signature !== signature) target.progress = { signature, at: stamp() };
       target.evidence = {
         signature,
         request: { source: task.request.source, intent: task.request.intent, deliverable: task.request.deliverable, subjectEntity: task.request.subjectEntity, deadline: task.request.deadline, requiredContent: task.request.requiredContent, qualifiers: task.request.qualifiers || [] },
@@ -796,6 +1502,12 @@ export class WorkEngine {
         completion,
         interpretation: task.request.interpretedBy,
         reasoning: target.reasoning || { status: plan.degraded ? 'deterministic' : 'ok', at: stamp() }
+      };
+      const semanticSignature = progressSignature(target);
+      target.progress = {
+        signature,
+        semanticSignature,
+        at: target.progress && previousProgress === semanticSignature ? target.progress.at : stamp()
       };
       // How much verification this assessment warranted, why, and what was
       // actually performed. Replaced on every assessment, never accumulated:
@@ -836,7 +1548,7 @@ export class WorkEngine {
           taskId, eventId);
       } else {
         target.draft = null;
-        target.status = 'waiting_for_information';
+        target.status = this.#primaryReviewMissing(target) && target.reasoningWork?.status === 'running' ? 'investigating' : 'waiting_for_information';
         const why = [
           missing.length ? `not satisfied: ${missing.join('; ')}` : null,
           freshnessBlockers.length ? freshnessBlockers.map(blocker => blocker.detail).join(' · ') : null,
@@ -886,8 +1598,15 @@ export class WorkEngine {
     // and strengthened verification is exactly the uncertainty a grant cannot
     // cover: a competing source could contradict the draft, so the action needs
     // a fresh approval even though the user pre-authorised this flow.
-    if (grant && !this.policy.shadow && verification.depth !== 'enhanced') this.#runPreAuthorized(taskId, grant);
+    if (allowAutomation && grant && !this.policy.shadow && verification.depth !== 'enhanced') this.#runPreAuthorized(taskId, grant);
     this.changed();
+  }
+
+  #providerForTask(task) {
+    if (!this.provider.forSource) return this.provider;
+    const message = this.store.state.inbox.find(item => item.id === task?.sourceEmailId);
+    const origin = this.store.state.events.find(event => event.payload?.id === task?.sourceEmailId);
+    return this.provider.forSource(task?.sourceConnectorId || message?.connectorId || origin?.connectorId || task?.request?.source?.connectorId);
   }
 
   /**
@@ -897,6 +1616,7 @@ export class WorkEngine {
    * something the evidence does not support.
    */
   #buildDraft(task, document, criteria, freshness, claims) {
+    const provider = this.#providerForTask(task);
     const satisfied = criteria.filter(item => item.status === 'satisfied').map(item => item.label.toLowerCase());
     const link = resolveDocumentLink(document, this.baseUrl);
     const unsupported = claims.filter(item => !item.supported);
@@ -926,8 +1646,10 @@ export class WorkEngine {
       documentUrl: link,
       documentVersion: document.version,
       documentId: document.id,
-      providerKind: this.provider.kind,
-      live: Boolean(this.provider.live),
+      requestVersion: Number(task.commitment?.revision || 1),
+      providerKind: provider.kind,
+      live: Boolean(provider.live),
+      canSend: provider.canSend !== false,
       preparedAt: stamp(),
       claims: claims.map(item => ({ id: item.id, text: item.text, supported: item.supported })),
       withheldClaims: unsupported.map(item => ({ id: item.id, text: item.text, reason: item.note })),
@@ -953,7 +1675,18 @@ export class WorkEngine {
    */
   approve(taskId, options = {}) {
     const task = this.#requireTask(taskId);
+    const provider = this.#providerForTask(task);
+    if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet. Wait for reasoning or retry the failed model request.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
+    if (Object.hasOwn(options, 'reviewToken') && options.reviewToken !== draftReviewToken(task)) {
+      const error = new Error('The prepared reply changed. Review the updated reply before sending.');
+      error.code = 'REVIEW_CHANGED';
+      throw error;
+    }
+    if (Number(task.draft.requestVersion || 1) !== Number(task.commitment?.revision || 1) || (task.commitment?.status && task.commitment.status !== 'active')) {
+      this.assess(taskId, null, { force: true, allowAutomation: false });
+      throw new Error('The request changed; the draft must be reviewed again');
+    }
     const storedDocument = this.store.state.documents[task.documentId];
     const document = documentAvailable(storedDocument) ? storedDocument : null;
     // Re-derive completeness from the document as it exists now, using the same
@@ -973,7 +1706,7 @@ export class WorkEngine {
       })
       : null;
     const staleNow = freshness && ['stale', 'contradictory'].includes(freshness.status);
-    if (!document || document.version !== task.draft.documentVersion || missingLabels(recheck.criteria).length || staleNow) {
+    if (!document || document.version !== task.draft.documentVersion || !completionFromCriteria(recheck.criteria).complete || staleNow) {
       const reason = storedDocument && !documentAvailable(storedDocument)
         ? 'The document is no longer available; the draft must be reviewed again'
         : staleNow
@@ -993,12 +1726,13 @@ export class WorkEngine {
     const approval = { permission: 'user_approved', taskId, approvedAt: stamp() };
     try {
       this.policy.authorize({ actionClass: 'execute_external', approval, taskId });
+      if (provider.live && provider.canSend === false) throw new PermissionDeniedError('Delivery is not enabled for this source. The reply remains available to copy.');
     } catch (error) {
       if (error instanceof PermissionDeniedError) {
         this.#addTrace(traceEntry({
           stage: 'policy',
           taskId,
-          input: { actionClass: 'execute_external', providerKind: this.provider.kind },
+          input: { actionClass: 'execute_external', providerKind: provider.kind },
           policy: { permission: 'user_approved', decision: 'refused', reason: error.message },
           outcome: { status: 'not_executed' }
         }));
@@ -1006,21 +1740,28 @@ export class WorkEngine {
       throw error;
     }
 
+    const requestVersion = Number(task.commitment?.revision || 1);
+    const actionVersion = Number(task.actionVersion || 0) + 1;
+    const versionSuffix = requestVersion > 1 ? `:r${requestVersion}` : '';
     const action = {
-      id: `send:${taskId}:${document.version}`,
-      idempotencyKey: `send:${taskId}:${document.version}`,
+      id: `send:${taskId}:${document.version}${versionSuffix}`,
+      idempotencyKey: `send:${taskId}:${document.version}${versionSuffix}`,
+      version: actionVersion,
+      commitmentRevision: requestVersion,
       actionClass: 'execute_external',
       permission: 'user_approved',
       approvedAt: approval.approvedAt,
       status: 'executing',
-      providerKind: this.provider.kind,
-      live: Boolean(this.provider.live),
+      phase: 'approved',
+      providerKind: provider.kind,
+      live: Boolean(provider.live),
       receiptId: null
     };
     this.store.mutate(state => {
       state.tasks[taskId].status = 'verifying';
+      state.tasks[taskId].actionVersion = actionVersion;
       state.tasks[taskId].action = action;
-      record(state, 'approval', `User approved the reply. Checking the ${this.provider.kind} provider before and after sending.`, taskId);
+      record(state, 'approval', `User approved the reply. Checking the ${provider.kind} provider before and after sending.`, taskId);
     });
     this.#addTrace(traceEntry({
       stage: 'policy', taskId,
@@ -1039,7 +1780,18 @@ export class WorkEngine {
    * with the underlying reason, never as "nothing happened" — that would risk a
    * duplicate external action.
    */
-  #lookupSafely(idempotencyKey, options = {}) {
+  #lookupSafely(idempotencyKey, options = {}, provider = this.provider) {
+    const normalize = value => {
+      if (value?.status === 'not_found') return value;
+      if (value?.status === 'found' && typeof value.receipt?.id === 'string' && value.receipt.id.trim() &&
+        (!value.receipt.idempotencyKey || value.receipt.idempotencyKey === idempotencyKey)) return value;
+      return {
+        status: 'unknown', receipt: null,
+        detail: value?.status === 'unknown' && typeof value.detail === 'string' && value.detail.trim()
+          ? value.detail
+          : 'The provider cannot confirm whether this operation took effect. The outcome remains unknown; no automatic retry was attempted.'
+      };
+    };
     const failed = error => ({
       status: 'unknown',
       receipt: null,
@@ -1047,14 +1799,14 @@ export class WorkEngine {
     });
     let result;
     try {
-      result = this.provider.lookup(idempotencyKey, options);
+      result = provider.lookup(idempotencyKey, options);
     } catch (error) {
       return failed(error);
     }
     if (result && typeof result.then === 'function') {
-      return result.then(value => value, error => failed(error));
+      return result.then(normalize, error => failed(error));
     }
-    return result;
+    return normalize(result);
   }
 
   /**
@@ -1064,7 +1816,7 @@ export class WorkEngine {
    * message exists. This reads the receipt back through the provider; anything
    * short of a definitive "found" must block, never complete.
    */
-  #verifyReceiptSafely(receipt) {
+  #verifyReceiptSafely(receipt, provider = this.provider) {
     const failed = error => ({
       status: 'unknown',
       receipt: null,
@@ -1072,10 +1824,10 @@ export class WorkEngine {
     });
     let result;
     try {
-      if (typeof this.provider.verifyReceipt === 'function') {
-        result = this.provider.verifyReceipt(receipt);
-      } else if (typeof this.provider.lookup === 'function') {
-        result = this.provider.lookup(receipt?.idempotencyKey, { receiptId: receipt?.id });
+      if (typeof provider.verifyReceipt === 'function') {
+        result = provider.verifyReceipt(receipt);
+      } else if (typeof provider.lookup === 'function') {
+        result = provider.lookup(receipt?.idempotencyKey, { receiptId: receipt?.id });
       } else {
         return failed(new Error('the provider exposes no way to read the receipt back'));
       }
@@ -1088,20 +1840,102 @@ export class WorkEngine {
     return result || failed(new Error('the provider returned no verification result'));
   }
 
+  #actionIsCurrent(taskId, actionId) {
+    const task = this.store.state.tasks[taskId];
+    const action = task?.action;
+    if (!task || !action || action.id !== actionId || action.status !== 'executing') return false;
+    if (task.pendingCommitmentChange || ['withdrawn', 'withdrawn_pending_reconciliation'].includes(task.commitment?.status)) return false;
+    const revision = Number(task.commitment?.revision || 1);
+    if (Number(action.commitmentRevision || revision) !== revision) return false;
+    if (Number(task.draft?.requestVersion || revision) !== revision) return false;
+    return true;
+  }
+
+  /** Resolve a stale approved action only after the provider confirmed absence. */
+  #finalizeSupersededAction(taskId, actionId) {
+    let withdrawn = false;
+    this.store.mutate(state => {
+      const task = state.tasks[taskId];
+      if (!task?.action || task.action.id !== actionId || !task.pendingCommitmentChange) return;
+      const action = { ...task.action, status: 'superseded_before_send', resolvedAt: stamp(), resolution: 'provider_confirmed_absent' };
+      task.actionHistory = task.actionHistory || [];
+      task.actionHistory.push(action);
+      if (task.actionHistory.length > 50) task.actionHistory.splice(0, task.actionHistory.length - 50);
+      task.action = null;
+      withdrawn = Boolean(task.pendingCommitmentChange.withdrawn);
+      task.pendingCommitmentChange = null;
+      task.reasoningPlan = null;
+      task.updatedAt = stamp();
+      if (withdrawn) {
+        task.commitment.status = 'withdrawn';
+        task.status = 'cancelled';
+        task.reason = 'The request was withdrawn while the provider lookup was pending. The provider confirmed the old action was not sent; no further work will run.';
+        record(state, 'request_withdrawal', task.reason, taskId);
+      } else {
+        task.commitment.status = 'active';
+        task.status = 'newly_discovered';
+        task.reason = 'The old approved action was confirmed absent and invalidated because the request changed. The revised request needs a new assessment and approval.';
+        record(state, 'action_superseded', task.reason, taskId);
+      }
+    });
+    if (!withdrawn) this.assess(taskId, null, { force: true, allowAutomation: false });
+    else { this.#refreshAttention(); this.changed(); }
+    return this.store.state.tasks[taskId];
+  }
+
+  #actionKey(taskId, action) {
+    return JSON.stringify([taskId, action?.id, action?.version]);
+  }
+
+  #actionCanRecordResult(taskId, action) {
+    const current = this.store.state.tasks[taskId]?.action;
+    return Boolean(current && current.id === action.id && current.version === action.version &&
+      !['verified_live', 'verified_simulated'].includes(current.status));
+  }
+
   execute(taskId, options = {}) {
+    const task = this.#requireTask(taskId);
+    if (!task.action) throw new Error('External action has no approval');
+    const key = this.#actionKey(taskId, task.action);
+    if (this.executingActions.has(key)) throw new Error('An execution for this approved action is already in progress.');
+    this.executingActions.add(key);
+    try {
+      const result = this.#executeAction(taskId, options);
+      if (result && typeof result.then === 'function') return result.finally(() => this.executingActions.delete(key));
+      this.executingActions.delete(key);
+      return result;
+    } catch (error) { this.executingActions.delete(key); throw error; }
+  }
+
+  #executeAction(taskId, options = {}) {
     const task = this.#requireTask(taskId);
     if (!task.action) throw new Error('External action has no approval');
     this.policy.authorize({ actionClass: task.action.actionClass || 'execute_external', approval: task.action, taskId });
 
+    const actionId = task.action.id;
+    const actionIdentity = { id: actionId, version: task.action.version };
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      if (current?.action?.id === actionId) current.action.phase = 'lookup';
+    });
+
     // Reconcile FIRST: a previous timeout may have occurred after acceptance.
-    return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }), before => {
+    return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), before => {
+      if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
       if (before.status === 'found') return this.confirm(taskId, before.receipt, true, 'lookup');
       if (before.status === 'unknown') return this.uncertain(taskId, before.detail || 'The provider cannot confirm whether the message was accepted. No retry was attempted.');
+      if (!this.#actionIsCurrent(taskId, actionId)) return this.#finalizeSupersededAction(taskId, actionId);
+      this.store.mutate(state => {
+        const current = state.tasks[taskId];
+        if (current?.action?.id === actionId) current.action.phase = 'sending';
+      });
       return this.#resolve(this.#sendSafely(task, options), outcome => {
+        if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
         if (outcome.blocked) return this.uncertain(taskId, outcome.blocked);
         if (outcome.receipt) {
           // Accepted is not verified. Read the message back before claiming it exists.
-          return this.#resolve(this.#verifyReceiptSafely(outcome.receipt), verification => {
+          return this.#resolve(this.#verifyReceiptSafely(outcome.receipt, this.#providerForTask(task)), verification => {
+            if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
             if (verification?.status === 'found') return this.confirm(taskId, verification.receipt || outcome.receipt, false, 'receipt');
             return this.uncertain(
               taskId,
@@ -1110,9 +1944,12 @@ export class WorkEngine {
             );
           });
         }
-        return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }), after => {
+        return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), after => {
+          if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
           if (after.status === 'found') return this.confirm(taskId, after.receipt, true, 'lookup');
           if (after.status === 'unknown') return this.uncertain(taskId, after.detail);
+          const current = this.store.state.tasks[taskId];
+          if (current?.pendingCommitmentChange && !current.action?.receiptId) return this.#finalizeSupersededAction(taskId, actionId);
           return this.uncertain(taskId, 'Delivery timed out and the provider did not confirm acceptance. No automatic retry was attempted.');
         });
       });
@@ -1122,7 +1959,7 @@ export class WorkEngine {
   #sendSafely(task, options) {
     let result;
     try {
-      result = this.provider.send({
+      result = this.#providerForTask(task).send({
         idempotencyKey: task.action.idempotencyKey,
         to: task.draft.to,
         subject: task.draft.subject,
@@ -1145,16 +1982,44 @@ export class WorkEngine {
   }
 
   confirm(taskId, receipt, reconciled, via = reconciled ? 'lookup' : 'receipt') {
+    let verifiedAction = null;
+    let withdrawn = false;
+    let recheckRevision = false;
     this.store.mutate(state => {
       const task = state.tasks[taskId];
       const live = Boolean(task.action?.live);
-      task.status = 'completed';
       task.updatedAt = stamp();
       task.action.status = live ? 'verified_live' : 'verified_simulated';
       task.action.receiptId = receipt.id;
       task.action.verifiedAt = stamp();
       task.action.verificationVia = reconciled ? 'provider_lookup' : 'receipt_read_back';
-      task.reason = null;
+      verifiedAction = { ...task.action };
+      const pendingChange = task.pendingCommitmentChange;
+      if (pendingChange) {
+        withdrawn = Boolean(pendingChange.withdrawn);
+        task.actionHistory = task.actionHistory || [];
+        task.actionHistory.push({ ...task.action, archivedAt: stamp(), archiveReason: withdrawn ? 'request withdrawn while action was in flight' : 'request revised while action was in flight' });
+        if (task.actionHistory.length > 50) task.actionHistory.splice(0, task.actionHistory.length - 50);
+        task.action = null;
+        task.pendingCommitmentChange = null;
+        if (withdrawn) {
+          task.commitment.status = 'withdrawn_after_delivery';
+          task.status = 'cancelled';
+          task.reason = 'The request was withdrawn while the provider action was in flight. The action was verified afterward and was not undone; no further work will run.';
+        } else {
+          task.commitment.status = 'active';
+          task.status = 'newly_discovered';
+          task.reason = 'The previous approved action was verified after the request changed. The revised request needs a fresh assessment and approval.';
+          task.draft = null;
+          task.evidence = null;
+          task.assessment = null;
+          task.progress = null;
+          recheckRevision = true;
+        }
+      } else {
+        task.status = 'completed';
+        task.reason = null;
+      }
       const how = reconciled
         ? 'by idempotency-key lookup'
         : 'by reading the accepted message back';
@@ -1162,14 +2027,14 @@ export class WorkEngine {
         ? `Confirmed with Gmail that message ${receipt.id} exists (${how}).`
         : `Confirmed simulated provider receipt ${receipt.id} (${how}). This was not a real email.`, taskId);
     });
-    const settled = this.store.state.tasks[taskId].action;
     this.#addTrace(traceEntry({
       stage: 'execution', taskId,
-      input: { idempotencyKey: settled?.idempotencyKey || null, providerKind: settled?.providerKind || null, live: Boolean(settled?.live) },
-      outcome: { status: 'verified', receiptId: receipt.id, reconciled: Boolean(reconciled), via }
+      input: { idempotencyKey: verifiedAction?.idempotencyKey || null, providerKind: verifiedAction?.providerKind || null, live: Boolean(verifiedAction?.live) },
+      outcome: { status: 'verified', receiptId: receipt.id, reconciled: Boolean(reconciled), via, requestWithdrawnDuringAction: withdrawn }
     }));
     this.#refreshAttention();
     this.changed();
+    if (recheckRevision) this.assess(taskId, null, { force: true, allowAutomation: false });
     return this.store.state.tasks[taskId];
   }
 
@@ -1181,6 +2046,7 @@ export class WorkEngine {
    * and reconciliation can still resolve it.
    */
   uncertain(taskId, reason, { status = 'uncertain', receipt = null } = {}) {
+    if (typeof reason !== 'string' || !reason.trim()) reason = 'The provider has not confirmed whether this action took effect. No automatic retry was attempted.';
     this.store.mutate(state => {
       const task = state.tasks[taskId];
       task.status = 'blocked';
@@ -1188,6 +2054,7 @@ export class WorkEngine {
       task.reason = reason;
       if (task.action) {
         task.action.status = status;
+        task.action.phase = 'uncertain';
         if (receipt?.id) task.action.receiptId = receipt.id;
       }
       record(state, 'uncertain', reason, taskId);
@@ -1230,14 +2097,25 @@ export class WorkEngine {
     const task = this.#requireTask(taskId);
     if (!task.action) throw new Error('No approved action to reconcile');
     this.policy.authorize({ actionClass: task.action.actionClass || 'execute_external', approval: task.action, taskId });
-    return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }), result => {
+    const actionId = task.action.id;
+    const actionIdentity = { id: actionId, version: task.action.version };
+    const startingStatus = task.action.status;
+    return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), result => {
+      if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
       if (result.status === 'found') return this.confirm(taskId, result.receipt, true, 'lookup');
+      if (this.store.state.tasks[taskId].action.status !== startingStatus) return this.store.state.tasks[taskId];
       // A send the provider already accepted can never reconcile to "confirmed
       // absent": that status enables a retry, and a retry after acceptance could
       // duplicate the message. Only an outcome that was never accepted can.
       const acceptedBefore = Boolean(task.action.receiptId);
-      const absent = result.status === 'not_found' && !acceptedBefore;
-      const reason = absent
+      const inFlight = this.executingActions.has(this.#actionKey(taskId, actionIdentity));
+      const absent = result.status === 'not_found' && !acceptedBefore && !inFlight;
+      if (absent && this.store.state.tasks[taskId]?.pendingCommitmentChange) {
+        return this.#finalizeSupersededAction(taskId, actionId);
+      }
+      const reason = inFlight && result.status === 'not_found'
+        ? 'An approved send is still in progress. A missing lookup cannot confirm absence or authorize a retry.'
+        : absent
         ? 'Provider definitively reports no matching message. Retry requires a separate click.'
         : result.status === 'not_found'
           ? 'The provider accepted this message earlier, but it cannot be found now. Treating the result as uncertain; do not resend without checking Gmail directly.'
@@ -1258,6 +2136,11 @@ export class WorkEngine {
   retry(taskId) {
     const task = this.#requireTask(taskId);
     if (!task.action || task.action.status !== 'confirmed_absent') throw new Error('Retry requires confirmed absence and prior approval');
+    const requestVersion = Number(task.commitment?.revision || 1);
+    if (task.pendingCommitmentChange || Number(task.action.commitmentRevision || requestVersion) !== requestVersion ||
+        Number(task.draft?.requestVersion || requestVersion) !== requestVersion || task.commitment?.status === 'withdrawn') {
+      throw new Error('The request changed; retry requires a new assessment and approval');
+    }
     const storedDocument = this.store.state.documents[task.documentId];
     const document = documentAvailable(storedDocument) ? storedDocument : null;
     if (!document || document.version !== task.draft.documentVersion) {
@@ -1277,7 +2160,7 @@ export class WorkEngine {
       request: task.request
     });
     const staleNow = freshness && ['stale', 'contradictory'].includes(freshness.status);
-    if (missingLabels(recheck.criteria).length || staleNow) {
+    if (!completionFromCriteria(recheck.criteria).complete || staleNow) {
       throw new Error(staleNow
         ? 'The evidence is no longer current; retry requires a new approval'
         : 'Document changed; retry requires a new approval');
@@ -1297,12 +2180,34 @@ export class WorkEngine {
     if (task.status !== 'ready_for_approval') throw new Error('Task is not awaiting approval');
     this.store.mutate(state => {
       state.tasks[taskId].status = 'blocked';
+      state.tasks[taskId].userDismissed = true;
       state.tasks[taskId].reason = 'User rejected the proposed response. Nothing was sent.';
       state.tasks[taskId].draft = null;
+      this.#supersedeReasoning(state.tasks[taskId], 'user_declined');
       record(state, 'rejection', 'User rejected the draft. Nothing was sent.', taskId);
     });
     this.#refreshAttention();
     this.changed();
+    return this.store.state.tasks[taskId];
+  }
+
+  /** Restore a declined or closed request using today's evidence, without sending. */
+  reopen(taskId) {
+    const task = this.#requireTask(taskId);
+    if (task.kind === 'external_issue' && (!task.externalSource.assigned || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This issue is no longer actively assigned to the connected account.');
+    if (task.action || !['blocked', 'cancelled'].includes(task.status)) {
+      throw new Error('Only a declined or closed request without an action can be reopened');
+    }
+    this.store.mutate(state => {
+      const target = state.tasks[taskId];
+      target.status = 'waiting_for_information';
+      target.userDismissed = false;
+      target.draft = null;
+      target.reason = null;
+      target.updatedAt = stamp();
+      record(state, 'reopening', 'User restored this request. Rechecking current evidence; nothing is sent by restoring it.', taskId);
+    });
+    this.assess(taskId, null, { force: true, allowAutomation: false });
     return this.store.state.tasks[taskId];
   }
 
@@ -1387,6 +2292,42 @@ export class WorkEngine {
     return entry;
   }
 
+  // ---------------------------------------------------- task services
+
+  prepareDocumentPatch(taskId, options = {}) {
+    return this.taskServices.prepareDocumentPatch(taskId, options);
+  }
+
+  applyDocumentPatch(taskId, options = {}) {
+    return this.taskServices.applyDocumentPatch(taskId, options);
+  }
+
+  waitForTask(taskId, condition = {}) {
+    return this.taskServices.waitForTask(taskId, condition);
+  }
+
+  recordTaskFeedback(taskId, feedback = {}) {
+    const result = this.taskServices.recordTaskFeedback(taskId, feedback);
+    if (result.label === 'wrong_association') this.assess(taskId, null, { force: true, allowAutomation: false });
+    return result;
+  }
+
+  undoTaskFeedback(feedbackId) {
+    const result = this.taskServices.undoTaskFeedback(feedbackId);
+    if (result.taskId && result.label === 'wrong_association') {
+      this.assess(result.taskId, null, { force: true, allowAutomation: false });
+    }
+    return result;
+  }
+
+  resolveDependency(dependencyId, decision = {}) {
+    return this.taskServices.resolveDependency(dependencyId, decision);
+  }
+
+  createFollowUpForOpportunity(opportunityId) {
+    return this.taskServices.createFollowUpForOpportunity(opportunityId);
+  }
+
   cancel(taskId) {
     const task = this.#requireTask(taskId);
     if (task.status !== 'waiting_for_information') {
@@ -1395,9 +2336,11 @@ export class WorkEngine {
     this.store.mutate(state => {
       const current = state.tasks[taskId];
       current.status = 'cancelled';
+      if (current.kind === 'external_issue') current.userDismissed = true;
       current.updatedAt = stamp();
       current.reason = 'Closed by the user while waiting for information. Nothing was sent.';
       current.draft = null;
+      this.#supersedeReasoning(current, 'user_closed');
       record(state, 'cancellation', 'The user closed this request while it was waiting for information. Nothing was sent.', taskId);
     });
     this.#refreshAttention();
@@ -1477,6 +2420,7 @@ export class WorkEngine {
       state.opportunities[id].decidedAt = stamp();
       record(state, 'opportunity_accepted', `The user chose to pursue an opportunity: ${opportunity.statement}`);
     });
+    this.taskServices.createFollowUpForOpportunity(id);
     this.#refreshAttention();
     this.changed();
     return this.store.state.opportunities[id];
@@ -1552,6 +2496,7 @@ export class WorkEngine {
    * which is the condition that needs an immediate broadcast.
    */
   sweepAttention(now = new Date()) {
+    this.taskServices.refreshWaits(now instanceof Date ? now.toISOString() : String(now));
     const at = now.getTime();
     const dayKey = new Date(at).toISOString().slice(0, 10);
     const dayChanged = this.lastAttentionDay !== dayKey;
@@ -1576,6 +2521,7 @@ export class WorkEngine {
    * interruption about the same task would be noise, not information.
    */
   #stallWorthy(task, state, at) {
+    if (task.kind === 'external_issue') return false;
     if (task.status !== 'waiting_for_information') return false;
     const since = task.progress?.at ? Date.parse(task.progress.at) : NaN;
     if (!Number.isFinite(since) || at - since < this.stallAfterMs) return false;
@@ -1833,11 +2779,11 @@ export class WorkEngine {
       emitNotification(state.notifications, notification({
         kind: 'blocker', priority: 'normal', dedupeKey: key, taskId: task.id, at: now,
         headline: `No progress on the ${task.request.subjectEntity} ${task.request.deliverable}`,
-        what: `This request has not advanced for ${describeDuration(stalledFor)}: no document, run record or related event has changed its evidence since ${task.progress.at}.${missing.length ? ` Still not satisfied: ${missing.join('; ')}.` : ''}`,
+        what: `This request has not advanced for ${describeDuration(stalledFor)}: its verification requirements and blockers have not changed since ${task.progress.at}.${missing.length ? ` Still not satisfied: ${missing.join('; ')}.` : ''}`,
         why: 'Nothing the system can observe has satisfied it, so it cannot complete without new information or a decision to close it.',
         checked: [
-          `Compared the correlated evidence at the last observable change (${task.progress.at}).`,
-          'Confirmed no newer evidence has arrived for this request since then.'
+          `Compared the required conditions and blockers at the last meaningful change (${task.progress.at}).`,
+          'Confirmed that subsequent observations have not changed those conditions.'
         ],
         evidence: [
           ...missing.map(label => ({ detail: `Not yet satisfied: ${label}` })),
@@ -1857,6 +2803,8 @@ export class WorkEngine {
 
   /** Run a prepared action that a stated, scoped pre-authorisation covers. */
   #runPreAuthorized(taskId, grant) {
+    const provider = this.#providerForTask(this.store.state.tasks[taskId]);
+    if (provider.live && provider.canSend === false) return;
     try {
       this.#track(this.executePreAuthorized(taskId, grant));
     } catch (error) {
@@ -1870,7 +2818,15 @@ export class WorkEngine {
   /** Execute inside a stated, scoped pre-authorisation, then verify as usual. */
   executePreAuthorized(taskId, grant = null) {
     const task = this.#requireTask(taskId);
+    const provider = this.#providerForTask(task);
+    if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
+    if (provider.live && provider.canSend === false) throw new PermissionDeniedError('Delivery is not enabled for this source.');
+    const requestVersion = Number(task.commitment?.revision || 1);
+    if (Number(task.draft.requestVersion || 1) !== requestVersion || (task.commitment?.status && task.commitment.status !== 'active')) {
+      this.assess(taskId, null, { force: true, allowAutomation: false });
+      throw new Error('The request changed; the draft must be reviewed again');
+    }
     const resolved = grant || grantFor(this.store.state.calibrations || {}, {
       entity: task.request.subjectEntity, deliverable: task.request.deliverable
     });
@@ -1912,7 +2868,7 @@ export class WorkEngine {
       })
       : null;
     const staleNow = freshness && ['stale', 'contradictory'].includes(freshness.status);
-    if (!document || document.version !== task.draft.documentVersion || missingLabels(recheck.criteria).length || staleNow) {
+    if (!document || document.version !== task.draft.documentVersion || !completionFromCriteria(recheck.criteria).complete || staleNow) {
       const reason = storedDocument && !documentAvailable(storedDocument)
         ? 'The document is no longer available; the draft must be reviewed again'
         : staleNow
@@ -1921,9 +2877,13 @@ export class WorkEngine {
       this.assess(taskId);
       throw new Error(reason);
     }
+    const actionVersion = Number(task.actionVersion || 0) + 1;
+    const versionSuffix = requestVersion > 1 ? `:r${requestVersion}` : '';
     const action = {
-      id: `send:${taskId}:${document.version}`,
-      idempotencyKey: `send:${taskId}:${document.version}`,
+      id: `send:${taskId}:${document.version}${versionSuffix}`,
+      idempotencyKey: `send:${taskId}:${document.version}${versionSuffix}`,
+      version: actionVersion,
+      commitmentRevision: requestVersion,
       actionClass: 'execute_external',
       permission: 'pre_authorized',
       source: resolved.source,
@@ -1931,12 +2891,14 @@ export class WorkEngine {
       scope: resolved.scope,
       approvedAt: stamp(),
       status: 'executing',
-      providerKind: this.provider.kind,
-      live: Boolean(this.provider.live),
+      phase: 'approved',
+      providerKind: provider.kind,
+      live: Boolean(provider.live),
       receiptId: null
     };
     this.store.mutate(state => {
       state.tasks[taskId].status = 'verifying';
+      state.tasks[taskId].actionVersion = actionVersion;
       state.tasks[taskId].action = action;
       record(state, 'pre_authorized',
         `Ran the ${task.request.subjectEntity} follow-through within the authorisation you granted (${resolved.id}). Verifying the result with the provider.`, taskId);
@@ -1961,33 +2923,141 @@ export class WorkEngine {
    * then resumed for tasks whose evidence is stale or missing.
    */
   recover() {
-    for (const task of Object.values(this.store.state.tasks)) {
-      // One malformed task must not stop the process from starting up.
+    return this.restorePendingWork({ reason: 'startup' });
+  }
+
+  replaceReasoner(reasoner) {
+    if (this.pendingReasoning.size || this.pendingDiscovery.size) {
+      const error = new Error('Model reasoning is still running. Wait for it to finish before changing the connection.');
+      error.code = 'MODEL_BUSY'; throw error;
+    }
+    this.reasoner = reasoner;
+    if (reasoner.preferModelInterpretation) {
+      this.store.mutate(state => {
+        for (const task of Object.values(state.tasks)) if (!isSettled(task) && !task.action) {
+          task.modelReview = null; task.reasoningWork = null;
+        }
+      });
+      for (const task of Object.values(this.store.state.tasks)) if (!isSettled(task) && !task.action) {
+        this.assess(task.id, null, { force: true, allowAutomation: false });
+        const message = this.#taskSourceMessage(task);
+        if (message) this.#maybeRefineWithModel(task.id, message);
+      }
+    }
+    this.changed();
+  }
+
+  #primaryReviewMissing(task) {
+    if (task.kind === 'external_issue') return false;
+    return this.reasoner.preferModelInterpretation === true &&
+      !(task.modelReview?.status === 'verified' && task.modelReview.requestVersion === Number(task.commitment?.revision || 1));
+  }
+
+  /** Recheck unfinished work and bounded reasoning after startup or an explicit resume. */
+  restorePendingWork({ reason = 'manual' } = {}) {
+    const summary = { reason, checked: 0, reassessed: 0, reconciliations: 0, reasoningResumed: 0, discoveryResumed: 0, failures: 0 };
+    const startingRevision = this.store.state.revision;
+    const now = stamp();
+    this.taskServices.refreshWaits(now);
+    for (const task of Object.values(this.store.state.tasks || {})) {
+      summary.checked += 1;
       try {
-        this.#recoverTask(task);
+        if (task.action && ['executing', 'uncertain', 'accepted_live'].includes(task.action.status)) {
+          summary.reconciliations += 1;
+          const result = this.reconcile(task.id);
+          if (result && typeof result.then === 'function') this.#track(result);
+          continue;
+        }
+        if (task.commitment?.status === 'withdrawn_pending_reconciliation' && !task.action) {
+          this.store.mutate(state => {
+            const current = state.tasks[task.id];
+            current.commitment.status = 'withdrawn';
+            current.status = 'cancelled';
+            current.pendingCommitmentChange = null;
+            current.reason = 'The withdrawn request had no action left to reconcile; it was closed during recovery.';
+            record(state, 'recovery', current.reason, task.id);
+          });
+          continue;
+        }
+        if (task.status === 'completed' || task.status === 'cancelled' || task.userDismissed) continue;
+        // Recompute the current dependencies; identical evidence signatures
+        // take the read-only fast path and do not rewrite history on every boot.
+        this.assess(task.id, null, { force: false, allowAutomation: false });
+        summary.reassessed += 1;
+        if (this.#resumeReasoningForTask(task.id)) summary.reasoningResumed += 1;
       } catch (error) {
+        summary.failures += 1;
         this.store.mutate(state => {
           record(state, 'recovery_failure', `Could not resume ${task.id}: ${error.message}`, task.id);
         });
         console.error(`Recovery failed for ${task.id}:`, error.message);
       }
     }
-    this.#refreshAttention();
-    this.changed();
+    for (const event of this.store.state.events || []) {
+      if (this.pendingReasoning.size + this.pendingDiscovery.size >= REASONING_RECOVERY.maxStartsPerSweep) break;
+      if (event.type !== 'email.received' || !['not_started', 'pending', 'running', 'failed'].includes(event.reasoning?.status)) continue;
+      const message = this.store.state.inbox.find(item => item.id === event.payload?.id) || event.payload;
+      if (!this.reasoner?.available?.() || Number(event.reasoning.attempts || 0) >= Math.min(2, Number(event.reasoning.maxAttempts) || 2)) continue;
+      const key = message.threadId ? String(message.threadId) : `message:${message.id}`;
+      if (this.#maybeRecoverUnrecognizedMessage(event, this.threadGenerations.get(key) || 0)) summary.discoveryResumed += 1;
+    }
+    this.#refreshAttention(now);
+    if (this.store.state.revision !== startingRevision) this.changed();
+    return summary;
   }
 
-  #recoverTask(task) {
-    if (task.action && ['executing', 'uncertain'].includes(task.action.status)) {
-      this.reconcile(task.id);
-      return;
+  #resumeReasoningForTask(taskId, { now = Date.now(), dueOnly = false } = {}) {
+    const task = this.store.state.tasks[taskId];
+    if (!task || isSettled(task) || !this.reasoner?.available?.()) return false;
+    const source = this.store.state.inbox.find(item => item.id === task.sourceEmailId) ||
+      this.store.state.inbox.find(item => item.id === task.request?.source?.id);
+    if (!source) return false;
+    const work = task.reasoningWork;
+    if (dueOnly && !reasoningMayResume(work, now, { automatic: true })) return false;
+    if (work?.status === 'failed' && !reasoningMayResume(work, now)) return false;
+    if (this.pendingReasoning.size + this.pendingDiscovery.size >= REASONING_RECOVERY.maxStartsPerSweep) return false;
+    if (work && ['pending', 'running', 'failed'].includes(work.status) && Number(work.attempts || 0) < Number(work.maxAttempts || 2)) {
+      if (this.pendingReasoning.has(work.key)) return false;
+      if (work.status === 'running') {
+        this.store.mutate(state => {
+          const current = state.tasks[taskId];
+          if (current?.reasoningWork?.key !== work.key) return;
+          current.reasoningWork = { ...current.reasoningWork, status: 'pending', updatedAt: stamp(), recovery: 'interrupted' };
+          record(state, 'reasoning_recovery', 'A reasoning job was interrupted by restart and is queued for one bounded retry.', taskId);
+        });
+      }
+      if (work.kind === 'interpret') return this.#maybeRefineWithModel(taskId, source, { resume: true });
+      if (work.kind === 'probes') return this.#maybeProposeProbes(taskId, { resume: true }) === true;
     }
-    if (task.action || ['completed', 'blocked', 'cancelled'].includes(task.status)) return;
-    const { best } = rankCandidates(task.request, this.store.state.documents);
-    const document = best?.document || null;
-    const newestRunKnown = Boolean(task.assessment?.freshness?.newestRun);
-    const changed = !task.assessment ||
-      (document && (document.id !== task.assessment.documentId || document.version !== task.assessment.documentVersion)) ||
-      relevantRuns(this.store.state.runRecords || {}, task.request.subjectEntity).length !== (newestRunKnown ? 1 : 0);
-    if (changed) this.assess(task.id);
+    if (work && ['complete', 'no_proposal', 'superseded'].includes(work.status)) return false;
+    if (this.#maybeRefineWithModel(taskId, source)) return true;
+    const before = this.store.state.tasks[taskId]?.reasoningWork?.status;
+    this.#maybeProposeProbes(taskId);
+    return this.store.state.tasks[taskId]?.reasoningWork?.status === 'running' || before === 'running';
+  }
+
+  /** Retry saved model work while its durable attempt ceiling permits it. */
+  retryPendingReasoning(taskId = null, { now = new Date(), dueOnly = false } = {}) {
+    let tasks = 0;
+    let discoveries = 0;
+    const at = now instanceof Date ? now.getTime() : Number(now);
+    if (!Number.isFinite(at)) throw new Error('Invalid reasoning recovery time.');
+    const hasCapacity = () => !dueOnly || tasks + discoveries < REASONING_RECOVERY.maxStartsPerSweep &&
+      this.pendingReasoning.size + this.pendingDiscovery.size < REASONING_RECOVERY.maxStartsPerSweep;
+    for (const task of Object.values(this.store.state.tasks || {})) {
+      if (!hasCapacity()) break;
+      if (taskId && task.id !== taskId) continue;
+      if (this.#resumeReasoningForTask(task.id, { now: at, dueOnly })) tasks += 1;
+    }
+    for (const event of this.store.state.events || []) {
+      if (!hasCapacity()) break;
+      if (taskId || event.type !== 'email.received' || !['not_started', 'pending', 'running', 'failed'].includes(event.reasoning?.status)) continue;
+      const message = this.store.state.inbox.find(item => item.id === event.payload?.id) || event.payload;
+      if (Number(event.reasoning.attempts || 0) >= Math.min(2, Number(event.reasoning.maxAttempts) || 2)) continue;
+      if (dueOnly && !reasoningMayResume(event.reasoning, at, { automatic: true })) continue;
+      const key = message.threadId ? String(message.threadId) : `message:${message.id}`;
+      if (this.#maybeRecoverUnrecognizedMessage(event, this.threadGenerations.get(key) || 0, { now: at, dueOnly })) discoveries += 1;
+    }
+    return { tasks, discoveries };
   }
 }

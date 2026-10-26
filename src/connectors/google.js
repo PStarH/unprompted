@@ -301,7 +301,16 @@ export class GoogleWorkspaceConnector extends Connector {
       }
 
       if (response.status === 401) throw new ConnectorError('Google rejected the access token (401). Re-authorise the connector.', { connectorId: this.id, status: 401 });
-      if (response.status === 403) throw new ConnectorError('Google denied access (403). Check granted scopes and API enablement.', { connectorId: this.id, status: 403 });
+      if (response.status === 403) {
+        let disabled = false;
+        try {
+          const detail = await response.json();
+          const reasons = [...(detail.error?.details || []).map(item => item.reason), ...(detail.error?.errors || []).map(item => item.reason)];
+          disabled = reasons.some(reason => reason === 'SERVICE_DISABLED' || reason === 'accessNotConfigured');
+        } catch { /* malformed diagnostics do not change the denied result */ }
+        throw new ConnectorError(disabled ? 'Google API_DISABLED (403). Enable the requested API in your Google Cloud project.'
+          : 'Google denied access (403). Check granted scopes and API enablement.', { connectorId: this.id, status: 403 });
+      }
       if (response.status === 429 || response.status >= 500) {
         lastError = new ConnectorError(
           response.status === 429
@@ -493,8 +502,12 @@ export class GoogleWorkspaceConnector extends Connector {
     if (!pageToken) {
       const start = await this.#request(`${DRIVE}/changes/startPageToken`);
       pageToken = start.startPageToken;
-      // First run establishes a baseline only: we do not replay the entire drive.
-      return { events: [], cursor: { pageToken } };
+      // Capture the change baseline before listing current documents. The first
+      // observation needs existing evidence immediately, without waiting for
+      // another polling interval. Later changes resume from this baseline.
+      const listed = await this.#driveFiles(current);
+      return { events: listed.events, errors: listed.errors, cursor: { pageToken,
+        filesModifiedAfter: listed.filesModifiedAfter, filesPageToken: listed.filesPageToken } };
     }
 
     const changes = await this.#driveChanges(pageToken);

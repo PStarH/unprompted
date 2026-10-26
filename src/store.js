@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { interpretRequest, parseDeadline, normaliseDateLocale } from './requests.js';
 import { findCalibration, PREFERENCE_KEYS } from './calibration.js';
 
@@ -225,6 +226,10 @@ export function normaliseDeadlines(state, { dateLocale = null } = {}) {
  * store in one process (tests, tools) keeps working.
  */
 const LOCK_OWNERS = new Map();
+// Re-entrant handles share a writer generation, not permission to overwrite
+// one another's snapshots. The entry lives only while a handle owns the lock.
+const STATE_GENERATIONS = new Map();
+const ACTIVE_MUTATIONS = new Set();
 
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -308,6 +313,7 @@ function releaseLock(filename) {
     return false;
   }
   LOCK_OWNERS.delete(resolved);
+  STATE_GENERATIONS.delete(resolved);
   try {
     fs.unlinkSync(`${resolved}.lock`);
   } catch (error) {
@@ -317,15 +323,19 @@ function releaseLock(filename) {
 }
 
 export class JsonStore {
+  #mutating = false;
+
   constructor(filename, { dateLocale = null } = {}) {
-    this.filename = filename;
+    this.filename = path.resolve(filename);
     this.migrated = false;
     this.closed = false;
-    fs.mkdirSync(path.dirname(filename), { recursive: true });
-    acquireLock(filename);
+    fs.mkdirSync(path.dirname(this.filename), { recursive: true });
+    acquireLock(this.filename);
+    if (!STATE_GENERATIONS.has(this.filename)) STATE_GENERATIONS.set(this.filename, 0);
+    this.generation = STATE_GENERATIONS.get(this.filename);
     try {
-      const existed = fs.existsSync(filename);
-      this.state = existed ? JSON.parse(fs.readFileSync(filename, 'utf8')) : emptyState();
+      const existed = fs.existsSync(this.filename);
+      this.state = existed ? JSON.parse(fs.readFileSync(this.filename, 'utf8')) : emptyState();
       const before = this.state.schemaVersion;
       this.state = migrate(this.state);
       const repaired = normaliseTasks(this.state, { dateLocale });
@@ -333,7 +343,7 @@ export class JsonStore {
       this.migrated = existed && (before !== this.state.schemaVersion || repaired || deadlines);
       if (!existed || this.migrated) this.save();
     } catch (error) {
-      releaseLock(filename);
+      releaseLock(this.filename);
       this.closed = true;
       throw error;
     }
@@ -342,22 +352,73 @@ export class JsonStore {
   /** Release the process lock. Idempotent, so shutdown paths may call it freely. */
   close() {
     if (this.closed) return;
+    if (this.#mutating) throw this.#transactionError();
     this.closed = true;
     releaseLock(this.filename);
   }
 
   save() {
-    const temporary = `${this.filename}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(this.state, null, 2) + '\n', { mode: 0o600 });
-    fs.renameSync(temporary, this.filename);
+    this.#assertWritable();
+    this.#write();
   }
 
   mutate(callback) {
-    // A single Node process owns the store. Persist each transition before notifying clients.
-    const result = callback(this.state);
-    this.state.revision += 1;
-    this.save();
-    return result;
+    return this.#transaction(callback, false).result;
+  }
+
+  #transactionError() {
+    return Object.assign(new Error('A store mutation transaction is already active; nested mutation, save and close are not allowed.'), { code: 'STORE_TRANSACTION_ACTIVE' });
+  }
+
+  #assertWritable() {
+    if (this.closed) throw Object.assign(new Error('The state store is closed.'), { code: 'STORE_CLOSED' });
+    if (this.#mutating || ACTIVE_MUTATIONS.has(this.filename)) throw this.#transactionError();
+    if (this.generation !== STATE_GENERATIONS.get(this.filename)) {
+      throw Object.assign(new Error('This state snapshot is stale: another store handle committed newer work. Reopen the store before writing.'), { code: 'STORE_CONFLICT' });
+    }
+  }
+
+  #write() {
+    const temporary = `${this.filename}.${process.pid}.${randomUUID()}.tmp`;
+    let fd;
+    try {
+      const serialized = JSON.stringify(this.state, null, 2) + '\n';
+      fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, serialized);
+      fs.closeSync(fd); fd = undefined;
+      fs.renameSync(temporary, this.filename);
+      this.generation += 1;
+      STATE_GENERATIONS.set(this.filename, this.generation);
+    } finally {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* preserve the original write failure */ } }
+      try { fs.unlinkSync(temporary); } catch { /* best-effort cleanup; preserve the original commit outcome */ }
+    }
+  }
+
+  #transaction(callback, onlyIfChanged) {
+    this.#assertWritable();
+    const before = JSON.stringify(this.state);
+    this.#mutating = true;
+    ACTIVE_MUTATIONS.add(this.filename);
+    try {
+      const result = callback(this.state);
+      if (result && typeof result.then === 'function') {
+        // Observe rejection, and detach the callback's state reference on rollback
+        // so a late asynchronous continuation cannot corrupt the live snapshot.
+        Promise.resolve(result).catch(() => {});
+        throw new TypeError('Store mutation callbacks must be synchronous.');
+      }
+      if (onlyIfChanged && JSON.stringify(this.state) === before) return { changed: false, result };
+      this.state.revision += 1;
+      this.#write();
+      return { changed: true, result };
+    } catch (error) {
+      this.state = JSON.parse(before);
+      throw error;
+    } finally {
+      this.#mutating = false;
+      ACTIVE_MUTATIONS.delete(this.filename);
+    }
   }
 
   /**
@@ -374,11 +435,6 @@ export class JsonStore {
    * Returns { changed, result } so callers can also skip a broadcast.
    */
   mutateIfChanged(callback) {
-    const before = JSON.stringify(this.state);
-    const result = callback(this.state);
-    if (JSON.stringify(this.state) === before) return { changed: false, result };
-    this.state.revision += 1;
-    this.save();
-    return { changed: true, result };
+    return this.#transaction(callback, true);
   }
 }

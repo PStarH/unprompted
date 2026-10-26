@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { JsonStore, hasRealEvents } from './src/store.js';
 import { WorkEngine } from './src/engine.js';
 import { SimulationController } from './src/simulation.js';
@@ -10,17 +11,75 @@ import { ConnectorSync } from './src/connectors/sync.js';
 import { createReasoner } from './src/reasoning.js';
 import { PermissionDeniedError } from './src/permissions.js';
 import { normaliseDateLocale } from './src/requests.js';
+import { GoogleAuth } from './src/connectors/google.js';
+import { GoogleDocsWriteProvider } from './src/document-delivery.js';
+import { LocalSetupStore, GoogleOAuthSetup, googleWorkspacePath } from './src/setup.js';
+import { MonitoringService } from './src/monitoring.js';
+import { HttpRequestError, readJsonBody, SseHub } from './src/http-transport.js';
+import { ModelSetupError, normalizeModelSettings, validateModelSettings } from './src/model-setup.js';
+import { googleConnectionIssue } from './src/google-connection.js';
+import { CONNECTION_PROVIDERS, publicClientConfiguration } from './src/connection-catalog.js';
+import { DeviceOAuth } from './src/device-oauth.js';
+import { connectedSources, sourceCounts } from './src/connected-sources.js';
+import { bindConnectionAccount } from './src/external-work.js';
+import { readRegularFile } from './src/local-files.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4173);
 const host = '127.0.0.1';
+const httpLimit = (name, fallback, min, max) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= min && value <= max ? Math.round(value) : fallback;
+};
+const httpBodyLimits = {
+  maxBytes: httpLimit('UNPROMPTED_HTTP_MAX_BODY_BYTES', 1024 * 1024, 1024, 16 * 1024 * 1024),
+  timeoutMs: httpLimit('UNPROMPTED_HTTP_BODY_TIMEOUT_MS', 30_000, 1000, 10 * 60_000),
+  idleTimeoutMs: httpLimit('UNPROMPTED_HTTP_BODY_IDLE_TIMEOUT_MS', 10_000, 500, 10 * 60_000)
+};
+const requestTimeoutMs = httpLimit('UNPROMPTED_HTTP_REQUEST_TIMEOUT_MS', 35_000, 1000, 10 * 60_000);
+const localSetup = new LocalSetupStore({ filePath: process.env.UNPROMPTED_SETUP_FILE || null });
+let setupState = localSetup.get();
+const connectionClientFile = process.env.UNPROMPTED_CONNECTOR_CLIENTS_FILE || path.join(root, 'connector-clients.json');
+let provisionedConnections = {};
+try { provisionedConnections = publicClientConfiguration(JSON.parse(readRegularFile(connectionClientFile, { maxBytes: 64 * 1024 }))); }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
+for (const provider of Object.values(CONNECTION_PROVIDERS)) {
+  const clientId = process.env[provider.clientEnv] || provisionedConnections[provider.id]?.clientId;
+  if (clientId && !localSetup.getConnection(provider.id).clientId) localSetup.saveConnectionClient(provider.id, clientId);
+}
+const provisionedClientFile = process.env.UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE || path.join(root, 'google-oauth-client.json');
+if (!setupState.google.clientId && fs.existsSync(provisionedClientFile)) {
+  localSetup.saveDesktopClientJson(fs.readFileSync(provisionedClientFile, 'utf8'));
+  setupState = localSetup.get();
+}
+// A distribution may provision its registered Desktop client once. End users
+// then use Google's consent screen directly; no per-user Cloud project is needed.
+const provisionedClientId = process.env.UNPROMPTED_GOOGLE_DESKTOP_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+const provisionedClientSecret = process.env.UNPROMPTED_GOOGLE_DESKTOP_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+if (!setupState.google.clientId && provisionedClientId && provisionedClientSecret) {
+  localSetup.saveDesktopClientJson(JSON.stringify({ installed: { client_id: provisionedClientId, client_secret: provisionedClientSecret } }));
+  setupState = localSetup.get();
+}
+const legacySyncSetting = Number(process.env.UNPROMPTED_SYNC_INTERVAL_MS ?? 0);
+if (!setupState.monitoring.userConfigured && Number.isFinite(legacySyncSetting) && legacySyncSetting > 0) {
+  localSetup.setMonitoring({ enabled: true, intervalMs: Math.max(15000, legacySyncSetting) });
+  setupState = localSetup.get();
+}
+const localGoogleSaved = Boolean(setupState.google.clientId && setupState.google.clientSecret && setupState.google.refreshToken);
+const usingLocalGoogle = localGoogleSaved && !process.env.GOOGLE_REFRESH_TOKEN;
+const explicitSimulation = process.env.UNPROMPTED_FORCE_SIMULATION === 'true' || process.env.UNPROMPTED_RULE_ONLY === 'true';
+const workspaceDirectory = process.env.UNPROMPTED_STATE_FILE ? path.dirname(path.resolve(process.env.UNPROMPTED_STATE_FILE)) : localSetup.directory;
+const defaultStateFile = usingLocalGoogle ? googleWorkspacePath(workspaceDirectory, setupState.google.accountId)
+  : process.env.GOOGLE_REFRESH_TOKEN ? path.join(localSetup.directory, `environment-${createHash('sha256').update(process.env.GOOGLE_REFRESH_TOKEN).digest('hex').slice(0, 24)}-state.json`)
+  : path.join(localSetup.directory, explicitSimulation ? 'simulation-state.json' : 'workspace-state.json');
+let runtimeEnv = localSetup.runtimeEnv(process.env);
 // Numeric dates follow only an explicitly configured reading; an unknown
 // value counts as "not configured", and an unconfigured ambiguous `10/11`
 // stays ambiguous instead of being guessed.
 const dateLocale = normaliseDateLocale(process.env.UNPROMPTED_DATE_LOCALE);
 let store;
 try {
-  store = new JsonStore(process.env.UNPROMPTED_STATE_FILE || path.join(root, 'data', 'state.json'), { dateLocale });
+  store = new JsonStore(usingLocalGoogle && setupState.google.accountId ? defaultStateFile : process.env.UNPROMPTED_STATE_FILE || defaultStateFile, { dateLocale });
 } catch (error) {
   if (error.code === 'STATE_LOCKED') {
     console.error('The state file is already in use by another Unprompted process.');
@@ -31,24 +90,49 @@ try {
   throw error;
 }
 
-const runtime = buildRuntime(process.env, { store });
-const clients = new Set();
+for (const provider of Object.keys(CONNECTION_PROVIDERS)) {
+  const saved = localSetup.getConnection(provider);
+  if (saved.account?.id) bindConnectionAccount(store, provider, saved.account.id);
+}
+let runtime = buildRuntime(runtimeEnv, { store, extraConnectors: connectedSources(localSetup), allowSimulation: explicitSimulation, allowSimulatedActions: explicitSimulation && process.env.UNPROMPTED_DESKTOP_APP === '1' });
+if (runtime.live && usingLocalGoogle && setupState.google.accountId) runtime.report.workspaceId = `google:${createHash('sha256').update(setupState.google.accountId).digest('hex').slice(0, 24)}`;
+if (runtime.live && !usingLocalGoogle) runtime.report.workspaceId = `environment:${createHash('sha256').update(store.filename).digest('hex').slice(0, 24)}`;
+if (usingLocalGoogle && runtime.report.google.ok) localSetup.markGoogleRuntimeActive();
+else if (setupState.restartRequired) localSetup.clearRestartRequired();
+const sseHub = new SseHub({
+  maxClients: httpLimit('UNPROMPTED_HTTP_MAX_SSE_CLIENTS', 32, 1, 1024),
+  maxFrameBytes: httpLimit('UNPROMPTED_HTTP_SSE_MAX_FRAME_BYTES', 8 * 1024 * 1024, 1024, 64 * 1024 * 1024),
+  maxBufferedBytes: httpLimit('UNPROMPTED_HTTP_SSE_MAX_CLIENT_BUFFER_BYTES', 10 * 1024 * 1024, 1024, 128 * 1024 * 1024),
+  maxTotalBufferedBytes: httpLimit('UNPROMPTED_HTTP_SSE_MAX_TOTAL_BUFFER_BYTES', 64 * 1024 * 1024, 1024, 512 * 1024 * 1024),
+  heartbeatMs: httpLimit('UNPROMPTED_HTTP_SSE_HEARTBEAT_MS', 20_000, 1000, 10 * 60_000),
+  onError: () => console.error('SSE transport error; an affected client was disconnected.')
+});
+let googleConnector = runtime.connectors.find(connector => connector.id === 'google') || null;
+let googleDisconnectedThisRun = false;
+let googleValidationThisRun = null;
+let documentProvider = googleConnector ? new GoogleDocsWriteProvider({
+  connector: googleConnector,
+  enabled: runtimeEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true',
+  shadow: runtime.shadow
+}) : null;
+const productReasoner = createReasoner(runtimeEnv);
+if (!productReasoner.available() && process.env.UNPROMPTED_FORCE_SIMULATION !== 'true' && process.env.UNPROMPTED_RULE_ONLY !== 'true') {
+  productReasoner.preferModelInterpretation = true;
+}
 
-const engine = new WorkEngine(store, {
+let engine = new WorkEngine(store, {
   baseUrl: `http://${host}:${port}`,
   provider: runtime.provider,
   policy: runtime.policy,
-  reasoner: createReasoner(process.env),
+  reasoner: productReasoner,
+  documentProvider,
   mode: runtime.mode,
   dateLocale,
   // How long a waiting request may go without observable progress before
   // the decision reaches the user. Default 24h; 0 raises it at the next sweep.
   stallAfterMs: process.env.UNPROMPTED_STALL_AFTER_MS != null ? Number(process.env.UNPROMPTED_STALL_AFTER_MS) : undefined,
   onChange(state) {
-    const message = `data: ${JSON.stringify(state)}\n\n`;
-    for (const client of clients) {
-      try { client.write(message); } catch { clients.delete(client); }
-    }
+    sseHub.publish(state);
   }
 });
 
@@ -58,33 +142,41 @@ const engine = new WorkEngine(store, {
 // is persisted, so a no-op restart stays invisible to every observer.
 store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
 
-const simulation = new SimulationController(store, engine);
-const forceSimulation = process.env.UNPROMPTED_FORCE_SIMULATION === 'true';
+let simulation = new SimulationController(store, engine);
 // A live workspace must never have simulated events injected into it, and a
 // state that holds real recorded events is never run over by the simulation
 // either: it is the user's only record of what was actually observed.
-const stateHoldsRealEvents = hasRealEvents(store.state);
-const runSimulation = (runtime.mode === 'simulation' || forceSimulation) && !stateHoldsRealEvents;
+let stateHoldsRealEvents = hasRealEvents(store.state);
+// The override is a demo/test opt-in, never a way to inject simulated events
+// into a process configured for a live provider. Live and simulated workspaces
+// stay distinct even when an inherited environment variable is present.
+let runSimulation = runtime.mode === 'simulation' && !stateHoldsRealEvents;
+// The disposable first-run demo waits for a viewer. Health probes and time
+// spent reading the terminal must not consume its story before it is visible.
+const demoMode = runSimulation && process.env.UNPROMPTED_FORCE_SIMULATION === 'true' && process.env.UNPROMPTED_DEMO_MODE === 'true';
+const guidedSimulation = runSimulation && (demoMode || process.env.UNPROMPTED_DESKTOP_APP === '1');
+let demoStarted = false;
+let modelSetupBusy = false;
+const ruleDemoEnabled = process.env.UNPROMPTED_FORCE_SIMULATION === 'true';
+const simulationCanStart = () => runSimulation && explicitSimulation;
+const hasGuidedSimulation = () => guidedSimulation;
 // Why the simulation entry points are refused, when they are.
-const simulationDisabledReason = runtime.mode !== 'live' || forceSimulation
+const simulationDisabledReason = stateHoldsRealEvents
   ? 'Simulation is disabled for a state that holds real events.'
   : 'Simulation is disabled in live mode.';
 
 const json = (res, status, value) => {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-  res.end(JSON.stringify(value));
+  if (res.destroyed || res.writableEnded || res.headersSent) return false;
+  try {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(JSON.stringify(value));
+    return true;
+  } catch {
+    if (!res.destroyed) res.destroy();
+    return false;
+  }
 };
 const escapeHtml = text => String(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
-
-async function readJson(req) {
-  if (!req.headers['content-type']?.startsWith('application/json')) throw new Error('Expected application/json');
-  let raw = '';
-  for await (const chunk of req) {
-    raw += chunk;
-    if (raw.length > 1024 * 1024) throw new Error('Request too large');
-  }
-  return raw ? JSON.parse(raw) : {};
-}
 
 /**
  * Pull new events from configured connectors.
@@ -95,26 +187,264 @@ async function readJson(req) {
  */
 const syncTimeoutSetting = Number(process.env.UNPROMPTED_SYNC_TIMEOUT_MS ?? 0);
 const syncTimeoutMs = Number.isFinite(syncTimeoutSetting) && syncTimeoutSetting > 0 ? syncTimeoutSetting : null;
-const sync = new ConnectorSync({
+let sync = new ConnectorSync({
   connectors: runtime.connectors,
   cursors: runtime.cursors,
   engine,
   ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {})
 });
+let monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
+let workspaceChanging = false;
+const googleOAuth = new GoogleOAuthSetup(localSetup, { onAuthorized: options => activateGoogleWorkspace(options) });
+let connectionActivationQueue = Promise.resolve();
+const deviceOAuth = new DeviceOAuth(localSetup, { onConnected: (id, options) => {
+  const activation = connectionActivationQueue.catch(() => {}).then(() => applyConnectedSources({ ...options, refreshSource: id }));
+  connectionActivationQueue = activation; return activation;
+} });
+const publicSetupStatus = () => {
+  const status = localSetup.publicStatus({
+    runtime,
+    monitoring: monitoring.describe(),
+    connectorStatus: store.state.connectorStatus?.google || null
+  });
+  const modelRuntime = engine.reasoner.status();
+  status.model = { ...status.model, active: modelRuntime.available === true,
+    runtime: modelRuntime, externallyConfigured: Boolean(process.env.UNPROMPTED_MODEL_BASE_URL || process.env.UNPROMPTED_MODEL_NAME) };
+  status.connections = Object.fromEntries(Object.values(CONNECTION_PROVIDERS).map(provider => {
+    const saved = localSetup.getConnection(provider.id), connector = runtime.connectors.find(connector => connector.id === provider.id && connector.live);
+    const recorded = store.state.connectorStatus?.[provider.id];
+    return [provider.id, { id: provider.id, name: provider.name, clientId: saved.pendingClientId || saved.clientId || null,
+      configured: Boolean(saved.clientId), authorized: Boolean(saved.accessToken), connected: Boolean(connector && connector.account?.id === saved.account?.id),
+      account: saved.account ? { label: saved.account.label } : null, readOnly: true,
+      oauth: deviceOAuth.describe(provider.id), lastSyncAt: recorded?.lastSyncAt || null,
+      lastError: recorded?.lastError || null, healthy: recorded ? recorded.ok === true : null,
+      counts: sourceCounts(store.state, provider.id) }];
+  }));
+  status.google.configuredThisRun = Boolean(runtime.connectors.some(connector => connector.id === 'google' && connector.live));
+  status.google.credentialsConfiguredExternally = Boolean(process.env.GOOGLE_REFRESH_TOKEN);
+  if (status.google.credentialsConfiguredExternally) {
+    status.google.accountEmail = runtimeEnv.GOOGLE_ACCOUNT_EMAIL || null;
+    status.google.hasClient = Boolean(runtimeEnv.GOOGLE_CLIENT_ID && runtimeEnv.GOOGLE_CLIENT_SECRET);
+    status.google.hasRefreshToken = Boolean(runtimeEnv.GOOGLE_REFRESH_TOKEN);
+    status.google.restartRequired = false;
+    status.google.requestedScopes = { readGmail: runtimeEnv.GOOGLE_READ_GMAIL !== 'false', readDrive: runtimeEnv.GOOGLE_READ_DRIVE !== 'false',
+      docsWrite: runtimeEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', gmailSend: runtimeEnv.GOOGLE_SEND_ENABLED === 'true' };
+    status.google.lastValidationStatus = googleValidationThisRun?.status || null;
+    status.google.lastValidationError = googleValidationThisRun?.error || null;
+    status.google.connectionStatus = store.state.connectorStatus?.google?.lastError ? 'sync_failed'
+      : store.state.connectorStatus?.google?.ok ? 'sync_ok' : 'configured_unverified';
+  }
+  status.google.activating = workspaceChanging;
+  status.google.issue = googleConnectionIssue(status.monitoring.lastError || status.google.lastValidationError);
+  status.workspace = { mode: runtime.mode, id: runtime.report.workspaceId || runtime.mode, ready: runtime.connectors.some(connector => connector.live),
+    observation: monitoring.describe(),
+    observed: { emails: store.state.inbox.length, documents: Object.keys(store.state.documents).length,
+      tasks: Object.keys(store.state.tasks).length },
+    reasoning: { pending: engine.pendingReasoning.size + engine.pendingDiscovery.size,
+      failed: Object.values(store.state.tasks).filter(task => task.reasoningWork?.status === 'failed').length } };
+  if (googleDisconnectedThisRun) {
+    status.google.runtimeDisabled = true;
+    status.google.authorizationState = 'disconnected_this_run';
+    status.google.connectionStatus = 'disconnected_this_run';
+    status.google.configuredThisRun = false;
+    status.google.hasRefreshToken = false;
+    status.google.allowExternalWrites = false;
+    status.google.issue = null;
+    status.google.credentialsConfiguredExternally = runtime.report.google.credentialsConfiguredExternally;
+  }
+  return status;
+};
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${host}:${port}`);
+async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.enabled, allowExternalWrites = null, request = null } = {}) {
+  if (workspaceChanging || modelSetupBusy) throw new Error('A connection update is already running.');
+  if (process.env.GOOGLE_REFRESH_TOKEN) throw new Error('The launch environment controls the Google connection.');
+  const credentials = localSetup.get().google;
+  if (!credentials.clientId || !credentials.clientSecret || !credentials.refreshToken || !credentials.accountId) throw new Error('Authorize your Google account first.');
+  workspaceChanging = true;
+  const previous = { store, engine, monitoring, shadow: runtime.policy.shadow };
+  let nextStore = null, applied = false;
+  try {
+    simulation.stop();
+    previous.monitoring.stop();
+    previous.engine.policy.shadow = true;
+    // New mutations are refused below while the old requests, sync and model
+    // calls drain. Nothing may write into a closed or different account store.
+    await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
+    await previous.monitoring.whenIdle();
+    await previous.engine.whenSettled();
+    if (shutdownPromise) throw new Error('The application is shutting down.');
+    if (allowExternalWrites != null) localSetup.setExternalWrites(allowExternalWrites);
+    const filename = googleWorkspacePath(workspaceDirectory, credentials.accountId);
+    nextStore = path.resolve(filename) === path.resolve(previous.store.filename) ? previous.store : new JsonStore(filename, { dateLocale });
+    const nextEnv = localSetup.runtimeEnv(process.env);
+    for (const id of Object.keys(CONNECTION_PROVIDERS)) {
+      const account = localSetup.getConnection(id).account;
+      if (account?.id) bindConnectionAccount(nextStore, id, account.id);
+    }
+    const nextRuntime = buildRuntime(nextEnv, { store: nextStore, allowSimulation: false, extraConnectors: connectedSources(localSetup) });
+    if (!nextRuntime.report.google.ok) throw new Error('The Google connection is incomplete.');
+    nextRuntime.report.workspaceId = `google:${createHash('sha256').update(credentials.accountId).digest('hex').slice(0, 24)}`;
+    const nextGoogle = nextRuntime.connectors.find(connector => connector.id === 'google');
+    const nextDocumentProvider = new GoogleDocsWriteProvider({ connector: nextGoogle,
+      enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: nextRuntime.shadow });
+    const nextEngine = new WorkEngine(nextStore, {
+      baseUrl: `http://${host}:${port}`, provider: nextRuntime.provider, policy: nextRuntime.policy,
+      reasoner: previous.engine.reasoner, documentProvider: nextDocumentProvider, mode: 'live', dateLocale,
+      stallAfterMs: previous.engine.stallAfterMs,
+      onChange(state) { if (applied) sseHub.publish(state); }
+    });
+    if (nextStore !== previous.store) localSetup.resetObservationHistory();
+    store = nextStore; runtime = nextRuntime; runtimeEnv = nextEnv; engine = nextEngine;
+    googleConnector = nextGoogle; documentProvider = nextDocumentProvider;
+    googleDisconnectedThisRun = false; runSimulation = false; stateHoldsRealEvents = hasRealEvents(store.state);
+    simulation = new SimulationController(store, engine);
+    sync = new ConnectorSync({ connectors: runtime.connectors, cursors: runtime.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
+    monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
+    store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
+    localSetup.markGoogleRuntimeActive();
+    if (nextStore !== previous.store) previous.store.close();
+    applied = true;
+    sseHub.publish(engine.publicState());
+    await monitoring.setSettings({ enabled: observe === true });
+    if (!observe) void monitoring.runNow();
+    return publicSetupStatus();
+  } catch (error) {
+    if (!applied && nextStore && nextStore !== previous.store) nextStore.close();
+    // Keep the old workspace paused if a newly saved account could not be
+    // applied. A retry uses that saved authorization; it never mixes accounts.
+    throw error;
+  } finally { workspaceChanging = false; }
+}
+
+async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null } = {}) {
+  if (workspaceChanging || modelSetupBusy) throw new Error('A connection update is already running.');
+  workspaceChanging = true;
+  try {
+    monitoring.stop(); simulation.stop(); engine.policy.shadow = true;
+    await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
+    await monitoring.whenIdle(); await engine.whenSettled();
+    if (shutdownPromise) throw new Error('The application is shutting down.');
+    for (const id of Object.keys(CONNECTION_PROVIDERS)) {
+      const saved = localSetup.getConnection(id);
+      if (saved.account?.id || id === disconnected) bindConnectionAccount(store, id, saved.account?.id || null);
+    }
+    if (refreshSource) store.mutate(state => {
+      const previous = state.cursors?.[refreshSource];
+      if (refreshSource === 'github' && previous?.tracked) state.cursors[refreshSource] = { tracked: previous.tracked };
+      else delete state.cursors?.[refreshSource];
+      delete state.connectorStatus?.[refreshSource];
+    });
+    const nextEnv = localSetup.runtimeEnv(process.env);
+    if (googleDisconnectedThisRun) for (const key of ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']) delete nextEnv[key];
+    const next = buildRuntime(nextEnv, { store, allowSimulation: false, extraConnectors: connectedSources(localSetup) });
+    next.report.workspaceId = runtime.report.workspaceId || `workspace:${createHash('sha256').update(store.filename).digest('hex').slice(0, 24)}`;
+    if (googleDisconnectedThisRun) next.report.google.disconnectedThisRun = true;
+    runtime = next; runtimeEnv = nextEnv;
+    googleConnector = runtime.connectors.find(connector => connector.id === 'google') || null;
+    documentProvider = googleConnector ? new GoogleDocsWriteProvider({ connector: googleConnector,
+      enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: runtime.shadow }) : null;
+    engine.provider = runtime.provider; engine.policy = runtime.policy; engine.mode = runtime.mode;
+    engine.documentProvider = documentProvider; engine.taskServices.documentProvider = documentProvider;
+    runSimulation = false;
+    sync = new ConnectorSync({ connectors: runtime.connectors, cursors: runtime.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
+    monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
+    store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
+    for (const task of Object.values(store.state.tasks)) if (!task.action && !['completed', 'cancelled'].includes(task.status)) engine.assess(task.id, null, { force: true, allowAutomation: false });
+    engine.changed();
+    if (runtime.live) {
+      await monitoring.setSettings({ enabled: observe === true });
+      if (!observe && initialRead) void monitoring.runNow();
+    } else await monitoring.setSettings({ enabled: false });
+    return publicSetupStatus();
+  } finally { workspaceChanging = false; }
+}
+
+function disconnectGoogleForThisRun() {
+  googleDisconnectedThisRun = true;
+  // The engine and both Google write paths share this policy/connector. Make
+  // every future operation fail closed before awaiting an in-flight sync.
+  runtime.live = false;
+  runtime.shadow = true;
+  runtime.policy.shadow = true;
+  engine.policy.shadow = true;
+  if (googleConnector) {
+    googleConnector.live = false;
+    googleConnector.config.readGmail = false;
+    googleConnector.config.readDrive = false;
+    googleConnector.config.sendEnabled = false;
+    googleConnector.sendEnabled = false;
+    googleConnector.shadow = true;
+    if (googleConnector.auth) {
+      googleConnector.auth.clientId = null;
+      googleConnector.auth.clientSecret = null;
+      googleConnector.auth.refreshToken = null;
+      googleConnector.auth.cached = null;
+    }
+  }
+  if (documentProvider) {
+    documentProvider.enabled = false;
+    documentProvider.shadow = true;
+    if (documentProvider.connector?.auth) {
+      documentProvider.connector.auth.clientId = null;
+      documentProvider.connector.auth.clientSecret = null;
+      documentProvider.connector.auth.refreshToken = null;
+      documentProvider.connector.auth.cached = null;
+    }
+  }
+  runtime.report.shadow = true;
+  runtime.report.eventSource = 'disconnected';
+  runtime.report.note = 'Google is disconnected. Reconnect your account in the interface to resume; existing work records are retained.';
+  runtime.report.mailProvider = 'disabled';
+  runtime.report.google = {
+    ...runtime.report.google,
+    ok: false,
+    disconnectedThisRun: true,
+    detail: runtime.report.note,
+    readGmail: false,
+    readDrive: false,
+    sendEnabled: false,
+    credentialsConfiguredExternally: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN)
+  };
+  store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
+}
+
+const activeHttpHandlers = new Set();
+const server = http.createServer((req, res) => {
+  const handler = handleHttpRequest(req, res);
+  req.workspaceHandler = handler;
+  activeHttpHandlers.add(handler);
+  handler.then(() => activeHttpHandlers.delete(handler), () => activeHttpHandlers.delete(handler));
+});
+server.requestTimeout = requestTimeoutMs;
+server.headersTimeout = Math.min(15_000, requestTimeoutMs);
+server.keepAliveTimeout = 5_000;
+server.maxHeadersCount = 100;
+let shutdownPromise = null;
+
+async function handleHttpRequest(req, res) {
+  let url;
+  try { url = new URL(req.url, `http://${host}:${port}`); }
+  catch { return json(res, 400, { error: 'Invalid request target.' }); }
   try {
     if (req.method === 'GET' && url.pathname === '/api/health') {
       return json(res, 200, {
         ok: true,
+        processId: process.pid,
         mode: runtime.mode,
         shadow: runtime.shadow,
         revision: store.state.revision,
         schemaVersion: store.state.schemaVersion,
-        mailProvider: runtime.provider.kind,
-        eventSource: runtime.live ? 'google' : 'simulated',
+        mailProvider: googleDisconnectedThisRun ? 'disabled' : runtime.provider.kind,
+        eventSource: googleDisconnectedThisRun ? 'disconnected' : runtime.report.eventSource,
+        googleRuntimeDisabled: googleDisconnectedThisRun,
         reasoner: engine.reasoner.status ? engine.reasoner.status() : { id: 'none' }
+      });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/setup') {
+      return json(res, 200, {
+        ...publicSetupStatus(),
+        oauth: googleOAuth.describe(),
+        desktopApp: process.env.UNPROMPTED_DESKTOP_APP === '1'
       });
     }
     if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, engine.publicState());
@@ -128,18 +458,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/runtime') {
       return json(res, 200, {
         ...runtime.report,
-        simulationRunning: runSimulation,
+        simulationRunning: simulationCanStart(),
+        demo: { enabled: hasGuidedSimulation() && simulationCanStart(), disposable: demoMode, startsOnConnection: hasGuidedSimulation(), ruleBased: (ruleDemoEnabled || process.env.UNPROMPTED_RULE_ONLY === 'true') && !engine.reasoner.available() },
+        reasoner: engine.reasoner.status(),
+        googleRuntimeDisabled: googleDisconnectedThisRun,
         scenarios: simulation.describe(),
         connectors: runtime.connectors.map(connector => connector.describe()),
+        monitoring: monitoring.describe(),
         sync: sync.describe(),
         ...runtime.cursors.describe()
       });
     }
     if (req.method === 'GET' && url.pathname === '/api/stream') {
-      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-      res.write(`data: ${JSON.stringify(engine.publicState())}\n\n`);
-      clients.add(res);
-      req.on('close', () => clients.delete(res));
+      const accepted = sseHub.add(req, res, engine.publicState());
+      if (accepted && hasGuidedSimulation() && simulationCanStart() && !demoStarted) {
+        demoStarted = true;
+        simulation.start();
+      }
       return;
     }
     if (req.method === 'GET' && url.pathname === '/favicon.ico') {
@@ -158,9 +493,151 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST') {
       const origin = req.headers.origin;
       if (origin && origin !== `http://${host}:${port}` && origin !== `http://localhost:${port}`) return json(res, 403, { error: 'Cross-origin requests are not allowed' });
-      const body = await readJson(req);
+      const body = await readJsonBody(req, httpBodyLimits);
+      if (workspaceChanging) return json(res, 409, { error: 'Your workspace connection is being updated. Try again shortly.', code: 'WORKSPACE_CONNECTING' });
 
-      if (url.pathname === '/api/connectors/sync') return json(res, 200, await sync.run());
+      const connectionRoute = url.pathname.match(/^\/api\/setup\/connections\/(github|microsoft)\/(authorize|cancel|activate|forget)$/);
+      if (connectionRoute) {
+        const [, id, operation] = connectionRoute;
+        if (demoMode) return json(res, 409, { error: 'Open your persistent workspace with npm start to connect accounts.', code: 'DISPOSABLE_DEMO' });
+        if (operation === 'authorize') {
+          try { return json(res, 200, { oauth: await deviceOAuth.start(id, { clientId: body?.clientId, observe: body?.observe !== false }) }); }
+          catch (error) { return json(res, 400, { error: error.message, code: 'AUTH_START_FAILED' }); }
+        }
+        if (operation === 'cancel') { deviceOAuth.cancel(id); return json(res, 200, { setup: publicSetupStatus() }); }
+        if (operation === 'forget') {
+          deviceOAuth.cancel(id);
+          const connector = runtime.connectors.find(connector => connector.id === id);
+          if (connector) { connector.live = false; if (connector.auth) connector.auth.disabled = true; }
+          localSetup.clearConnection(id);
+          await applyConnectedSources({ request: req, disconnected: id, initialRead: false });
+          return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
+        }
+        if (!localSetup.getConnection(id).accessToken) return json(res, 409, { error: 'Authorize this account first.' });
+        await applyConnectedSources({ request: req, observe: body?.observe !== false });
+        return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
+      }
+
+      if (url.pathname === '/api/setup/model') {
+        if (demoMode) return json(res, 409, { error: 'Start your persistent workspace with npm start before connecting a model.', code: 'DISPOSABLE_DEMO' });
+        if (modelSetupBusy || engine.pendingReasoning.size || engine.pendingDiscovery.size) return json(res, 409, { error: 'Model reasoning is running. Wait for it to finish before changing the connection.', code: 'MODEL_BUSY' });
+        if (process.env.UNPROMPTED_MODEL_BASE_URL || process.env.UNPROMPTED_MODEL_NAME) return json(res, 409, { error: 'The model is configured by the launch environment. Update those settings and restart, or remove them to use the interface.', code: 'MODEL_ENV_CONFIGURED' });
+        modelSetupBusy = true;
+        try {
+          const settings = normalizeModelSettings(body, localSetup.get().model);
+          const checked = await validateModelSettings(settings, { budgetEnv: process.env });
+          if (engine.pendingReasoning.size || engine.pendingDiscovery.size) throw new ModelSetupError('MODEL_BUSY', 'Model reasoning started during the check. Wait for it to finish and try again.', 409);
+          localSetup.saveModel(settings, checked.validation);
+          engine.replaceReasoner(checked.reasoner);
+          if (runSimulation && !runtime.live && !stateHoldsRealEvents) {
+            runtime.shadow = false; runtime.policy.shadow = false; runtime.report.shadow = false;
+            runtime.report.note = 'Model-connected sample workspace. Context and delivery are simulated; no real external writes are enabled.';
+            store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
+          }
+          if (simulationCanStart() && !demoStarted && !runtime.live) { demoStarted = true; simulation.start(); }
+          return json(res, 200, { ok: true, setup: publicSetupStatus(), state: engine.publicState() });
+        } catch (error) {
+          if (error instanceof ModelSetupError) return json(res, error.status, { error: error.message, code: error.code });
+          return json(res, 500, { error: 'The model settings could not be fully applied. Reload to check the current connection before retrying.', code: 'MODEL_SAVE_FAILED' });
+        } finally { modelSetupBusy = false; }
+      }
+      if (url.pathname === '/api/setup/model/forget') {
+        if (modelSetupBusy || engine.pendingReasoning.size || engine.pendingDiscovery.size) return json(res, 409, { error: 'Wait for current model reasoning to finish before disconnecting.', code: 'MODEL_BUSY' });
+        if (process.env.UNPROMPTED_MODEL_BASE_URL || process.env.UNPROMPTED_MODEL_NAME) return json(res, 409, { error: 'Remove the model configuration from the launch environment to disconnect it.', code: 'MODEL_ENV_CONFIGURED' });
+        localSetup.clearModel();
+        const disconnected = createReasoner({});
+        disconnected.preferModelInterpretation = !ruleDemoEnabled && process.env.UNPROMPTED_RULE_ONLY !== 'true';
+        engine.replaceReasoner(disconnected);
+        if (!ruleDemoEnabled) { simulation.stop(); demoStarted = false; }
+        return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
+      }
+
+      if (url.pathname === '/api/setup/monitoring') {
+        const state = await monitoring.setSettings({ enabled: body?.enabled, intervalMs: body?.intervalMs });
+        return json(res, 200, { monitoring: state });
+      }
+      if (url.pathname === '/api/setup/google/client') {
+        if (process.env.GOOGLE_REFRESH_TOKEN) return json(res, 409, { error: 'The launch environment controls this Google connection.', code: 'GOOGLE_ENV_CONFIGURED' });
+        googleOAuth.cancel();
+        const client = localSetup.saveDesktopClientJson(body?.clientJson);
+        return json(res, 200, { setup: publicSetupStatus(), saved: Boolean(client.google.clientId) });
+      }
+      if (url.pathname === '/api/setup/google/authorize') {
+        if (process.env.GOOGLE_REFRESH_TOKEN) return json(res, 409, { error: 'The launch environment controls this Google connection.', code: 'GOOGLE_ENV_CONFIGURED' });
+        if (demoMode) return json(res, 409, { error: 'Start your persistent workspace with npm start to connect your account.', code: 'DISPOSABLE_DEMO' });
+        const result = await googleOAuth.start({ scopes: body?.scopes, observe: body?.observe !== false,
+          allowExternalWrites: body?.allowExternalWrites === true, locale: body?.locale, returnUrl: `http://${host}:${port}/` });
+        return json(res, 200, { ...result, oauth: googleOAuth.describe() });
+      }
+      if (url.pathname === '/api/setup/google/cancel') {
+        googleOAuth.cancel();
+        return json(res, 200, { oauth: googleOAuth.describe(), setup: publicSetupStatus() });
+      }
+      if (url.pathname === '/api/setup/google/activate') {
+        try { await activateGoogleWorkspace({ observe: body?.observe !== false, request: req }); }
+        catch { return json(res, 409, { error: 'Your saved Google authorization could not be applied. Check the connection and retry.', code: 'GOOGLE_ACTIVATION_FAILED' }); }
+        return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
+      }
+      if (url.pathname === '/api/setup/google/permissions') {
+        if (process.env.GOOGLE_REFRESH_TOKEN) return json(res, 409, { error: 'The launch environment controls this Google connection.', code: 'GOOGLE_ENV_CONFIGURED' });
+        const result = localSetup.setExternalWrites(body?.allowExternalWrites);
+        await activateGoogleWorkspace({ request: req });
+        return json(res, 200, { setup: publicSetupStatus(), allowExternalWrites: result.permissions.allowExternalWrites, restartRequired: false });
+      }
+      if (url.pathname === '/api/setup/google/validate') {
+        if (googleDisconnectedThisRun) return json(res, 409, { error: 'Google is disconnected. Reconnect before validating the account.' });
+        const credentials = process.env.GOOGLE_REFRESH_TOKEN ? { clientId: runtimeEnv.GOOGLE_CLIENT_ID,
+          clientSecret: runtimeEnv.GOOGLE_CLIENT_SECRET, refreshToken: runtimeEnv.GOOGLE_REFRESH_TOKEN,
+          accountEmail: runtimeEnv.GOOGLE_ACCOUNT_EMAIL } : localSetup.get().google;
+        if (!credentials.clientId || !credentials.clientSecret || !credentials.refreshToken) {
+          return json(res, 409, { error: 'Complete Google Desktop OAuth authorization first.' });
+        }
+        try {
+          const auth = new GoogleAuth({
+            clientId: credentials.clientId,
+            clientSecret: credentials.clientSecret,
+            refreshToken: credentials.refreshToken,
+            timeoutMs: 15000
+          });
+          await auth.accessToken();
+          if (process.env.GOOGLE_REFRESH_TOKEN) googleValidationThisRun = { status: 'validated', error: null };
+          else localSetup.setGoogleValidation({ ok: true });
+          return json(res, 200, { ok: true, accountEmail: credentials.accountEmail || null, status: runtime.live ? 'Google token refresh succeeded. Workspace data has not been synced by this check.' : 'Google token refresh succeeded. Apply the saved connection to activate your workspace.' });
+        } catch {
+          if (process.env.GOOGLE_REFRESH_TOKEN) googleValidationThisRun = { status: 'failed', error: 'Google authorization could not be validated. Reauthorize the account and try again.' };
+          else localSetup.setGoogleValidation({ ok: false, error: 'Google authorization could not be validated. Reauthorize the account and try again.' });
+          return json(res, 400, { error: 'Google could not validate this authorization. Reauthorize the account and try again.' });
+        }
+      }
+      if (url.pathname === '/api/setup/google/forget') {
+        const previousObservation = localSetup.get().monitoring.enabled;
+        googleOAuth.cancel();
+        localSetup.clearGoogle({ keepClient: true });
+        localSetup.clearRestartRequired();
+        await monitoring.setSettings({ enabled: false });
+        monitoring.stop();
+        disconnectGoogleForThisRun();
+        // Disable cached-token use and writes immediately, then do not answer
+        // until any already-started bounded sync has settled.
+        await monitoring.whenIdle();
+        if (runtime.connectors.some(connector => connector.id !== 'google' && connector.live)) await applyConnectedSources({ request: req, observe: previousObservation });
+        return json(res, 200, { setup: publicSetupStatus(), restartRequired: false, runtimeDisabled: true });
+      }
+      if (url.pathname === '/api/setup/restart') {
+        if (process.env.UNPROMPTED_DESKTOP_APP !== '1') return json(res, 409, { error: 'Restart the local service with the same state file to apply saved Google credentials.' });
+        json(res, 200, { restarting: true });
+        setTimeout(() => { void shutdown(75); }, 100);
+        return;
+      }
+
+      if (url.pathname === '/api/connectors/sync') {
+        if (googleDisconnectedThisRun && !runtime.connectors.some(connector => connector.live)) return json(res, 409, { error: 'Connect an account before checking for changes.' });
+        return json(res, 200, await monitoring.runNow());
+      }
+      if (url.pathname === '/api/reasoning/retry') {
+        engine.retryPendingReasoning(null, { dueOnly: false });
+        return json(res, 200, { state: engine.publicState() });
+      }
       if (url.pathname === '/api/simulation/events') {
         if (!runSimulation) return json(res, 409, { error: simulationDisabledReason });
         return json(res, 200, engine.ingest({ ...body, source: 'simulated', connectorId: 'simulated' }));
@@ -203,78 +680,145 @@ const server = http.createServer(async (req, res) => {
       }
       const feedbackRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/feedback$/);
       if (feedbackRoute) {
-        const task = engine.labelDiscovery(decodeURIComponent(feedbackRoute[1]), { label: body?.label, reason: body?.reason });
+        const taskId = decodeURIComponent(feedbackRoute[1]);
+        const corrections = ['not_mine', 'duplicate', 'already_handled', 'wrong_association'];
+        if (corrections.includes(body?.label)) {
+          const feedback = engine.recordTaskFeedback(taskId, {
+            label: body.label,
+            scope: body.scope,
+            relatedTaskId: body.relatedTaskId,
+            reason: body.reason
+          });
+          return json(res, 200, { feedback, task: store.state.tasks[taskId], state: engine.publicState() });
+        }
+        const task = engine.labelDiscovery(taskId, { label: body?.label, reason: body?.reason });
         return json(res, 200, { task, state: engine.publicState() });
+      }
+      const feedbackUndoRoute = url.pathname.match(/^\/api\/feedback\/([^/]+)\/undo$/);
+      if (feedbackUndoRoute) {
+        const feedback = engine.undoTaskFeedback(decodeURIComponent(feedbackUndoRoute[1]));
+        return json(res, 200, { feedback, state: engine.publicState() });
+      }
+      const waitRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/wait$/);
+      if (waitRoute) {
+        const wait = engine.waitForTask(decodeURIComponent(waitRoute[1]), body);
+        return json(res, 200, { wait, state: engine.publicState() });
+      }
+      const patchPrepareRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/patch\/prepare$/);
+      if (patchPrepareRoute) {
+        const patch = await engine.prepareDocumentPatch(decodeURIComponent(patchPrepareRoute[1]), body);
+        return json(res, 200, { patch, state: engine.publicState() });
+      }
+      const patchApplyRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/patch\/apply$/);
+      if (patchApplyRoute) {
+        const result = await engine.applyDocumentPatch(decodeURIComponent(patchApplyRoute[1]), body);
+        return json(res, 200, { ...result, state: engine.publicState() });
+      }
+      const dependencyRoute = url.pathname.match(/^\/api\/dependencies\/([^/]+)\/resolve$/);
+      if (dependencyRoute) {
+        const dependency = engine.resolveDependency(decodeURIComponent(dependencyRoute[1]), body);
+        return json(res, 200, { dependency, state: engine.publicState() });
       }
       if (url.pathname === '/api/misses') {
         const miss = engine.recordMiss({ note: body?.note, sourceHint: body?.sourceHint });
         return json(res, 200, { miss, state: engine.publicState() });
       }
-      const route = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(approve|reject|reconcile|retry|cancel)$/);
+      const route = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(approve|reject|reconcile|retry|cancel|reopen)$/);
       if (route) {
         const id = decodeURIComponent(route[1]);
         const operation = route[2];
         // The engine re-checks the permission policy on every one of these paths,
         // so a direct API call cannot bypass the approval boundary.
-        if (operation === 'approve') return json(res, 200, await engine.approve(id));
+        if (operation === 'approve') return json(res, 200, await engine.approve(id,
+          Object.hasOwn(body || {}, 'reviewToken') ? { reviewToken: body.reviewToken } : {}));
         if (operation === 'reject') return json(res, 200, engine.reject(id));
         if (operation === 'reconcile') return json(res, 200, await engine.reconcile(id));
         if (operation === 'retry') return json(res, 200, await engine.retry(id));
         if (operation === 'cancel') return json(res, 200, engine.cancel(id));
+        if (operation === 'reopen') return json(res, 200, engine.reopen(id));
       }
       return json(res, 404, { error: 'Endpoint not found' });
     }
-    if (req.method === 'GET' && (url.pathname === '/' || ['/app.js', '/styles.css'].includes(url.pathname))) {
+    if (req.method === 'GET' && (url.pathname === '/' || ['/app.js', '/i18n.js', '/ux-state.js', '/dom-state.js', '/interactions.js', '/styles.css', '/interactions.css'].includes(url.pathname))) {
       const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
       const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html';
       res.writeHead(200, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      return fs.createReadStream(path.join(root, 'public', file)).pipe(res);
+      const stream = fs.createReadStream(path.join(root, 'public', file));
+      stream.once('error', () => { if (!res.destroyed) res.destroy(); });
+      res.once('close', () => stream.destroy());
+      return stream.pipe(res);
     }
     return json(res, 404, { error: 'Not found' });
   } catch (error) {
+    if (res.destroyed || res.writableEnded) return;
+    if (error instanceof HttpRequestError) {
+      if (error.closeConnection) {
+        res.setHeader('connection', 'close');
+        res.once('finish', () => {
+          if (!req.socket?.destroyed) req.socket?.destroy();
+        });
+      }
+      return json(res, error.status, { error: error.message });
+    }
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     if (error instanceof PermissionDeniedError) return json(res, 403, { error: error.message });
+    if (error.code === 'REVIEW_CHANGED') return json(res, 409, { error: error.message, code: error.code });
     const status = error instanceof SyntaxError || /Invalid|Incomplete|requires|ready|waiting|closed|changed|no longer current|approval|document|provider|Expected|large|confirmed|event|Unknown task|clarification|opportunity|pre-authoris|pre_authoris/i.test(error.message) ? 400 : 500;
     console.error('Request failed:', error.message);
     return json(res, status, { error: error.message });
   }
-});
-
-// Automatic connector pulling. A positive value sets the interval in ms and is
-// clamped to ≥15s; absent or 0 leaves it off (README: "0 disables"), so a live
-// read-only session fetches nothing until `POST /api/connectors/sync` is asked
-// for. Showing the stored state alone never touches Google.
-const syncSetting = Number(process.env.UNPROMPTED_SYNC_INTERVAL_MS ?? 0);
-const syncInterval = Number.isFinite(syncSetting) && syncSetting > 0 ? Math.max(15000, syncSetting) : 0;
-let syncTimer = null;
+}
 
 // A stall must reach the user without a new event, so attention is swept
 // on a timer. The sweep is read-only until a stall is actually due, so this is
 // cheap; it runs regardless of connector configuration.
-const sweepInterval = Math.max(15000, Number(process.env.UNPROMPTED_ATTENTION_SWEEP_MS || 60000));
+const sweepInterval = httpLimit('UNPROMPTED_ATTENTION_SWEEP_MS', 60_000, 15_000, 86_400_000);
 const sweepTimer = setInterval(() => {
-  try { engine.sweepAttention(); } catch (error) { console.error('Attention sweep failed:', error.message); }
+  if (workspaceChanging) return;
+  try {
+    engine.retryPendingReasoning(null, { dueOnly: true });
+    engine.sweepAttention();
+  } catch (error) { console.error('Work maintenance failed:', error.message); }
 }, sweepInterval);
 
 server.listen(port, host, async () => {
   await engine.whenSettled();
+  if (shutdownPromise) return;
   console.log(`Unprompted listening at http://${host}:${port} (mode: ${runtime.mode}, mail provider: ${runtime.provider.kind})`);
   console.log(runtime.report.note);
   if (runtime.report.pendingConfiguration.length) console.log(`Missing configuration: ${runtime.report.pendingConfiguration.join(', ')}`);
-  if (runSimulation) simulation.start();
-  if (syncInterval && runtime.live) {
-    syncTimer = setInterval(() => { sync.run().catch(error => console.error('Sync failed:', error.message)); }, syncInterval);
-  }
+  if (simulationCanStart() && !hasGuidedSimulation()) simulation.start();
+  void monitoring.start().catch(() => console.error('Automatic observation could not start. Review local setup status.'));
 });
 
-function shutdown() {
+async function shutdown(exitCode = 0) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
   simulation.stop();
-  if (syncTimer) clearInterval(syncTimer);
+  monitoring.stop();
+  sseHub.close();
+  googleOAuth.cancel('shutdown');
+  deviceOAuth.close();
   clearInterval(sweepTimer);
-  server.close();
+  const closed = new Promise(resolve => {
+    if (!server.listening) return resolve();
+    server.close(() => resolve());
+  });
+  await Promise.allSettled([monitoring.whenIdle(), closed]);
+  while (activeHttpHandlers.size) await Promise.allSettled([...activeHttpHandlers]);
+  // A sync can ingest new work while it settles. Drain the engine after that
+  // pass completes so no late reasoning task can write after the state closes.
+  await engine.whenSettled();
   store.close();
+  process.exitCode = exitCode;
+  })();
+  return shutdownPromise;
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => { void shutdown(0); });
+process.on('SIGTERM', () => { void shutdown(0); });
 
 // Fail with an actionable message instead of a stack trace.
 server.on('error', error => {

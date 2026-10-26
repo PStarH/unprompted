@@ -1,0 +1,36 @@
+name: Connector / 新增连接器
+description: Describe a real source and a useful proactive workflow. / 描述真实来源和主动跟进场景。
+title: "[Connector] "
+labels: [enhancement]
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / 服务名称
+      placeholder: Notion, Slack, calendar, or another source
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: User situation and trigger / 用户场景与触发信号
+      description: What change should the agent notice without another prompt? What useful next step follows?
+    validations:
+      required: true
+  - type: textarea
+    id: authorization
+    attributes:
+      label: Sign-in and read scope / 授权与读取范围
+      description: Link official API/OAuth docs and describe the smallest read scope. Never paste credentials or private account records.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Native event and evidence / 原生事件与证据
+      description: What source IDs, account identity, URLs and update times justify the finding? How are removal and permission loss represented?
+  - type: textarea
+    id: fixtures
+    attributes:
+      label: Small first contribution / 首个可实现范围
+      description: Suggest one fixture-only scenario, including pagination, duplicate delivery and a failure. New sources start read-only.

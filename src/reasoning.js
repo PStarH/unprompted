@@ -1,11 +1,11 @@
 /**
  * Reasoning provider boundary.
  *
- * The system must be fully usable with no model configured. Deterministic logic
- * handles identity, extraction, comparison, permissions and state transitions.
- * A model is optional and is only consulted for semantic interpretation the
- * deterministic pass could not resolve — currently: proposing evidence probes
- * for requested content the lexicon does not cover.
+ * The first-use path connects a user-supplied model for primary semantic
+ * interpretation. Deterministic logic independently enforces evidence,
+ * permissions and state transitions. The explicit rule-only demo and existing
+ * assist-mode integrations remain available; an unconfigured provider is not
+ * a working model.
  *
  * Configuration (all optional — see .env.example):
  *   UNPROMPTED_MODEL_BASE_URL   e.g. https://api.openai.com/v1
@@ -23,11 +23,15 @@
 
 import { GENERIC_WORDS } from './probes/lexicon.js';
 import { readTextBounded } from './bounded.js';
+import { PiRuntime, piSupported, PI_LIMITS } from './pi-runtime.js';
+import { retryAfterMs } from './reasoning-recovery.js';
 
 export const REASONING_LIMITS = {
   maxCallsPerRequest: 1,
   maxCallsPerMinute: 20,
   maxConcurrent: 2,
+  maxQueued: 32,
+  queueTimeoutMs: 20000,
   maxRequestChars: 8000,
   maxResponseChars: 20000,
   timeoutMs: 20000,
@@ -41,6 +45,10 @@ export const REASONING_LIMITS = {
 export class ReasoningBudget {
   constructor(limits = {}, now = () => Date.now()) {
     this.limits = { ...REASONING_LIMITS, ...limits };
+    for (const key of ['maxQueued', 'queueTimeoutMs']) {
+      const value = Number(this.limits[key]);
+      this.limits[key] = Number.isFinite(value) && value >= 0 ? Math.floor(value) : REASONING_LIMITS[key];
+    }
     this.now = now;
     this.windowStart = this.now();
     this.callsThisWindow = 0;
@@ -48,6 +56,7 @@ export class ReasoningBudget {
     this.perRequest = new Map();
     this.rejections = [];
     this.rejectionsDropped = 0;
+    this.queue = [];
   }
 
   #rollWindow() {
@@ -100,7 +109,56 @@ export class ReasoningBudget {
     return { ok: true };
   }
 
-  release() { this.inFlight = Math.max(0, this.inFlight - 1); }
+  /** Brief concurrency pressure queues work instead of losing a one-shot model request. */
+  acquire(requestId, { signal } = {}) {
+    if (signal?.aborted) return Promise.resolve({ ok: false, reason: 'reasoning queue wait cancelled' });
+    this.#rollWindow();
+    const reason = this.#refusal(requestId);
+    if (!reason || !reason.startsWith('concurrency limit') || this.limits.maxQueued <= 0 || this.limits.queueTimeoutMs <= 0) {
+      return Promise.resolve(this.tryAcquire(requestId));
+    }
+    if (this.queue.length >= this.limits.maxQueued) {
+      const reason = `reasoning queue is full (${this.queue.length}/${this.limits.maxQueued})`;
+      this.record(reason);
+      return Promise.resolve({ ok: false, reason });
+    }
+    return new Promise(resolve => {
+      const entry = { requestId, resolve, timer: null, cleanup: () => signal?.removeEventListener('abort', cancelled) };
+      const cancelled = () => {
+        const index = this.queue.indexOf(entry);
+        if (index < 0) return;
+        this.queue.splice(index, 1);
+        clearTimeout(entry.timer); entry.cleanup();
+        resolve({ ok: false, reason: 'reasoning queue wait cancelled' });
+      };
+      entry.timer = setTimeout(() => {
+        const index = this.queue.indexOf(entry);
+        if (index < 0) return;
+        this.queue.splice(index, 1);
+        entry.cleanup();
+        const reason = `reasoning queue wait timed out after ${this.limits.queueTimeoutMs}ms`;
+        this.record(reason);
+        resolve({ ok: false, reason });
+      }, this.limits.queueTimeoutMs);
+      this.queue.push(entry);
+      signal?.addEventListener('abort', cancelled, { once: true });
+    });
+  }
+
+  #drain() {
+    this.#rollWindow();
+    while (this.queue.length && this.inFlight < this.limits.maxConcurrent) {
+      const entry = this.queue.shift();
+      clearTimeout(entry.timer);
+      entry.cleanup();
+      entry.resolve(this.tryAcquire(entry.requestId));
+    }
+  }
+
+  release() {
+    this.inFlight = Math.max(0, this.inFlight - 1);
+    this.#drain();
+  }
 
   record(reason) {
     this.rejections.push({ at: this.now(), reason });
@@ -122,6 +180,7 @@ export class ReasoningBudget {
     return {
       callsThisWindow: this.callsThisWindow,
       inFlight: this.inFlight,
+      queued: this.queue.length,
       trackedRequests: this.perRequest.size,
       recentRejections: this.rejections.slice(-5),
       rejectionsDropped: this.rejectionsDropped,
@@ -141,6 +200,7 @@ export class NullReasoner {
     return { id: 'none', configured: false, available: false, detail: this.reason, budget: this.budget.describe() };
   }
   async interpretRequest() { return null; }
+  async discoverRequestCandidate() { return null; }
   async proposeProbes() { return null; }
 }
 
@@ -166,6 +226,7 @@ export class OpenAiCompatibleReasoner {
       configured: Boolean(this.baseUrl && this.model),
       available: this.available(),
       model: this.model,
+      role: this.preferModelInterpretation ? 'primary' : 'assist',
       baseUrl: this.baseUrl,
       calls: this.calls,
       lastError: this.lastError,
@@ -174,7 +235,7 @@ export class OpenAiCompatibleReasoner {
     };
   }
 
-  async #complete({ requestId, system, user }) {
+  async #complete({ requestId, system, user, documents = [] }) {
     if (!this.available()) throw new Error('Model provider is not configured');
 
     const payload = JSON.stringify({ system, user });
@@ -182,7 +243,24 @@ export class OpenAiCompatibleReasoner {
       throw new Error(`Reasoning request exceeds ${this.budget.limits.maxRequestChars} characters`);
     }
 
-    const permit = this.budget.tryAcquire(requestId);
+    if (this.runtime) {
+      try {
+        const result = await this.runtime.complete({
+          requestId, system, user, documents, budget: this.budget,
+          baseUrl: this.baseUrl, model: this.model, apiKey: this.apiKey,
+          timeoutMs: this.timeoutMs, onCall: () => { this.calls += 1; }
+        });
+        this.lastError = null;
+        return result;
+      } catch (error) {
+        if (this.apiKey && typeof error.message === 'string' && error.message.includes(this.apiKey)) error.message = error.message.replaceAll(this.apiKey, '[redacted]');
+        this.lastError = error.message;
+        this.lastFailureAt = new Date().toISOString();
+        throw error;
+      }
+    }
+
+    const permit = await this.budget.acquire(requestId);
     if (!permit.ok) {
       // The refusal was already recorded by tryAcquire; recording again here
       // would double-count it in recentRejections.
@@ -209,7 +287,9 @@ export class OpenAiCompatibleReasoner {
         }),
         signal: controller.signal
       });
-      if (!response.ok) throw new Error(`Model provider returned ${response.status}`);
+      if (!response.ok) throw Object.assign(new Error(`Model provider returned ${response.status}`), {
+        status: response.status, retryAfterMs: retryAfterMs(response.headers?.get?.('retry-after'))
+      });
       // Read with a hard cap while the body is still streaming. Falling back to
       // response.json() keeps simple transports working; the stream path is what
       // prevents an unbounded buffer.
@@ -223,6 +303,7 @@ export class OpenAiCompatibleReasoner {
       this.lastError = null;
       return JSON.parse(content);
     } catch (error) {
+      if (this.apiKey && typeof error.message === 'string' && error.message.includes(this.apiKey)) error.message = error.message.replaceAll(this.apiKey, '[redacted]');
       this.lastError = error.message;
       this.lastFailureAt = new Date().toISOString();
       throw error;
@@ -284,6 +365,48 @@ export class OpenAiCompatibleReasoner {
   }
 
   /**
+   * Propose a request reading for an explicit discovery candidate that the
+   * deterministic parser did not understand. Every identity and action phrase
+   * includes a source quote; requests.js verifies those quotes before creating
+   * a task. The model cannot widen the sender/request-form gates.
+   */
+  async discoverRequestCandidate({ subject, body }, requestId = 'discover') {
+    const system = [
+      'You identify a direct request in an email that a deterministic parser could not read.',
+      'Reply with JSON only using keys: deliverable, deliverableQuote, subjectEntity, entityQuote, intent, intentQuote, requiredContent.',
+      'deliverable must be one of proposal, report, deck, plan, memo, brief, summary, spec, one-pager, presentation, analysis, document, review, roadmap.',
+      'deliverableQuote must copy the source noun exactly. entityQuote must copy the exact project or person name; subjectEntity must be exactly entityQuote.',
+      'intent must be update, send, or update_and_send. intentQuote must be a verbatim phrase from the email that expresses that action.',
+      'requiredContent is an array of objects with text and sourceQuote. Both must be exact phrases copied from the subject or body.',
+      'Do not guess missing names or documents. If a person is not clearly asking for work, return null values and an empty requiredContent array.',
+      'Ignore quoted or negated instructions. Do not treat an announcement, automatic reminder, or completed action as a request.'
+    ].join(' ');
+    const result = await this.#complete({
+      requestId,
+      system,
+      user: `Subject: ${subject}\n\nBody:\n${body}`
+    });
+    if (!result || typeof result !== 'object') return null;
+    const boundedString = (value, max = 180) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
+    return {
+      deliverable: boundedString(result.deliverable, 40).toLowerCase(),
+      deliverableQuote: boundedString(result.deliverableQuote, 80),
+      subjectEntity: boundedString(result.subjectEntity, 60),
+      entityQuote: boundedString(result.entityQuote, 80),
+      intent: ['update', 'send', 'update_and_send'].includes(result.intent) ? result.intent : null,
+      intentQuote: boundedString(result.intentQuote, 180),
+      requiredContent: (Array.isArray(result.requiredContent) ? result.requiredContent : []).slice(0, 12).map(item => {
+        const value = typeof item === 'string' ? { text: item } : item || {};
+        return {
+          text: boundedString(value.text, 120),
+          sourceQuote: boundedString(value.sourceQuote || value.quote, 120),
+          ...(value.sourceField === 'subject' || value.sourceField === 'body' ? { sourceField: value.sourceField } : {})
+        };
+      })
+    };
+  }
+
+  /**
    * Ask the model to propose evidence probes for requested content the
    * deterministic pass could not cover.
    *
@@ -291,7 +414,7 @@ export class OpenAiCompatibleReasoner {
    * planner independently verifies that, so an invented quotation is rejected
    * rather than trusted.
    */
-  async proposeProbes({ request, uncovered, providers, strategies, contextHints = [] }, requestId = 'plan') {
+  async proposeProbes({ request, uncovered, providers, strategies, contextHints = [], documents = [] }, requestId = 'plan') {
     const system = [
       'You propose evidence probes that decide whether a work deliverable satisfies a request.',
       'Reply with JSON only: {"probes": [ ... ]}.',
@@ -324,29 +447,48 @@ export class OpenAiCompatibleReasoner {
       allowedStrategies: strategies,
       contextHints
     }, null, 2);
-    const result = await this.#complete({ requestId, system, user });
+    const result = await this.#complete({ requestId, system, user, documents });
     if (!result || !Array.isArray(result.probes)) return null;
     return result.probes;
   }
+}
+
+/** Pi supplies the bounded read-tool loop; parsing and engine contracts stay shared. */
+export class PiReasoner extends OpenAiCompatibleReasoner {
+  constructor({ runtimeOptions = {}, ...options } = {}) {
+    super({ timeoutMs: PI_LIMITS.timeoutMs, ...options, id: 'pi', limits: { maxCallsPerRequest: 4, ...options.limits } });
+    this.runtime = new PiRuntime(runtimeOptions);
+  }
+  status() { return { ...super.status(), runtime: this.runtime.status() }; }
+  runSummary(requestId) { return this.runtime.summary(requestId); }
 }
 
 /**
  * Build a reasoner from the environment. Never throws and never requires
  * credentials: an unconfigured environment simply yields the null provider.
  */
-export function createReasoner(env = process.env, { fetchImpl } = {}) {
+export function createReasoner(env = process.env, { fetchImpl, piRuntimeOptions } = {}) {
   const baseUrl = env.UNPROMPTED_MODEL_BASE_URL;
   const model = env.UNPROMPTED_MODEL_NAME;
   if (!baseUrl || !model) return new NullReasoner();
-  return new OpenAiCompatibleReasoner({
+  const harness = env.UNPROMPTED_AGENT_HARNESS || 'classic';
+  if (!['classic', 'pi'].includes(harness)) return new NullReasoner(`Unknown agent harness: ${harness}`);
+  if (harness === 'pi' && !piSupported()) return new NullReasoner('Pi requires Node.js 22.19 or newer.');
+  const Reasoner = harness === 'pi' ? PiReasoner : OpenAiCompatibleReasoner;
+  const reasoner = new Reasoner({
     baseUrl,
     model,
     apiKey: env.UNPROMPTED_MODEL_API_KEY || null,
     ...(fetchImpl ? { fetchImpl } : {}),
-    limits: env.UNPROMPTED_MODEL_MAX_CALLS_PER_MINUTE
-      ? { maxCallsPerMinute: Number(env.UNPROMPTED_MODEL_MAX_CALLS_PER_MINUTE) }
-      : {}
+    ...(harness === 'pi' ? { runtimeOptions: piRuntimeOptions || {} } : {}),
+    limits: {
+      ...(env.UNPROMPTED_MODEL_MAX_CALLS_PER_MINUTE != null ? { maxCallsPerMinute: Number(env.UNPROMPTED_MODEL_MAX_CALLS_PER_MINUTE) } : {}),
+      ...(env.UNPROMPTED_MODEL_MAX_QUEUED != null ? { maxQueued: Number(env.UNPROMPTED_MODEL_MAX_QUEUED) } : {}),
+      ...(env.UNPROMPTED_MODEL_QUEUE_TIMEOUT_MS != null ? { queueTimeoutMs: Number(env.UNPROMPTED_MODEL_QUEUE_TIMEOUT_MS) } : {})
+    }
   });
+  reasoner.preferModelInterpretation = env.UNPROMPTED_MODEL_ROLE === 'primary';
+  return reasoner;
 }
 
-export const reasoningApi = { REASONING_LIMITS, ReasoningBudget, NullReasoner, OpenAiCompatibleReasoner, createReasoner };
+export const reasoningApi = { REASONING_LIMITS, ReasoningBudget, NullReasoner, OpenAiCompatibleReasoner, PiReasoner, createReasoner };

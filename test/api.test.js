@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import net from 'node:net';
 import { emptyState } from '../src/store.js';
+import { LocalSetupStore } from '../src/setup.js';
 
 /**
  * Integration tests against the real HTTP server.
@@ -22,22 +23,40 @@ const node = process.execPath;
 const cleanups = [];
 test.after(() => { for (const cleanup of cleanups) cleanup(); });
 
-async function startServer(extraEnv = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-api-'));
+async function startServer(extraEnv = {}, { setupSeed = null, reuse = null } = {}) {
+  const dir = reuse?.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-api-'));
+  const configDir = reuse?.configDir || path.join(dir, 'config');
+  const stateFile = reuse?.stateFile || path.join(dir, 'state.json');
+  if (setupSeed) {
+    const setup = new LocalSetupStore({ filePath: path.join(configDir, 'setup.json') });
+    setup.saveDesktopClientJson(JSON.stringify({ installed: {
+      client_id: 'api-test.apps.googleusercontent.com',
+      client_secret: 'api-private-client-secret',
+      auth_uri: 'https://accounts.google.com/o/oauth2/v2/auth',
+      token_uri: 'https://oauth2.googleapis.com/token'
+    } }));
+    setup.setGoogleScopes({ readGmail: true, readDrive: false, docsWrite: false, gmailSend: false });
+    setup.saveAuthorization({ refreshToken: 'api-private-refresh-token', grantedScopes: ['https://www.googleapis.com/auth/gmail.readonly'] });
+    if (setupSeed.monitoring) setup.setMonitoring(setupSeed.monitoring);
+  }
   const reservation = net.createServer();
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
   const port = reservation.address().port;
   await new Promise(resolve => reservation.close(resolve));
+  const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GOOGLE_|UNPROMPTED_)/i.test(key)));
   const child = spawn(node, [path.join(root, 'server.js')], {
     cwd: root,
     env: {
-      ...process.env,
+      ...inheritedEnv,
       PORT: String(port),
-      UNPROMPTED_STATE_FILE: path.join(dir, 'state.json'),
+      UNPROMPTED_STATE_FILE: stateFile,
+      UNPROMPTED_CONFIG_DIR: configDir,
       // The shipped server defaults to read-only shadow mode. These tests keep
       // the frozen approval path by opting out; shadow denial is covered in
       // test/shadow.test.js.
       UNPROMPTED_SHADOW_MODE: 'false',
+      // API contract fixtures deliberately use the explicit rule-only engine.
+      UNPROMPTED_RULE_ONLY: 'true',
       ...extraEnv
     },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -58,7 +77,7 @@ async function startServer(extraEnv = {}) {
       const response = await fetch(`${base}/api/health`);
       if (response.ok) {
         cleanups.push(() => { child.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); });
-        return { base, child, output: () => output };
+        return { base, child, output: () => output, configDir, stateFile, dir };
       }
     } catch { /* not listening yet */ }
     await new Promise(resolve => setTimeout(resolve, 150));
@@ -94,6 +113,27 @@ const API_DOC = {
     content: '# Apitest project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 500\nControl: 4.0% conversion\nTreatment: 6.0% conversion\nConclusion: Treatment improved conversion.\n'
   }
 };
+
+test('HTTP approval rejects a superseded review without sending or adding approval steps for an unchanged reply', async () => {
+  const { base } = await startServer({ UNPROMPTED_FORCE_SIMULATION: 'true' });
+  await post(base, '/api/simulation/events', API_EMAIL);
+  await post(base, '/api/simulation/events', API_DOC);
+  const before = (await get(base, '/api/state')).body.tasks.find(item => item.id === 'request:api-mail-1');
+  assert.match(before.reviewToken, /^[a-f0-9]{64}$/);
+  await post(base, '/api/simulation/events', { ...API_DOC, id: 'api-review-document-2', payload: { ...API_DOC.payload, content: API_DOC.payload.content + '\nReviewed context updated.\n' } });
+  const stale = await post(base, '/api/tasks/request:api-mail-1/approve', { reviewToken: before.reviewToken });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.code, 'REVIEW_CHANGED');
+  const current = (await get(base, '/api/state')).body;
+  assert.equal(current.outbox.length, 0);
+  const task = current.tasks.find(item => item.id === before.id);
+  assert.equal(task.status, 'ready_for_approval');
+  assert.notEqual(task.reviewToken, before.reviewToken);
+  const sent = await post(base, '/api/tasks/request:api-mail-1/approve', { reviewToken: task.reviewToken });
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.status, 'completed');
+  assert.equal((await get(base, '/api/state')).body.outbox.length, 1);
+});
 
 test('the API cannot execute an external action without an approved draft', async () => {
   const { base } = await startServer();
@@ -276,8 +316,9 @@ test('live mode refuses simulated events so a real workspace cannot be polluted'
   const runtime = await get(base, '/api/runtime');
   assert.equal(runtime.body.mode, 'live');
   assert.equal(runtime.body.simulationRunning, false);
-  assert.equal(runtime.body.mailProvider, 'simulated', 'read-only live mode must not claim send capability');
-  assert.equal(runtime.body.eventSource, 'google', 'live mode reads Google even when outbound mail stays simulated');
+  assert.equal(runtime.body.mailProvider, 'gmail', 'live work retains the real provider identity for drafts and readback');
+  assert.equal(runtime.body.google.sendEnabled, false, 'provider identity never grants sending capability');
+  assert.equal(runtime.body.eventSource, 'google');
 
   const injected = await post(base, '/api/simulation/events', API_EMAIL);
   assert.equal(injected.status, 409);
@@ -285,6 +326,111 @@ test('live mode refuses simulated events so a real workspace cannot be polluted'
 
   const restart = await post(base, '/api/demo/restart');
   assert.equal(restart.status, 409);
+});
+
+test('a simulation override cannot inject demo events into a live Google runtime', async () => {
+  const { base } = await startServer({
+    GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'not-a-real-account-secret',
+    GOOGLE_REFRESH_TOKEN: 'not-a-real-account-token',
+    GOOGLE_READ_GMAIL: 'false',
+    GOOGLE_READ_DRIVE: 'false',
+    UNPROMPTED_FORCE_SIMULATION: 'true'
+  });
+  const health = await fetch(`${base}/api/health`).then(response => response.json());
+  assert.equal(health.mode, 'live', 'credentials select a live connector configuration');
+  const runtime = await fetch(`${base}/api/runtime`).then(response => response.json());
+  assert.equal(runtime.simulationRunning, false);
+  const response = await fetch(`${base}/api/simulation/events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(response.status, 409);
+  const state = await fetch(`${base}/api/state`).then(response => response.json());
+  assert.equal(state.events.filter(event => event.source === 'simulated').length, 0);
+});
+
+test('setup API, state and SSE redact saved OAuth credentials and persist observation controls privately', async () => {
+  const { base, configDir } = await startServer({}, { setupSeed: {} });
+  const [setup, runtime, state] = await Promise.all([
+    fetch(`${base}/api/setup`).then(response => response.json()),
+    fetch(`${base}/api/runtime`).then(response => response.json()),
+    fetch(`${base}/api/state`).then(response => response.json())
+  ]);
+  assert.equal(setup.google.hasClient, true);
+  assert.equal(setup.google.hasRefreshToken, true);
+  assert.equal(setup.google.connectionStatus, 'configured_unverified', 'configured credentials are not described as validated');
+  assert.equal(setup.monitoring.enabled, false);
+  assert.equal(runtime.mode, 'live');
+  const streamResponse = await fetch(`${base}/api/stream`);
+  const reader = streamResponse.body.getReader();
+  const firstChunk = await reader.read();
+  await reader.cancel();
+  const serialized = JSON.stringify({ setup, runtime, state, stream: new TextDecoder().decode(firstChunk.value) });
+  assert.doesNotMatch(serialized, /api-private-client-secret|api-private-refresh-token/);
+
+  const saved = await fetch(`${base}/api/setup/monitoring`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false, intervalMs: 60_000 })
+  });
+  assert.equal(saved.status, 200);
+  const monitoring = (await saved.json()).monitoring;
+  assert.equal(monitoring.enabled, false);
+  assert.equal(monitoring.intervalMs, 60_000);
+  const setupFile = path.join(configDir, 'setup.json');
+  const descriptor = fs.openSync(setupFile, 'r');
+  let localFile;
+  try {
+    assert.equal(fs.fstatSync(descriptor).mode & 0o777, 0o600);
+    localFile = fs.readFileSync(descriptor, 'utf8');
+  } finally { fs.closeSync(descriptor); }
+  assert.match(localFile, /api-private-client-secret/);
+  assert.match(localFile, /api-private-refresh-token/);
+});
+
+test('forgetting Google stops this process, rejects new syncs, and keeps approval writes shadowed', async () => {
+  const simulation = await startServer();
+  await post(simulation.base, '/api/simulation/events', API_EMAIL);
+  await post(simulation.base, '/api/simulation/events', API_DOC);
+  const deadline = Date.now() + 8000;
+  let task;
+  while (Date.now() < deadline) {
+    const state = await get(simulation.base, '/api/state');
+    task = state.body.tasks.find(item => item.id === 'request:api-mail-1');
+    if (task?.status === 'ready_for_approval') break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(task?.status, 'ready_for_approval', 'the persisted real-action draft is ready before the live restart');
+  const stopped = new Promise(resolve => simulation.child.once('exit', resolve));
+  simulation.child.kill('SIGTERM');
+  await stopped;
+
+  const { base } = await startServer({
+    GOOGLE_CLIENT_ID: 'forget-test.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'forget-test-secret',
+    GOOGLE_REFRESH_TOKEN: 'forget-test-refresh',
+    GOOGLE_READ_GMAIL: 'false',
+    GOOGLE_READ_DRIVE: 'false',
+    GOOGLE_SEND_ENABLED: 'true',
+    UNPROMPTED_SHADOW_MODE: 'false'
+  }, { reuse: simulation, setupSeed: {} });
+
+  const forgotten = await post(base, '/api/setup/google/forget');
+  assert.equal(forgotten.status, 200);
+  assert.equal(forgotten.body.runtimeDisabled, true);
+  assert.equal(forgotten.body.setup.monitoring.enabled, false);
+  assert.equal(forgotten.body.setup.google.runtimeDisabled, true);
+  assert.equal(forgotten.body.setup.google.hasRefreshToken, false);
+  assert.equal(forgotten.body.setup.google.credentialsConfiguredExternally, true);
+
+  const runtime = await get(base, '/api/runtime');
+  assert.equal(runtime.body.googleRuntimeDisabled, true);
+  assert.equal(runtime.body.eventSource, 'disconnected');
+  assert.equal(runtime.body.shadow, true);
+  assert.equal(runtime.body.connectors.find(item => item.id === 'google').live, false);
+
+  const sync = await post(base, '/api/connectors/sync');
+  assert.equal(sync.status, 409, 'manual sync is refused after disconnect');
+  const approve = await post(base, '/api/tasks/request%3Aapi-mail-1/approve');
+  assert.equal(approve.status, 403, 'the now-disconnected live provider stays behind the shadow policy');
+  assert.match(approve.body.error, /External writes are refused/);
 });
 
 test('the state endpoint does not expose raw event payloads', async () => {
@@ -321,9 +467,10 @@ test('an unchanged boot does not rewrite the state file, and a changed runtime r
     await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
     const port = reservation.address().port;
     await new Promise(resolve => reservation.close(resolve));
+    const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GOOGLE_|UNPROMPTED_)/i.test(key)));
     const child = spawn(node, [path.join(root, 'server.js')], {
       cwd: root,
-      env: { ...process.env, PORT: String(port), UNPROMPTED_STATE_FILE: stateFile, ...extraEnv },
+      env: { ...inheritedEnv, PORT: String(port), UNPROMPTED_STATE_FILE: stateFile, UNPROMPTED_CONFIG_DIR: path.join(dir, 'config'), ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     cleanups.push(() => child.kill('SIGKILL'));

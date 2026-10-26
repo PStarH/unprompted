@@ -1,5 +1,5 @@
 /**
- * Product-value evaluation.
+ * Workflow quality and explicitly recorded user judgments.
  *
  * The value of Unprompted must not be measured by the
  * number of tasks run, documents generated or minutes spent. What must be
@@ -15,7 +15,9 @@
  *
  * Every number carries a `basis`, so an assessment can be checked rather than
  * trusted, and each is derived from records the engine already keeps rather than
- * from a counter that could drift.
+ * from a counter that could drift. Prepared/verified work remains a legacy
+ * activity proxy. PRD user-value evidence is assessed separately in value-study.js;
+ * these counters cannot establish unrequestedness or a user's reason to keep it.
  */
 
 const round = value => Math.round(value * 1000) / 1000;
@@ -28,11 +30,36 @@ function taskIsVerifiedComplete(task) {
   return task.status === 'completed' && Boolean(task.action?.status?.startsWith?.('verified'));
 }
 
+function verifiedDeliveryKind(task) {
+  if (!taskIsVerifiedComplete(task) || !task.action?.receiptId) return null;
+  if (task.action.live === true && task.action.status === 'verified_live') return 'real';
+  if (task.action.live === false && task.action.status === 'verified_simulated') return 'simulated';
+  return null;
+}
+
+function verifiedPatchKind(patch) {
+  if (patch.status !== 'applied' || patch.result?.readbackVerified !== true || patch.result?.applied !== true) return null;
+  return patch.simulated === true ? 'simulated' : patch.result?.live === true ? 'real' : null;
+}
+
+function userActivityDates(history, now) {
+  const kinds = new Set([
+    'approval', 'rejection', 'retry', 'reconciliation', 'cancellation', 'feedback',
+    'feedback_correction', 'feedback_undo', 'dependency_decision', 'wait_requested',
+    'opportunity_accepted', 'patch_authorized'
+  ]);
+  const current = Date.parse(now);
+  const dates = (history || [])
+    .filter(item => kinds.has(item.kind) && item.at && Math.abs(current - Date.parse(item.at)) <= 400 * 86_400_000)
+    .map(item => new Date(item.at).toISOString().slice(0, 10));
+  return [...new Set(dates)].sort();
+}
+
 /**
  * A discovery is "unservable" when the request could be read but nothing could
  * ever verify it: no document correlated, and the requested content has no probe
- * at all. This is the closest honest proxy for "无意义建议" — work the system put
- * in front of the user that it could not actually act on.
+ * at all. This is a capability/coverage proxy, not evidence that the work lacks
+ * value to the user. It must not become a noise label without user judgment.
  */
 function taskIsUnservable(task) {
   if (taskIsPrepared(task)) return false;
@@ -46,6 +73,7 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
   const notifications = state.notifications || [];
   const calibrations = Object.values(state.calibrations || {});
   const opportunities = Object.values(state.opportunities || {});
+  const patches = Object.values(state.documentPatches || {});
 
   // A request the user closed while it was still waiting is neither noise nor
   // unfinished work: it was a real discovery that the user chose to end. It is
@@ -59,11 +87,13 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
   const closed = tasks.filter(isUserClosed);
 
   const historyCount = kind => history.filter(item => item.kind === kind).length;
+  const taskCorrections = Object.values(state.taskFeedbackRules || {}).filter(entry => entry.source === 'user').length;
+  const correctionUndos = Object.values(state.taskFeedbackRules || {}).filter(entry => entry.source === 'user' && entry.active === false).length;
   const takeovers = {
     rejectedDrafts: historyCount('rejection'),
     retries: historyCount('retry'),
     reconciliations: historyCount('reconciliation'),
-    corrections: calibrations.filter(entry => entry.correctedAt).length
+    corrections: calibrations.filter(entry => entry.correctedAt).length + taskCorrections
   };
   const takeoverTotal = Object.values(takeovers).reduce((sum, value) => sum + value, 0);
 
@@ -75,6 +105,24 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
   const labelled = tasks.filter(task => task.feedback?.source === 'user' && task.feedback?.label);
   const labelCount = label => labelled.filter(task => task.feedback.label === label).length;
   const connectorStatus = Object.values(state.connectorStatus || {});
+  const activityDates = userActivityDates(history, now);
+  const windowStart = days => new Date(Date.parse(now) - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+  const activeDays7 = activityDates.filter(day => day >= windowStart(7)).length;
+  const activeDays30 = activityDates.filter(day => day >= windowStart(30)).length;
+  const deliveries = tasks.reduce((counts, task) => {
+    const kind = verifiedDeliveryKind(task);
+    if (kind) counts[kind] += 1;
+    if (kind && task.feedback?.source === 'user' && task.feedback?.label === 'useful') counts[`recognized${kind[0].toUpperCase()}${kind.slice(1)}`] += 1;
+    return counts;
+  }, { real: 0, simulated: 0, recognizedReal: 0, recognizedSimulated: 0 });
+  const documentPatchResults = patches.reduce((counts, patch) => {
+    const kind = verifiedPatchKind(patch);
+    if (kind) counts[kind] += 1;
+    const task = state.tasks?.[patch.taskId];
+    if (kind && task?.feedback?.source === 'user' && task.feedback?.label === 'useful') counts[`recognized${kind[0].toUpperCase()}${kind.slice(1)}`] += 1;
+    return counts;
+  }, { real: 0, simulated: 0, recognizedReal: 0, recognizedSimulated: 0 });
+  const approvals = history.filter(item => ['approval', 'patch_authorized'].includes(item.kind)).length;
 
   return {
     at: now,
@@ -87,7 +135,7 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       valuableRate: tasks.length ? round(valuable.length / tasks.length) : null,
       unservableRate: tasks.length ? round(unservable.length / tasks.length) : null,
       basis: [
-        'valuable = a request that reached a prepared, evidence-backed action or a verified completion',
+        'legacy valuable is an agent activity proxy: prepared, evidence-backed action or verified completion; it is not a user-recognized outcome',
         'unservable = a request with no correlated document and no probe for the requested content',
         'closed = a request the user ended while it was still waiting for information',
         `counts from ${tasks.length} task record(s)`
@@ -100,7 +148,7 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       verifiableCompletionRate: prepared.length ? round(completed.length / prepared.length) : null,
       withheldClaims,
       basis: [
-        'a completion only counts when it was verified against the provider',
+        'legacy completion counts when the task records a provider-verified receipt; see outcomes for recognized results separated by live and simulated provider',
         `verified completions derived from ${prepared.length} prepared action(s)`
       ]
     },
@@ -110,18 +158,47 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       byKind: interruptionsByKind,
       takeovers: takeoverTotal,
       takeoverBreakdown: takeovers,
+      explicitApprovals: approvals,
+      taskCorrections,
+      correctionUndos,
       basis: [
         'an interruption is a decision-supporting notification, not a history entry',
-        'a takeover is a rejection, retry, reconciliation or a user correction'
+        'takeovers preserve the original rejection, retry, reconciliation and calibration counts; task corrections are also listed separately',
+        'explicit approvals include approved outbound actions and explicitly authorized document patches'
       ]
     },
     value: {
       estimatedManualStepsAvoided: completed.length,
-      note: 'Each verified completion is one follow-through the user did not have to perform. This is an estimate of absorbed work, not a measurement of wall-clock time saved.',
+      note: 'This legacy activity proxy counts verified completions. It does not establish that the user found the result useful or measure time saved.',
       basis: [
-        'a verified completion is one follow-through the user did not have to perform',
-        `estimated from ${completed.length} verified completion(s)`,
-        'an estimate of absorbed work, not a measurement of wall-clock time saved'
+        'legacy verified-completion count is kept for continuity and is not a user-recognized value measure',
+        `counted ${completed.length} provider-verified completion(s)`,
+        'time saved and retention remain unknown because neither is measured'
+      ]
+    },
+    outcomes: {
+      verifiedDeliveries: { real: deliveries.real, simulated: deliveries.simulated },
+      recognizedVerifiedDeliveries: { real: deliveries.recognizedReal, simulated: deliveries.recognizedSimulated },
+      verifiedDocumentPatches: { real: documentPatchResults.real, simulated: documentPatchResults.simulated },
+      recognizedVerifiedDocumentPatches: { real: documentPatchResults.recognizedReal, simulated: documentPatchResults.recognizedSimulated },
+      basis: [
+        'a delivery requires a completed task, provider-verified status and receipt ID; real and simulated providers are counted separately',
+        'a result is user-recognized only when the user explicitly labelled its task useful',
+        'a document patch requires applied status and a successful readback; prepared, blocked, failed and uncertain patches are not outcomes',
+        'no user-recognized outcomes means zero recognized deliveries, not an inferred positive result'
+      ]
+    },
+    management: {
+      pendingDecisions: new Set([
+        ...notifications.filter(item => !item.resolvedAt).map(item => `notification:${item.id}`),
+        ...tasks.filter(task => task.status === 'ready_for_approval').map(task => `approval:${task.id}`)
+      ]).size,
+      activeDays: { last7: activeDays7, last30: activeDays30 },
+      missedItems: (state.misses || []).length,
+      basis: [
+        'pending decisions are unresolved notifications plus tasks explicitly waiting for approval, deduplicated by record',
+        'active days count persisted user decision or correction dates; page views and background checks do not count',
+        'missed items are user-recorded omissions, not a measured system recall rate'
       ]
     },
     // How much verification the work actually needed, and what the extra
@@ -162,12 +239,12 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       misses: (state.misses || []).length,
       // Unobserved outcomes. These are words, not counts, so they cannot be
       // mistaken for unevaluated discoveries or for a negative judgement.
-      unknown: { recall: 'unknown', timeSaved: 'unknown' },
+      unknown: { recall: 'unknown', timeSaved: 'unknown', retention: 'unknown' },
       basis: [
         'a discovery is reviewed only when the user has labelled it',
         'unevaluated means the user has not judged that discovery',
         'not useful and wrong association are negative judgements; they are not the same as unevaluated',
-        'unknown recall and unknown time saved are outcomes that have not been observed',
+        'unknown recall, time saved and retention are outcomes that have not been observed',
         'useful, not useful, wrong association, noise and awaiting evidence are user labels',
         'an unreviewed finding is not noise, including when evidence is missing',
         'a missed item is something the user recorded; it is not a discovered task'
@@ -176,7 +253,7 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
     events: {
       ingested: events.length,
       real: events.filter(event => event.source && event.source !== 'simulated').length,
-      basis: 'real events are persisted events whose source is not simulated'
+      basis: 'legacy real counts persisted events tagged with a non-simulated source; a source tag alone proves neither participant consent, unrequested discovery nor user value'
     },
     sync: {
       failures: connectorStatus.filter(item => item && item.ok === false).length,
@@ -187,7 +264,8 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       tasks: tasks.length,
       traceEntries: (state.trace || []).length,
       historyEntries: history.length,
-      basis: 'counts of persisted records in this workspace; wall-clock time and model tokens are not measured'
+      documentPatches: patches.length,
+      basis: 'counts of persisted records in this workspace; wall-clock time, model tokens, user retention and time saved are not measured'
     }
   };
 }
@@ -251,8 +329,8 @@ export function summariseSources(state, { quietThreshold = 3 } = {}) {
 export function describeMetrics(metrics) {
   const pct = value => (value == null ? 'n/a' : `${Math.round(value * 100)}%`);
   return [
-    `discovered work: ${metrics.discovery.discovered} (valuable ${metrics.discovery.valuable} · unservable ${metrics.discovery.unservable} · waiting ${metrics.discovery.waiting}${metrics.discovery.closed ? ` · closed ${metrics.discovery.closed}` : ''})`,
-    `valuable discovery rate: ${pct(metrics.discovery.valuableRate)} · unservable proxy: ${pct(metrics.discovery.unservableRate)}`,
+    `discovered work: ${metrics.discovery.discovered} (prepared/verified proxy ${metrics.discovery.valuable} · unservable ${metrics.discovery.unservable} · waiting ${metrics.discovery.waiting}${metrics.discovery.closed ? ` · closed ${metrics.discovery.closed}` : ''})`,
+    `prepared-action activity rate: ${pct(metrics.discovery.valuableRate)} · unservable proxy: ${pct(metrics.discovery.unservableRate)}`,
     `verifiable completion rate: ${pct(metrics.completion.verifiableCompletionRate)} (${metrics.completion.verifiedCompletions}/${metrics.completion.preparedActions})`,
     `withheld unsupported claims: ${metrics.completion.withheldClaims}`,
     `interruptions: ${metrics.attention.interruptions} (unresolved ${metrics.attention.unresolved})`,

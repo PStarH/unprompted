@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { visibleAttentionItems } from '../public/ux-state.js';
+import { copy as localizedCopy, ui as localizedUi, setLocale } from '../public/i18n.js';
 
 /**
  * Rendering of the strategy layer's stop decisions.
@@ -17,6 +19,13 @@ function extractFunction(name) {
   const start = source.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `${name} not found in public/app.js`);
   const end = source.indexOf('\nfunction ', start + 1);
+  return `const copy = (value, params = {}) => value.replace(/\\{(\\w+)\\}/g, (match, key) => params[key] ?? match); const ui = (parts, ...values) => parts.reduce((result, part, index) => result + part + (index < values.length ? values[index] : ''), ''); const actionErrors = new Map(); const snoozes = {}; const isSnoozed = () => false; const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action);\n` + source.slice(start, end === -1 ? undefined : end);
+}
+
+function extractRawFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} not found in public/app.js`);
+  const end = source.indexOf('\nfunction ', start + 1);
   return source.slice(start, end === -1 ? undefined : end);
 }
 
@@ -29,6 +38,18 @@ const renderMetrics = new Function('escapeHtml', `${extractFunction('renderMetri
 const renderVerification = new Function('escapeHtml', 'current', `${extractFunction('renderVerification')}\nreturn renderVerification;`)(escapeHtml, {
   documents: [{ id: 'zephyr-retrospective', title: 'Zephyr service retrospective' }]
 });
+const renderPatchReview = new Function('escapeHtml', 'current', 'runtime', 'copy', 'ui',
+  `${extractRawFunction('findDocumentPatch')}\n${extractRawFunction('renderPatchReview')}\nreturn renderPatchReview;`)(escapeHtml, {
+  documentPatches: [{ id: 'patch-1', taskId: 'task-7', provider: 'local', status: 'prepared', baseDocument: { version: 3 }, changes: [{ text: 'source-backed content' }] }]
+}, { shadow: false }, (value, params = {}) => String(value).replace(/\{(\w+)\}/g, (match, key) => params[key] ?? match), (parts, ...values) => parts.reduce((result, part, index) => result + part + (index < values.length ? values[index] : ''), ''));
+const patchApplyTaskId = new Function(extractRawFunction('patchApplyTaskId') + '\nreturn patchApplyTaskId;')();
+const renderTaskManagement = new Function('escapeHtml', 'current', 'copy', 'ui', 'isClosedTask', 'formatDate', 'formatTime', [
+  'managementActionLabel', 'managementWakeCondition', 'priorityReasonLabel', 'managementReasonLabel', 'renderTaskManagement'
+].map(extractRawFunction).join('\n') + '\nreturn renderTaskManagement;')(
+  escapeHtml, { documents: [] }, localizedCopy, localizedUi,
+  task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action),
+  value => new Date(value).toISOString().slice(0, 10), value => new Date(value).toISOString().slice(11, 16)
+);
 
 const runtimeState = { shadow: true, mode: 'simulation' };
 const renderApproval = new Function('escapeHtml', 'current', 'runtime', 'renderVerification', 'time',
@@ -93,6 +114,59 @@ test('baseline verification renders nothing, so an ordinary task is not decorate
   assert.equal(renderVerification({}), '');
 });
 
+test('a prepared patch keeps its owning task ID through the review and apply control', () => {
+  const html = renderPatchReview({ id: 'task-7', documentId: 'doc-1', documentPatches: ['patch-1'], status: 'waiting_for_information' });
+  assert.match(html, /data-patch-apply="task-7" data-patch-id="patch-1"/);
+  assert.equal(patchApplyTaskId({ dataset: { patchApply: 'task-7' } }), 'task-7');
+  assert.equal(patchApplyTaskId({ dataset: { patchId: 'patch-1' } }), null, 'the patch ID is not mistaken for its owning task ID');
+});
+
+test('management summaries translate fixed labels but preserve source dates', () => {
+  setLocale('zh-CN');
+  try {
+    const html = renderTaskManagement({
+      id: 'task-1', status: 'waiting_for_information',
+      request: { deadline: { text: 'October 30' } },
+      management: {
+        owner: { label: 'You' },
+        nextAction: { kind: 'assess', label: 'Check current source documents against the request', reason: 'The task has not yet completed its evidence assessment.' },
+        dependencies: [],
+        wake: { kind: 'time', at: '2026-10-30T23:59:00Z', status: 'scheduled' },
+        priority: { level: 'high', score: 90, reasons: ['Deadline is within 1 day (2026-10-30).'] }
+      }
+    });
+    assert.match(html, /责任人: 你/);
+    assert.match(html, /对照请求检查当前来源文档/);
+    assert.match(html, /在截止时间前重新核对：October 30/);
+    assert.match(html, /截止日期将在 1 天内（2026-10-30）/);
+    assert.doesNotMatch(html, /Check current source documents|Recheck before the deadline|Deadline is within 1 day/);
+  } finally { setLocale('en'); }
+});
+
+test('the overview gives a next step without asking users to configure every task', () => {
+  setLocale('en');
+  const task = { id: 'waiting', status: 'waiting_for_information', management: {
+    wake: { kind: 'reply' }, nextAction: { kind: 'wait' }, priority: { score: 50 }
+  } };
+  const html = renderTaskManagement(task, { compact: true });
+  assert.match(html, /Recheck when the email thread gets a reply/);
+  assert.match(html, /Adjust follow-up/);
+  assert.doesNotMatch(html, /<form|<select|<input|\(50\)/);
+});
+
+test('a saved time wait shows the chosen time rather than the request deadline', () => {
+  setLocale('en');
+  const task = { id: 'timed', status: 'waiting_for_information', request: { deadline: { text: 'Friday' } },
+    wait: { kind: 'time', status: 'active', until: '2026-10-28T12:30:00Z' },
+    management: { wake: { kind: 'time', waitId: 'wait:timed:1', at: '2026-10-28T12:30:00Z', status: 'active' } }
+  };
+  const html = renderTaskManagement(task);
+  assert.match(html, /Check again at 2026-10-28 12:30/);
+  assert.doesNotMatch(html, /Friday/);
+  assert.match(html, /value="time" selected/);
+  assert.match(html, /data-wait-until="timed" value="2026-10-28T/);
+});
+
 test('the verification-depth metric renders with what it counted', () => {
   const html = renderMetrics({
     discovery: { valuableRate: 1, valuable: 1, discovered: 1, unservableRate: 0, unservable: 0 },
@@ -134,4 +208,82 @@ test('a ready reply in the default run says why it is held and how to watch the 
   assert.match(optedOut, /data-action="approve"/, 'with the documented opt-out the approval control appears');
   assert.match(optedOut, /simulated outbox only/, 'and delivery is still described as local');
   runtimeState.shadow = true;
+});
+
+const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action);
+const needsTaskDecision = task => task.status === 'ready_for_approval' || (task.status === 'blocked' && Boolean(task.action));
+const attentionItems = new Function('visibleAttentionItems', `${extractFunction('attentionItems')}\nreturn attentionItems;`)(visibleAttentionItems);
+const agentPresentation = new Function('needsTaskDecision', 'attentionItems',
+  `${extractFunction('agentPresentation')}\nreturn agentPresentation;`)(needsTaskDecision, attentionItems);
+const taskPresentation = new Function(`${extractFunction('taskPresentation')}\nreturn taskPresentation;`)();
+const taskTitle = new Function(`${extractFunction('taskTitle')}\nreturn taskTitle;`)();
+const renderTaskAction = new Function('escapeHtml', 'runtime', 'taskTitle',
+  `${extractFunction('renderTaskAction')}\nreturn renderTaskAction;`)(escapeHtml, runtimeState, taskTitle);
+
+test('an offline workspace never claims to be idle, working or up to date', () => {
+  for (const status of ['completed', 'investigating', 'waiting_for_information', 'ready_for_approval']) {
+    const presentation = agentPresentation({ tasks: [{ status }] }, false);
+    assert.equal(presentation.tone, 'offline');
+    assert.match(presentation.description, /上次收到的进展/);
+  }
+});
+
+test('waiting for evidence has no working state and explains what will resume it', () => {
+  const task = { status: 'waiting_for_information', evidence: { criteria: [{ status: 'satisfied' }, { status: 'unverified' }] } };
+  assert.equal(taskPresentation(task).tone, 'waiting');
+  assert.match(taskPresentation(task).description, /1 项要求缺少证据/);
+  assert.equal(agentPresentation({ tasks: [task] }, true).tone, 'waiting');
+  assert.equal(agentPresentation({ tasks: [{ status: 'verifying' }] }, true).tone, 'working');
+  assert.equal(agentPresentation({ tasks: [{ status: 'completed' }] }, true).tone, 'idle');
+});
+
+test('delivery uncertainty offers reconciliation rather than unconfirmed duplicate sending', () => {
+  const task = { id: 'request:uncertain', status: 'blocked', action: { status: 'unknown' } };
+  const html = renderTaskAction(task);
+  assert.match(html, /data-action="reconcile"/);
+  assert.doesNotMatch(html, /data-action="(?:approve|retry)"|data-automate/);
+  assert.equal(isClosedTask(task), false);
+  assert.equal(isClosedTask({ status: 'blocked' }), true);
+  assert.equal(attentionItems({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }).length, 0);
+  assert.equal(agentPresentation({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }, true).title, '1 个选择需要你，其余的我来照看。');
+});
+
+test('standing authority is offered only with a named scope, standard evidence and writable runtime', () => {
+  const task = { id: 'request:scoped', status: 'ready_for_approval', request: { subjectEntity: 'Northstar', deliverable: 'proposal' }, draft: { to: 'alex@example.test', subject: 'Follow up', body: 'Prepared reply', live: false } };
+  assert.doesNotMatch(renderTaskAction(task), /data-action="approve"|data-automate/);
+  runtimeState.shadow = false;
+  try {
+    assert.match(renderTaskAction(task), /data-automate="request:scoped"/);
+    assert.match(renderTaskAction(task), /仅适用于 Northstar · proposal/);
+    assert.doesNotMatch(renderTaskAction({ ...task, request: {} }), /data-automate/);
+    assert.doesNotMatch(renderTaskAction({ ...task, verification: { depth: 'enhanced' } }), /data-automate/);
+    assert.match(renderTaskAction({ ...task, verification: { depth: 'enhanced' } }), /data-action="approve"/);
+  } finally { runtimeState.shadow = true; }
+});
+
+test('the compact draft escapes sender content, scope and task identifiers', () => {
+  const html = renderTaskAction({ id: '\" onclick=\"alert(1)', status: 'ready_for_approval', request: { subjectEntity: '<script>bad()</script>', deliverable: 'proposal' }, draft: { to: '<img src=x onerror=bad()>', subject: '<script>bad()</script>', body: '<iframe src=x></iframe>' } });
+  assert.doesNotMatch(html, /<script>|<img|<iframe|data-preserve="[^\"]*" onclick=/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;iframe/);
+});
+
+test('first-use empty states follow the selected language across overview, activity, context and agreements', () => {
+  const cases = [
+    ['renderEvents', []], ['renderHistory', []],
+    ['renderContext', { documents: [], runs: [] }],
+    ['renderRecent', { tasks: [], events: [] }],
+    ['renderGrants', { calibrations: [] }], ['renderConnectors', undefined]
+  ];
+  try {
+    for (const locale of ['en', 'zh-CN']) {
+      setLocale(locale);
+      for (const [name, input] of cases) {
+        const render = new Function('copy', 'ui', 'runtime', `${extractRawFunction(name)}\nreturn ${name};`)(localizedCopy, localizedUi, null);
+        const html = render(input);
+        if (locale === 'en') assert.doesNotMatch(html, /\p{Script=Han}/u, name);
+        else assert.match(html, /\p{Script=Han}/u, name);
+      }
+    }
+  } finally { setLocale('en'); }
 });
