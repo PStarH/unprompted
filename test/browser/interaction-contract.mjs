@@ -23,6 +23,19 @@ async function emit(mutate=()=>{}) {
   await page.evaluate(state=>window.__streams.at(-1).onmessage({data:JSON.stringify(state)}),state);
 }
 try {
+ // This contract replaces SSE to control individual live updates. Wait for
+ // the isolated server's first task before the one initial HTTP snapshot;
+ // otherwise a fast browser can load before the scheduled email arrives.
+ if (fixture) {
+   const deadline = Date.now() + 10_000;
+   let seeded = false;
+   while (Date.now() < deadline) {
+     const snapshot = await (await fetch(base + '/api/state')).json();
+     if (snapshot.tasks.length) { seeded = true; break; }
+     await new Promise(resolve => setTimeout(resolve, 100));
+   }
+   assert.equal(seeded, true, 'The isolated interaction fixture must contain its initial task.');
+ }
  await page.goto(base,{waitUntil:'networkidle'});
  await page.waitForFunction(()=>window.__streams.length && document.querySelector('#taskContent [data-task-card]'));
  state=await(await page.request.get(base+'/api/state')).json();

@@ -50,8 +50,10 @@ import { ingestAssignedIssue } from './external-work.js';
  */
 
 const stamp = () => new Date().toISOString();
-const setOwnRecord = (records, id, value) => {
-  Object.defineProperty(records, id, { value, enumerable: true, configurable: true, writable: true });
+const withRecord = (records, id, value) => {
+  const next = new Map(Object.entries(records));
+  next.set(id, value);
+  return Object.fromEntries(next);
 };
 const record = (state, kind, text, taskId = null, eventId = null) => {
   state.history.push({ id: `h-${state.history.length + 1}`, at: stamp(), kind, text, taskId, eventId });
@@ -841,7 +843,7 @@ export class WorkEngine {
     }
     this.store.mutate(state => {
       const previous = state.documents[docId];
-      setOwnRecord(state.documents, docId, {
+      state.documents = withRecord(state.documents, docId, {
         id: docId,
         title: doc.title,
         kind: doc.kind || 'document',
@@ -903,7 +905,7 @@ export class WorkEngine {
       const currentPrevious = state.documents[docId];
       const title = doc.title || previous?.title || docId;
       const unavailableAt = event.at || stamp();
-      setOwnRecord(state.documents, docId, {
+      state.documents = withRecord(state.documents, docId, {
         ...(currentPrevious || {
           id: docId,
           kind: 'document',
@@ -948,7 +950,7 @@ export class WorkEngine {
     const incoming = runRecord(payload);
     this.store.mutate(state => {
       state.events.push(event);
-      setOwnRecord(state.runRecords, incoming.id, incoming);
+      state.runRecords = withRecord(state.runRecords, incoming.id, incoming);
       event.summary = `Run recorded · ${incoming.label}`;
       const related = Object.values(state.tasks).filter(task =>
         !isSettled(task) &&

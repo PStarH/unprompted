@@ -32,6 +32,10 @@ test('reserved external record identifiers cannot mutate record prototypes or ad
   assert.deepEqual(state.state.documents, {});
   assert.deepEqual(state.state.runRecords, {});
   assert.equal(Object.getPrototypeOf(state.state.documents), Object.prototype);
+  engine.ingest({ id: 'valid-inherited-name', type: 'document.modified', payload: { id: 'toString', title: 'Provider identifier', content: 'Source text' } });
+  assert.equal(Object.hasOwn(state.state.documents, 'toString'), true);
+  assert.equal(state.state.documents.toString.content, 'Source text');
+  assert.equal(Object.getPrototypeOf(state.state.documents), Object.prototype);
 });
 
 test('Outlook HTML fallback extracts source text with quoted tags, comments, raw text and entities', async () => {
