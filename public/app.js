@@ -20,6 +20,8 @@ let busy = false;
 let toastTimer = null;
 let lastToast = null;
 let stateStream = null;
+const expandedTasks = new Set();
+const nativeCopy = (zh, en) => getLocale() === 'en' ? en : zh;
 
 function toast(message, isError = false, action = null) {
   const element = byId('toast');
@@ -631,6 +633,7 @@ function renderIssueCard(task, { detailed = false } = {}) {
 
 function renderTaskCard(task) {
   if (task.kind === 'external_issue') return renderIssueCard(task);
+  if (task.kind === 'observed_task') return renderObservedCard(task);
   const presentation = taskPresentation(task);
   const id = escapeHtml(task.id);
   const criteria = task.evidence?.criteria || [];
@@ -642,9 +645,16 @@ function renderTaskCard(task) {
   const change = interactions?.delta(task);
   const changeChip = change?.hasChanges ? ui`<button class="change-lens" data-proof-changes="${id}" aria-haspopup="dialog" aria-controls="evidencePeek" aria-expanded="false"><span aria-hidden="true">↳</span>${escapeHtml(interactions.deltaLabel(change))}</button>` : '';
   return ui`<article class="task-card" data-task-card="${id}"><div class="task-main"><div class="task-topline"><span class="task-category"><span aria-hidden="true">↳</span>主动发现 · 持续跟进</span><span class="state-badge ${presentation.tone}">${presentation.label}</span></div>
-    <button class="task-title-button" data-open-task="${id}" aria-label="查看 ${escapeHtml(taskTitle(task))} 的详情"><h3>${escapeHtml(taskTitle(task))}</h3></button><p class="task-description">${escapeHtml(presentation.description)}</p>${renderTaskManagement(task, { compact: true })}${changeChip}<div class="task-meta"><span class="meta-source">${task.sourceConnectorId === 'microsoft' ? 'Outlook' : copy('来自邮件')}</span><span class="meta-dot"></span><span>${escapeHtml(task.sender || copy('已观察的请求'))}</span><span class="meta-dot"></span><span>${time(task.updatedAt)}</span></div>
+    <button class="task-title-button" data-expand-task="${id}" aria-expanded="${expandedTasks.has(task.id)}"><h3>${escapeHtml(taskTitle(task))}</h3></button><p class="task-description">${escapeHtml(presentation.description)}</p>${changeChip}<div class="task-meta"><span class="meta-source">${task.sourceConnectorId === 'microsoft' ? 'Outlook' : copy('来自邮件')}</span><span class="meta-dot"></span><span>${escapeHtml(task.sender || copy('已观察的请求'))}</span><span class="meta-dot"></span><span>${time(task.updatedAt)}</span></div>
     <div class="task-progress" aria-label="任务进展">${steps.map(([label, met]) => ui`<div class="${met ? 'met' : ''}"><span class="step-dot" aria-hidden="true">${met ? '✓' : '·'}</span>${label}</div>`).join('')}</div></div>
-    <div class="task-bottom"><button class="task-summary proof-trigger" data-proof="${id}" aria-haspopup="dialog" aria-label="${escapeHtml(summary)} · ${copy('查看依据')}" aria-controls="evidencePeek" aria-expanded="false"><span>${escapeHtml(summary)}</span><small>按住速览 · 点按展开</small></button><button class="text-button" data-open-task="${id}">完整记录 <span aria-hidden="true">↗</span></button></div>${renderTaskAction(task)}</article>`;
+    <div class="task-bottom"><button class="task-summary proof-trigger" data-proof="${id}" aria-haspopup="dialog" aria-label="${escapeHtml(summary)} · ${copy('查看依据')}" aria-controls="evidencePeek" aria-expanded="false"><span>${escapeHtml(summary)}</span></button><div class="action-row">${task.status === 'waiting_for_information' && !task.action ? ui`<button class="text-button" data-action="cancel" data-id="${id}">${copy('暂不跟进')}</button>` : ''}<button class="text-button" data-expand-task="${id}" aria-expanded="${expandedTasks.has(task.id)}">${nativeCopy('调整','Adjust')}</button><button class="text-button" data-open-task="${id}">${nativeCopy('记录','History')}</button></div></div>${renderTaskAction(task)}${expandedTasks.has(task.id) ? `<div class="inline-task-controls">${renderTaskManagement(task)}</div>` : ''}</article>`;
+}
+
+function renderObservedCard(task, { detailed = false } = {}) {
+  const source = task.externalSource || {}, id = escapeHtml(task.id), closed = task.status === 'cancelled';
+  const provider = task.sourceConnectorId === 'apple_notes' ? nativeCopy('备忘录', 'Apple Notes') : nativeCopy('本地文件', 'Local files');
+  const canResume = closed && source.state === 'open' && setupState?.localSources?.[task.sourceConnectorId]?.connected;
+  return `<article class="task-card" data-task-card="${id}"><div class="task-main"><div class="task-topline"><span class="task-category">${provider} · ${escapeHtml(source.documentTitle)}</span><span class="state-badge waiting">${closed ? copy('已停止跟进') : nativeCopy('观察中', 'Following')}</span></div><h3>${escapeHtml(task.subject)}</h3>${detailed ? `<p class="setup-note">${nativeCopy('跟随来源中的明确待办。勾选或移除待办不会计为 Agent 完成。', 'Following an explicit source to-do. Checking it off or removing it does not count as an agent completion.')}</p>` : ''}</div><div class="task-bottom"><a class="text-button" href="${escapeHtml(source.url)}" target="_blank" rel="noopener">${nativeCopy('查看原文', 'View source')} ↗</a>${!closed ? `<button class="text-button" data-action="cancel" data-id="${id}">${copy('暂不跟进')}</button>` : canResume ? `<button class="text-button" data-action="reopen" data-id="${id}">${copy('恢复跟进')}</button>` : ''}</div></article>`;
 }
 
 function renderQuietDecision(item) {
@@ -679,6 +689,16 @@ let selectedConnection = null;
 const connectionPopups = new Map();
 const providerNames = { google: 'Google Workspace', github: 'GitHub', microsoft: 'Microsoft Outlook' };
 
+function renderNativeSources() {
+  return ['local_files', 'apple_notes'].map(id => {
+    const source = setupState.localSources?.[id] || {}, notes = id === 'apple_notes';
+    const title = notes ? nativeCopy('备忘录', 'Apple Notes') : nativeCopy('本地文件夹', 'Local folders');
+    const select = `<button class="secondary-button" data-native-operation="select" data-native-source="${id}" ${source.available === false ? 'disabled' : ''}>${nativeCopy(source.connected ? '添加文件夹' : '选择文件夹', source.connected ? 'Add folder' : 'Choose folders')}</button>`;
+    const fallback = !notes && source.nativePicker === false ? `<form data-native-path-form><label class="setup-field">${nativeCopy('文件夹绝对路径', 'Absolute folder path')}<input name="path" required autocomplete="off" placeholder="/path/to/work"></label><button class="secondary-button" type="submit">${copy('连接')}</button></form>` : select;
+    return `<article class="source-connection-card" data-connection-card="${id}"><div class="source-connection-heading"><span class="source-monogram" aria-hidden="true">${notes ? 'N' : 'F'}</span><h3>${title}</h3><span class="state-badge ${source.healthy === false ? 'offline' : source.connected ? 'done' : 'waiting'}">${source.available === false ? nativeCopy('需要 macOS', 'Requires macOS') : source.connected ? copy('已连接 · 只读') : copy('尚未连接')}</span></div><p class="source-description">${notes ? nativeCopy('仅所选文件夹的文本；首次连接由 macOS 授权。', 'Text in selected folders. macOS requests access on first connection.') : nativeCopy('只读所选文件夹中的 Markdown 和文本文件。', 'Read Markdown and text in selected folders only.')}</p>${source.connected ? `<ul class="native-scope-list">${(source.scopes || []).map(item => `<li><span>${escapeHtml(item.account ? item.account + ' / ' : '')}${escapeHtml(item.label)}</span><button class="text-button" data-native-operation="remove-scope" data-native-source="${id}" data-scope-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(nativeCopy('移除', 'Remove') + ' ' + item.label)}">×</button></li>`).join('')}</ul><p class="connection-card-counts">${source.counts?.documents || 0} ${nativeCopy('份文档', 'documents')} · ${source.counts?.tasks || 0} ${nativeCopy('项待办', 'to-dos')}${source.lastSyncAt ? ' · ' + time(source.lastSyncAt) : ''}</p>` : ''}<div class="action-row">${fallback}${source.connected ? `<button class="text-button" data-native-operation="forget" data-native-source="${id}">${copy('断开连接')}</button>` : ''}</div>${source.lastError ? `<p class="setup-error" role="status">${escapeHtml(source.lastError)}</p>` : ''}</article>`;
+  }).join('');
+}
+
 function renderConnectors({ home = false } = {}) {
   if (!runtime || !setupState) return `<p class="empty-trace">${copy('正在读取本地连接设置。')}</p>`;
   if (runtime.demo?.disposable || runtime.demo?.ruleBased) return '';
@@ -704,8 +724,10 @@ function renderConnectors({ home = false } = {}) {
     const actions = !waiting ? ui`<div class="action-row">${source.connected ? ui`<button class="text-button" data-select-connection="${id}">${copy('管理连接')} ↗</button>${selected && id !== 'google' ? ui`<button class="text-button" data-provider-operation="forget" data-provider="${id}">${copy('断开连接')}</button>` : ''}` : ui`<button class="${home ? 'secondary-button' : 'primary-button'}" data-select-connection="${id}">${copy(id !== 'google' && source.configured ? '复制授权码并登录' : '连接')} ${providerNames[id]} →</button>`}${oauth.phase === 'activation_failed' && id !== 'google' ? ui`<button class="text-button" data-provider-operation="activate" data-provider="${id}">${copy('应用已保存的连接')}</button>` : ''}</div>` : '';
     return ui`<article class="source-connection-card ${selected ? 'selected' : ''}" data-connection-card="${id}"><div class="source-connection-heading"><span class="source-monogram" aria-hidden="true">${id === 'github' ? 'GH' : id === 'microsoft' ? 'M' : 'G'}</span><div><h3>${providerNames[id]}</h3>${source.account?.label ? `<p>${escapeHtml(source.account.label)}</p>` : ''}</div><span class="state-badge ${failed ? 'offline' : source.connected ? 'done' : 'waiting'}">${label}</span></div><p class="source-description">${description}</p>${counts}${notice}${device}${form}${actions}</article>`;
   });
-  return ui`<div class="connection-catalog-heading"><h2>${copy('连接你每天使用的工具')}</h2><p>${copy('选择一个来源就能开始，后续随时增加。账号授权后直接生效。')}</p></div><div class="source-connection-list">${cards.join('')}</div>`;
+  const content = `<div class="source-connection-list">${renderNativeSources()}${cards.join('')}</div>`;
+  return home && setupState.workspace?.ready ? `<details class="home-connections" data-preserve="home-connections" ${selectedConnection ? 'open' : ''}><summary>${nativeCopy('连接', 'Connections')} · ${nativeCopy('管理来源', 'Manage sources')}</summary>${content}</details>` : `<div class="connection-catalog-heading"><h2>${nativeCopy('连接', 'Connections')}</h2></div>${content}`;
 }
+
 
 function renderObservation() {
   const monitoring = setupState?.monitoring || {};
@@ -744,6 +766,27 @@ async function startSourceAuthorization(id, form = null) {
     connectionErrors.set(id, copy(error.message)); renderDashboard(); throw error;
   }
 }
+
+document.addEventListener('click', async event => {
+  const expand = event.target.closest('[data-expand-task]');
+  if (expand) { const id = expand.dataset.expandTask; if (expandedTasks.has(id)) expandedTasks.delete(id); else expandedTasks.add(id); renderDashboard(); return; }
+  const button = event.target.closest('[data-native-operation]');
+  if (!button || setupBusy) return;
+  setupBusy = true; button.disabled = true; button.setAttribute('aria-busy', 'true');
+  try {
+    const result = await postJSON(`/api/setup/local-sources/${button.dataset.nativeSource}/${button.dataset.nativeOperation}`, { locale: getLocale() === 'en' ? 'en' : 'zh-CN', id: button.dataset.scopeId });
+    if (!result.cancelled) { await refreshSetup({ quiet: true }); await refreshState(); }
+  } catch (error) { toast(copy(error.message), true); }
+  finally { setupBusy = false; button.disabled = false; button.removeAttribute('aria-busy'); }
+});
+document.addEventListener('submit', async event => {
+  const form = event.target.closest('[data-native-path-form]'); if (!form) return;
+  event.preventDefault(); if (setupBusy) return; setupBusy = true;
+  const button = form.querySelector('button'); button.disabled = true;
+  try { await postJSON('/api/setup/local-sources/local_files/select', { path: new FormData(form).get('path') }); await refreshSetup({ quiet: true }); await refreshState(); }
+  catch (error) { toast(copy(error.message), true); }
+  finally { setupBusy = false; button.disabled = false; }
+});
 
 document.addEventListener('click', async event => {
   const selected = event.target.closest('[data-select-connection]');
@@ -1101,6 +1144,7 @@ function renderTaskDialog() {
   if (task.kind === 'external_issue') {
     updateContent('taskDialogContent', renderIssueCard(task, { detailed: true })); return;
   }
+  if (task.kind === 'observed_task') { updateContent('taskDialogContent', renderObservedCard(task, { detailed: true })); return; }
   updateContent('taskDialogContent', ui`<p class="dialog-note">这里保留请求、来源、核对依据与完整记录。首页只呈现当前最有用的下一步。</p>${renderTaskAction(task)}${renderTaskManagement(task)}<details class="dialog-section" data-preserve="full-evidence-${escapeHtml(task.id)}"><summary>完整来源、证据与行动记录</summary><div lang="${getLocale()}">${renderWork(task)}<section class="dialog-section" id="approval"><h3>行动与核验</h3>${renderApproval(task)}</section></div></details>${task.status === 'waiting_for_information' ? ui`<div class="dialog-section"><button class="secondary-button danger-button" data-action="cancel" data-id="${escapeHtml(task.id)}">不再跟进这件事</button></div>` : ''}`);
 }
 

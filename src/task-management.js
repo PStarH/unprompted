@@ -113,6 +113,8 @@ function nextActionFor(task, dependencies, owner, state) {
   }
   if (task.kind === 'external_issue') return { kind: 'review_source', label: 'Review the assigned GitHub issue',
     owner: owner.id, url: task.externalSource?.url, reason: 'The source assigns this open issue to the connected account; no agent completion is claimed.' };
+  if (task.kind === 'observed_task') return { kind: 'review_source', label: 'Review the local source to-do',
+    owner: owner.id, url: task.externalSource?.url, reason: 'This is an explicit to-do from a selected local source; no external execution or agent completion is claimed.' };
   const wait = task.wait || (state.taskWaits || {})[task.id];
   if (wait?.status === 'active') {
     return { kind: 'wait', label: `Wait for ${wait.condition?.label || wait.kind}`, owner: 'agent', reason: 'Unprompted is watching this persisted event or time condition.' };

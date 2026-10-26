@@ -35,6 +35,37 @@ export function ingestAssignedIssue(store, event) {
 }
 
 /** Retire one source account while preserving its historical local record. */
+export function ingestObservedTask(store, event) {
+  const observed = event.payload, id = `observed:${observed.id}`;
+  let created = false;
+  store.mutate(state => {
+    state.events.push(event);
+    const previous = state.tasks[id];
+    event.summary = `Explicit local to-do · ${observed.title}`;
+    event.relations = previous || observed.state === 'open' ? [id] : [];
+    if (previous && previous.externalSource.sourceObservationRevision >= observed.sourceObservationRevision) { event.disposition = 'stale_change'; return; }
+    if (!previous && observed.state !== 'open') { event.disposition = 'observed'; return; }
+    created = !previous;
+    const dismissed = previous?.userDismissed === true, closed = observed.state !== 'open', at = new Date().toISOString();
+    const request = { id, intent: 'follow_up', subjectEntity: observed.documentTitle, deliverable: 'local_task', requiredContent: [], deadline: null,
+      interpretedBy: 'explicit_source_todo', text: observed.title, source: { kind: event.connectorId, id: observed.documentId,
+        url: observed.url, connectorId: event.connectorId, locator: `line:${observed.line}` } };
+    state.tasks[id] = { ...(previous || {}), id, kind: 'observed_task', sourceConnectorId: event.connectorId,
+      subject: observed.title, sender: observed.documentTitle, request, externalSource: { ...observed },
+      owner: { id: 'user', label: 'You', source: 'explicit_source_todo' },
+      status: closed || dismissed ? 'cancelled' : 'waiting_for_information', userDismissed: dismissed,
+      createdAt: previous?.createdAt || at, updatedAt: at, documentId: observed.documentId,
+      draft: null, action: null, actionVersion: 0, assessment: null, reasoningWork: null,
+      evidence: { criteria: [], claims: [], unknowns: [], source: { ...request.source, timestamp: observed.updatedAt } },
+      reason: closed ? 'The source to-do was checked off, removed, or became unavailable. This is not an agent completion.'
+        : dismissed ? previous.reason : 'Following an explicit to-do in a selected local source.' };
+    event.disposition = created ? 'discovered_request' : closed ? 'request_withdrawn' : 'related_change';
+    state.history.push({ id: `h-${state.history.length + 1}`, at, kind: created ? 'discovery' : 'source_update', taskId: id, eventId: event.id,
+      text: closed ? 'This source to-do is no longer actively followed. No agent completion was claimed.' : `Following the explicit source to-do: ${observed.title}` });
+  });
+  return { taskId: id, discovered: created };
+}
+
 export function bindConnectionAccount(store, connectorId, accountId) {
   const previous = store.state.connectionAccounts?.[connectorId];
   if (previous === accountId) return false;

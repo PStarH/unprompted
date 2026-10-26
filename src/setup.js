@@ -14,6 +14,7 @@ const DEFAULT_STATE = Object.freeze({
   restartRequired: false,
   model: { baseUrl: null, model: null, apiKey: null, harness: 'classic', role: 'primary', lastValidation: null },
   connections: {},
+  nativeSources: {},
   monitoring: {
     enabled: false,
     intervalMs: DEFAULT_INTERVAL_MS,
@@ -64,6 +65,16 @@ function normalise(state) {
   for (const id of ['github', 'microsoft']) {
     const saved = state.connections?.[id];
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.connections[id] = { ...saved };
+  }
+  if (state.nativeSources && typeof state.nativeSources === 'object') {
+    for (const id of ['local_files', 'apple_notes']) {
+      const saved = state.nativeSources[id];
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.nativeSources[id] = {
+        scopeId: typeof saved.scopeId === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(saved.scopeId) ? saved.scopeId : null,
+        roots: Array.isArray(saved.roots) ? saved.roots.slice(0, 10).filter(item => item && typeof item.id === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(item.id) && typeof item.path === 'string' && path.isAbsolute(item.path)).map(item => ({ id: item.id, path: item.path, label: String(item.label || path.basename(item.path)).slice(0, 250) })) : [],
+        folders: Array.isArray(saved.folders) ? saved.folders.slice(0, 20).filter(item => item && typeof item.accountId === 'string' && item.accountId.length <= 4096 && typeof item.folderId === 'string' && item.folderId.length <= 4096).map(item => ({ accountId: item.accountId, folderId: item.folderId, label: String(item.label || 'Notes').slice(0, 250), accountLabel: String(item.accountLabel || 'Notes').slice(0, 250) })) : []
+      };
+    }
   }
   if (state.monitoring && typeof state.monitoring === 'object') {
     result.monitoring = { ...result.monitoring, ...state.monitoring };
@@ -132,6 +143,19 @@ export class LocalSetupStore {
   }
 
   getConnection(id) { connectionProvider(id); return { ...(this.get().connections[id] || {}) }; }
+
+  getNativeSource(id) {
+    if (!['local_files', 'apple_notes'].includes(id)) throw new Error('Unknown native source.');
+    return clone(this.get().nativeSources[id] || { scopeId: null, roots: [], folders: [] });
+  }
+  saveNativeSource(id, selection) {
+    this.getNativeSource(id);
+    return this.#write({ ...this.get(), nativeSources: { ...this.get().nativeSources, [id]: selection } });
+  }
+  clearNativeSource(id) {
+    this.getNativeSource(id);
+    const next = this.get(); delete next.nativeSources[id]; return this.#write(next);
+  }
 
   saveConnectionClient(id, clientId) {
     connectionProvider(id);

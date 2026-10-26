@@ -34,7 +34,8 @@ import { TaskServices } from './task-services.js';
 import { projectWorkspaceTaskManagement } from './task-management.js';
 import { draftReviewToken } from './draft-review.js';
 import { REASONING_RECOVERY, reasoningFailure, reasoningMayResume } from './reasoning-recovery.js';
-import { ingestAssignedIssue } from './external-work.js';
+import { ingestAssignedIssue, ingestObservedTask } from './external-work.js';
+import { publicSourceCursors } from './connectors/connector.js';
 
 /**
  * The work engine.
@@ -108,6 +109,8 @@ const isSettled = task => task.status === 'completed' || task.status === 'cancel
  * assessment, approval and retry all treat them as absent.
  */
 const documentAvailable = document => Boolean(document) && document.available !== false;
+const nativeObservation = (event, doc) => ['local_files', 'apple_notes'].includes(event.source) && event.connectorId === event.source
+  && String(doc.id).startsWith(`${event.source}:`) && Number.isSafeInteger(doc.sourceObservationRevision) && doc.sourceObservationRevision > 0;
 
 /** Delivery progress follows requirements and blockers, independently of source revision churn. */
 function progressSignature(task) {
@@ -233,7 +236,7 @@ export class WorkEngine {
       outbox: state.outbox,
       history: [...state.history].reverse(),
       connectors: state.connectorStatus || {},
-      cursors: state.cursors || {},
+      cursors: publicSourceCursors(state.cursors),
       // What the system is allowed to read, and how it reasons. Exposed so the
       // interface can show the reasoning surface rather than hide it.
       providers: describeProviders(),
@@ -298,6 +301,7 @@ export class WorkEngine {
       result = ingestAssignedIssue(this.store, event);
       this.changed();
     }
+    else if (event.type === 'task.observed') { result = ingestObservedTask(this.store, event); this.changed(); }
     else if (event.type === 'document.modified') result = this.#ingestDocument(event);
     else if (event.type === 'document.unavailable') result = this.#ingestDocumentUnavailable(event);
     else if (REGISTRY_EVENT_TYPES.includes(event.type)) result = this.#ingestRunRecord(event);
@@ -826,7 +830,8 @@ export class WorkEngine {
     const stored = this.store.state.documents[docId];
     const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
     const storedAt = Date.parse(stored?.modifiedAt || stored?.observedAt || '');
-    if (stored && Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt) {
+    if (stored && (nativeObservation(event, doc) ? stored.sourceObservationRevision >= doc.sourceObservationRevision
+      : Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt)) {
       // Out-of-order arrival: an older revision must never overwrite newer
       // state, or evidence a task was already verified against would appear to
       // regress. The event is recorded and nothing is reassessed.
@@ -851,6 +856,7 @@ export class WorkEngine {
         url: doc.url || `/documents/${docId}`,
         externalId: doc.externalId || null,
         modifiedAt: doc.modifiedAt || event.at || stamp(),
+        ...(nativeObservation(event, doc) ? { sourceObservationRevision: doc.sourceObservationRevision } : {}),
         observedAt: event.at || stamp(),
         version: (previous?.version || 0) + 1,
         source: event.source,
@@ -889,7 +895,8 @@ export class WorkEngine {
     const previous = this.store.state.documents[docId];
     const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
     const storedAt = Date.parse(previous?.modifiedAt || previous?.observedAt || '');
-    if (previous && Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt) {
+    if (previous && (nativeObservation(event, doc) ? previous.sourceObservationRevision >= doc.sourceObservationRevision
+      : Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt)) {
       this.store.mutate(state => {
         state.events.push(event);
         event.summary = `Stale unavailability notice · kept the newer ${previous.title || docId}`;
@@ -918,6 +925,7 @@ export class WorkEngine {
         }),
         title,
         available: false,
+        ...(nativeObservation(event, doc) ? { sourceObservationRevision: doc.sourceObservationRevision } : {}),
         unavailableReason: doc.reason || 'unavailable',
         unavailableAt,
         observedAt: event.at || stamp()
@@ -1262,7 +1270,7 @@ export class WorkEngine {
 
   assess(taskId, eventId = null, { force = false, allowAutomation = true } = {}) {
     const task = this.store.state.tasks[taskId];
-    if (!task || isSettled(task) || task.kind === 'external_issue') return;
+    if (!task || isSettled(task) || ['external_issue', 'observed_task'].includes(task.kind)) return;
     const state = this.store.state;
 
     const feedbackExcluded = [];
@@ -2195,6 +2203,7 @@ export class WorkEngine {
   reopen(taskId) {
     const task = this.#requireTask(taskId);
     if (task.kind === 'external_issue' && (!task.externalSource.assigned || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This issue is no longer actively assigned to the connected account.');
+    if (task.kind === 'observed_task' && (task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.[task.sourceConnectorId] !== task.externalSource.accountId)) throw new Error('This local to-do is no longer open in the connected source.');
     if (task.action || !['blocked', 'cancelled'].includes(task.status)) {
       throw new Error('Only a declined or closed request without an action can be reopened');
     }
@@ -2336,7 +2345,7 @@ export class WorkEngine {
     this.store.mutate(state => {
       const current = state.tasks[taskId];
       current.status = 'cancelled';
-      if (current.kind === 'external_issue') current.userDismissed = true;
+      if (['external_issue', 'observed_task'].includes(current.kind)) current.userDismissed = true;
       current.updatedAt = stamp();
       current.reason = 'Closed by the user while waiting for information. Nothing was sent.';
       current.draft = null;
@@ -2521,7 +2530,7 @@ export class WorkEngine {
    * interruption about the same task would be noise, not information.
    */
   #stallWorthy(task, state, at) {
-    if (task.kind === 'external_issue') return false;
+    if (['external_issue', 'observed_task'].includes(task.kind)) return false;
     if (task.status !== 'waiting_for_information') return false;
     const since = task.progress?.at ? Date.parse(task.progress.at) : NaN;
     if (!Number.isFinite(since) || at - since < this.stallAfterMs) return false;
@@ -2948,7 +2957,7 @@ export class WorkEngine {
   }
 
   #primaryReviewMissing(task) {
-    if (task.kind === 'external_issue') return false;
+    if (['external_issue', 'observed_task'].includes(task.kind)) return false;
     return this.reasoner.preferModelInterpretation === true &&
       !(task.modelReview?.status === 'verified' && task.modelReview.requestVersion === Number(task.commitment?.revision || 1));
   }

@@ -6,12 +6,12 @@
  * identifiers and timestamps are preserved so evidence can cite them later.
  */
 
-export const EVENT_TYPES = ['email.received', 'issue.updated', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed'];
+export const EVENT_TYPES = ['email.received', 'issue.updated', 'task.observed', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed'];
 
 /** Registry publications: the generalized name plus the original experiment-only one. */
 export const REGISTRY_EVENT_TYPES = ['record.published', 'experiment.run.completed'];
 
-export const SOURCES = ['simulated', 'google', 'github', 'microsoft'];
+export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'local_files', 'apple_notes'];
 
 export class EventValidationError extends Error {
   constructor(message) {
@@ -79,6 +79,19 @@ export function validateRunPayload(payload) {
 
 export function validateEventPayload(event) {
   validateRecordId(event.payload?.id);
+  if (event.type === 'task.observed') {
+    const item = event.payload;
+    if (!['local_files', 'apple_notes'].includes(event.connectorId) || event.source !== event.connectorId
+      || typeof item.id !== 'string' || !item.id.startsWith(`${event.connectorId}:${item.accountId}:`) || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 500
+      || !['open', 'closed', 'unavailable'].includes(item.state) || typeof item.documentId !== 'string' || !item.documentId.startsWith(`${event.connectorId}:`)
+      || typeof item.accountId !== 'string' || !Number.isFinite(Date.parse(item.updatedAt))
+      || !Number.isSafeInteger(item.sourceObservationRevision) || item.sourceObservationRevision < 1
+      || typeof item.url !== 'string' || !Number.isSafeInteger(item.line) || item.line < 1) throw new EventValidationError('Local task payload is invalid or outside its native source.');
+    const url = new URL(item.url, 'http://127.0.0.1');
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname) || url.username || url.password
+      || url.pathname !== `/api/local-sources/documents/${encodeURIComponent(item.documentId)}` || url.search || url.hash) throw new EventValidationError('Local source URL is invalid.');
+    return true;
+  }
   if (event.type === 'issue.updated') {
     const issue = event.payload;
     if (!issue?.id || typeof issue.title !== 'string' || !issue.repository || !Number.isSafeInteger(issue.number)

@@ -205,6 +205,7 @@ done
 <key>CFBundleVersion</key><string>0.2.0</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>Unprompted reads only the Notes folders you select to observe your work. It does not modify notes.</string>
 </dict></plist>
 `;
   fs.writeFileSync(path.join(contents, 'Info.plist'), plist);

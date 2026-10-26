@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { JsonStore, hasRealEvents } from './src/store.js';
 import { WorkEngine } from './src/engine.js';
 import { SimulationController } from './src/simulation.js';
@@ -20,7 +20,10 @@ import { ModelSetupError, normalizeModelSettings, validateModelSettings } from '
 import { googleConnectionIssue } from './src/google-connection.js';
 import { CONNECTION_PROVIDERS, publicClientConfiguration } from './src/connection-catalog.js';
 import { DeviceOAuth } from './src/device-oauth.js';
-import { connectedSources, sourceCounts } from './src/connected-sources.js';
+import { connectedSources, sourceCounts, sourceAccountBindings } from './src/connected-sources.js';
+import { NativeSourceBridge, NativeAccessError } from './src/native-sources.js';
+import { canonicalLocalRoot, mergeLocalRoots, readScopedText } from './src/connectors/local-files.js';
+import { nativeSnapshot } from './src/connectors/local-snapshot.js';
 import { bindConnectionAccount } from './src/external-work.js';
 import { readRegularFile } from './src/local-files.js';
 
@@ -38,6 +41,10 @@ const httpBodyLimits = {
 };
 const requestTimeoutMs = httpLimit('UNPROMPTED_HTTP_REQUEST_TIMEOUT_MS', 35_000, 1000, 10 * 60_000);
 const localSetup = new LocalSetupStore({ filePath: process.env.UNPROMPTED_SETUP_FILE || null });
+const nativeBridge = new NativeSourceBridge();
+const currentSources = () => connectedSources(localSetup, { nativeBridge, baseUrl: `http://${host}:${port}` });
+const publicScopeId = item => item.id || createHash('sha256').update(`${item.accountId}\0${item.folderId}`).digest('hex').slice(0, 24);
+let nativeSelectionBusy = false;
 let setupState = localSetup.get();
 const connectionClientFile = process.env.UNPROMPTED_CONNECTOR_CLIENTS_FILE || path.join(root, 'connector-clients.json');
 let provisionedConnections = {};
@@ -90,11 +97,8 @@ try {
   throw error;
 }
 
-for (const provider of Object.keys(CONNECTION_PROVIDERS)) {
-  const saved = localSetup.getConnection(provider);
-  if (saved.account?.id) bindConnectionAccount(store, provider, saved.account.id);
-}
-let runtime = buildRuntime(runtimeEnv, { store, extraConnectors: connectedSources(localSetup), allowSimulation: explicitSimulation, allowSimulatedActions: explicitSimulation && process.env.UNPROMPTED_DESKTOP_APP === '1' });
+for (const [id, account] of Object.entries(sourceAccountBindings(localSetup))) if (account || store.state.connectionAccounts?.[id]) bindConnectionAccount(store, id, account);
+let runtime = buildRuntime(runtimeEnv, { store, extraConnectors: currentSources(), allowSimulation: explicitSimulation, allowSimulatedActions: explicitSimulation && process.env.UNPROMPTED_DESKTOP_APP === '1' });
 if (runtime.live && usingLocalGoogle && setupState.google.accountId) runtime.report.workspaceId = `google:${createHash('sha256').update(setupState.google.accountId).digest('hex').slice(0, 24)}`;
 if (runtime.live && !usingLocalGoogle) runtime.report.workspaceId = `environment:${createHash('sha256').update(store.filename).digest('hex').slice(0, 24)}`;
 if (usingLocalGoogle && runtime.report.google.ok) localSetup.markGoogleRuntimeActive();
@@ -220,6 +224,15 @@ const publicSetupStatus = () => {
       lastError: recorded?.lastError || null, healthy: recorded ? recorded.ok === true : null,
       counts: sourceCounts(store.state, provider.id) }];
   }));
+  status.localSources = Object.fromEntries(['local_files', 'apple_notes'].map(id => {
+    const saved = localSetup.getNativeSource(id), entries = id === 'local_files' ? saved.roots : saved.folders;
+    const recorded = store.state.connectorStatus?.[id];
+    return [id, { id, available: id === 'local_files' || nativeBridge.platform === 'darwin', nativePicker: nativeBridge.platform === 'darwin',
+      connected: runtime.connectors.some(connector => connector.id === id && connector.live), readOnly: true,
+      scopes: entries.map((item, index) => ({ id: publicScopeId(item), index, label: item.label, ...(item.accountLabel ? { account: item.accountLabel } : {}) })),
+      healthy: recorded ? recorded.ok === true : null, lastSyncAt: recorded?.lastSyncAt || null, lastError: recorded?.lastError || null,
+      counts: sourceCounts(store.state, id) }];
+  }));
   status.google.configuredThisRun = Boolean(runtime.connectors.some(connector => connector.id === 'google' && connector.live));
   status.google.credentialsConfiguredExternally = Boolean(process.env.GOOGLE_REFRESH_TOKEN);
   if (status.google.credentialsConfiguredExternally) {
@@ -277,11 +290,8 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
     const filename = googleWorkspacePath(workspaceDirectory, credentials.accountId);
     nextStore = path.resolve(filename) === path.resolve(previous.store.filename) ? previous.store : new JsonStore(filename, { dateLocale });
     const nextEnv = localSetup.runtimeEnv(process.env);
-    for (const id of Object.keys(CONNECTION_PROVIDERS)) {
-      const account = localSetup.getConnection(id).account;
-      if (account?.id) bindConnectionAccount(nextStore, id, account.id);
-    }
-    const nextRuntime = buildRuntime(nextEnv, { store: nextStore, allowSimulation: false, extraConnectors: connectedSources(localSetup) });
+    for (const [id, account] of Object.entries(sourceAccountBindings(localSetup))) bindConnectionAccount(nextStore, id, account);
+    const nextRuntime = buildRuntime(nextEnv, { store: nextStore, allowSimulation: false, extraConnectors: currentSources() });
     if (!nextRuntime.report.google.ok) throw new Error('The Google connection is incomplete.');
     nextRuntime.report.workspaceId = `google:${createHash('sha256').update(credentials.accountId).digest('hex').slice(0, 24)}`;
     const nextGoogle = nextRuntime.connectors.find(connector => connector.id === 'google');
@@ -324,10 +334,18 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
     await monitoring.whenIdle(); await engine.whenSettled();
     if (shutdownPromise) throw new Error('The application is shutting down.');
-    for (const id of Object.keys(CONNECTION_PROVIDERS)) {
-      const saved = localSetup.getConnection(id);
-      if (saved.account?.id || id === disconnected) bindConnectionAccount(store, id, saved.account?.id || null);
+    // Remove revoked local evidence before rebuilding the active sources.
+    for (const id of ['local_files', 'apple_notes']) {
+      const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
+      if (!cursor) continue;
+      const allowed = new Set((id === 'local_files' ? saved.roots : saved.folders).map(item => item.id || item.folderId));
+      const unavailable = Object.entries(cursor.documents || {}).filter(([, doc]) => !saved.scopeId || !allowed.has(doc.rootId || doc.folderId)).map(([documentId]) => ({ id: documentId, reason: 'scope_removed' }));
+      if (!unavailable.length) continue;
+      const result = nativeSnapshot({ connectorId: id, scopeId: store.state.connectionAccounts?.[id], cursor, unavailable, complete: false, baseUrl: `http://${host}:${port}` });
+      for (const event of result.events) engine.ingest(event);
+      store.mutate(state => { state.cursors[id] = result.cursor; });
     }
+    for (const [id, account] of Object.entries(sourceAccountBindings(localSetup))) if (account || store.state.connectionAccounts?.[id]) bindConnectionAccount(store, id, account);
     if (refreshSource) store.mutate(state => {
       const previous = state.cursors?.[refreshSource];
       if (refreshSource === 'github' && previous?.tracked) state.cursors[refreshSource] = { tracked: previous.tracked };
@@ -336,7 +354,7 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     });
     const nextEnv = localSetup.runtimeEnv(process.env);
     if (googleDisconnectedThisRun) for (const key of ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']) delete nextEnv[key];
-    const next = buildRuntime(nextEnv, { store, allowSimulation: false, extraConnectors: connectedSources(localSetup) });
+    const next = buildRuntime(nextEnv, { store, allowSimulation: false, extraConnectors: currentSources() });
     next.report.workspaceId = runtime.report.workspaceId || `workspace:${createHash('sha256').update(store.filename).digest('hex').slice(0, 24)}`;
     if (googleDisconnectedThisRun) next.report.google.disconnectedThisRun = true;
     runtime = next; runtimeEnv = nextEnv;
@@ -448,6 +466,34 @@ async function handleHttpRequest(req, res) {
       });
     }
     if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, engine.publicState());
+    const localDocumentRoute = url.pathname.match(/^\/api\/local-sources\/documents\/([^/]+)$/);
+    if (req.method === 'GET' && localDocumentRoute) {
+      if (workspaceChanging) return json(res, 409, { error: 'The workspace connection is being updated.' });
+      const id = decodeURIComponent(localDocumentRoute[1]), doc = store.state.documents[id];
+      const source = doc?.source;
+      if (!['local_files', 'apple_notes'].includes(source) || doc.available === false) return json(res, 404, { error: 'This local document is no longer available.' });
+      const grant = localSetup.getNativeSource(source), known = store.state.cursors?.[source]?.documents?.[id];
+      if (!grant.scopeId || !id.startsWith(`${source}:${grant.scopeId}:`) || !known) return json(res, 404, { error: 'This local document is outside the connected scope.' });
+      try {
+        let content;
+        if (source === 'local_files') {
+          const selected = grant.roots.find(item => item.id === known.rootId);
+          if (!selected || canonicalLocalRoot(selected.path) !== selected.path) throw new Error('Unavailable');
+          content = readScopedText(selected.path, known.relative);
+        } else {
+          const selected = grant.folders.find(item => item.folderId === known.folderId && item.accountId === known.accountId);
+          if (!selected) throw new Error('Unavailable');
+          const result = await nativeBridge.readNotes([selected], {});
+          const record = result.records?.find(item => item.providerId === known.providerId && item.folderId === selected.folderId && item.accountId === selected.accountId);
+          if (!record || record.unavailable || typeof record.content !== 'string') throw new Error('Unavailable');
+          content = record.content;
+        }
+        // Recheck after a native read: disconnecting while it ran revokes delivery.
+        if (workspaceChanging || localSetup.getNativeSource(source).scopeId !== grant.scopeId || !runtime.connectors.some(item => item.id === source && item.live)) throw new Error('Unavailable');
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; frame-ancestors 'none'" });
+        return res.end(content);
+      } catch { return json(res, 409, { error: 'The selected document could not be read. Check its current access and observe again.', code: 'LOCAL_DOCUMENT_UNAVAILABLE' }); }
+    }
     if (req.method === 'GET' && url.pathname === '/api/metrics') return json(res, 200, engine.publicState().metrics);
     if (req.method === 'GET' && url.pathname === '/api/trace') {
       // One task's whole decision chain, or the most recent entries overall.
@@ -495,6 +541,54 @@ async function handleHttpRequest(req, res) {
       if (origin && origin !== `http://${host}:${port}` && origin !== `http://localhost:${port}`) return json(res, 403, { error: 'Cross-origin requests are not allowed' });
       const body = await readJsonBody(req, httpBodyLimits);
       if (workspaceChanging) return json(res, 409, { error: 'Your workspace connection is being updated. Try again shortly.', code: 'WORKSPACE_CONNECTING' });
+
+      const nativeRoute = url.pathname.match(/^\/api\/setup\/local-sources\/(local_files|apple_notes)\/(select|forget|remove-scope)$/);
+      if (nativeRoute) {
+        const [, id, operation] = nativeRoute;
+        if (demoMode) return json(res, 409, { error: 'Open your persistent workspace to connect local sources.', code: 'DISPOSABLE_DEMO' });
+        if (nativeSelectionBusy || modelSetupBusy) return json(res, 409, { error: 'A source selection or model update is already open.', code: 'SOURCE_BUSY' });
+        if (id === 'apple_notes' && nativeBridge.platform !== 'darwin') return json(res, 400, { error: 'Apple Notes requires macOS.', code: 'UNSUPPORTED' });
+        const controller = new AbortController();
+        const abandon = () => { if (!res.writableFinished) controller.abort(); };
+        res.once('close', abandon); nativeSelectionBusy = true;
+        try {
+          const saved = localSetup.getNativeSource(id);
+          if (operation === 'forget') localSetup.clearNativeSource(id);
+          else if (operation === 'remove-scope') {
+            const key = id === 'local_files' ? 'roots' : 'folders';
+            const index = typeof body?.id === 'string' ? saved[key].findIndex(item => publicScopeId(item) === body.id) : body?.index;
+            if (!Number.isInteger(index) || index < 0 || index >= saved[key].length) return json(res, 400, { error: 'This folder is no longer connected. Refresh and select a current folder.' });
+            saved[key].splice(index, 1);
+            if (saved[key].length) localSetup.saveNativeSource(id, saved); else localSetup.clearNativeSource(id);
+          } else {
+            let selection;
+            if (id === 'local_files') {
+              const paths = typeof body?.path === 'string' ? [body.path] : (await nativeBridge.chooseFiles({ locale: body?.locale, signal: controller.signal })).paths;
+              if (!Array.isArray(paths) || !paths.length || paths.length > 10) return json(res, 400, { error: 'Select up to 10 specific local folders.' });
+              let roots;
+              try { roots = mergeLocalRoots(saved.roots, paths, randomUUID); }
+              catch { return json(res, 400, { error: 'Select up to 10 accessible folders using their absolute paths.', code: 'FOLDER_UNAVAILABLE' }); }
+              selection = { ...saved, scopeId: saved.scopeId || randomUUID(), roots };
+            } else {
+              const picked = await nativeBridge.chooseNotes({ locale: body?.locale, signal: controller.signal });
+              if (!Array.isArray(picked.folders) || !picked.folders.length) throw new NativeAccessError('NO_FOLDERS');
+              const folders = [...saved.folders];
+              for (const folder of picked.folders) if (!folders.some(item => item.folderId === folder.folderId && item.accountId === folder.accountId)) folders.push(folder);
+              if (folders.length > 20) return json(res, 400, { error: 'Select up to 20 Notes folders.' });
+              selection = { ...saved, scopeId: saved.scopeId || randomUUID(), folders };
+            }
+            if (controller.signal.aborted) return;
+            if (workspaceChanging || modelSetupBusy) return json(res, 409, { error: 'The workspace changed while the picker was open. Select the folder again.', code: 'WORKSPACE_CONNECTING' });
+            localSetup.saveNativeSource(id, selection);
+          }
+          await applyConnectedSources({ request: req, initialRead: operation === 'select', observe: operation === 'select' ? body?.observe !== false : localSetup.get().monitoring.enabled });
+          return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (error instanceof NativeAccessError) return json(res, error.code === 'CANCELLED' ? 200 : 400, { cancelled: error.code === 'CANCELLED', error: error.code === 'CANCELLED' ? undefined : error.message, code: error.code, setup: publicSetupStatus() });
+          return json(res, 500, { error: 'The local source could not be applied. Check its connection and retry.', code: 'LOCAL_SOURCE_FAILED' });
+        } finally { nativeSelectionBusy = false; res.off('close', abandon); }
+      }
 
       const connectionRoute = url.pathname.match(/^\/api\/setup\/connections\/(github|microsoft)\/(authorize|cancel|activate|forget)$/);
       if (connectionRoute) {

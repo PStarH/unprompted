@@ -1,9 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { startConnectedFixture } from './fixtures/connected-workspace.mjs';
 import { waitFor } from './fixtures/google-workspace.mjs';
 const get = (base, path) => fetch(base + path).then(response => response.json());
 const post = (base, path, data = {}) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data) });
+
+test('a real selected local folder works without cloud credentials and revoking it removes current evidence', { timeout: 20_000 }, async t => {
+  const fixture = await startConnectedFixture(); t.after(fixture.close);
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-local-api-'))); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const selected = path.join(dir, 'Work'); fs.mkdirSync(selected); fs.writeFileSync(path.join(selected, 'plan.md'), '- [ ] Call the supplier\nActual local context');
+  const connect = await post(fixture.base, '/api/setup/local-sources/local_files/select', { path: selected, observe: true });
+  assert.equal(connect.status, 200, await connect.clone().text());
+  const setup = await waitFor(() => get(fixture.base, '/api/setup'), value => value.localSources.local_files.counts.tasks === 1 && !value.monitoring.running, 8000);
+  assert.equal(setup.localSources.local_files.connected, true); assert.equal(setup.localSources.local_files.counts.documents, 1);
+  assert.equal(setup.localSources.local_files.scopes[0].label, 'Work'); assert.doesNotMatch(JSON.stringify(setup), new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const state = await get(fixture.base, '/api/state'), task = state.tasks.find(item => item.kind === 'observed_task');
+  assert.equal(task.subject, 'Call the supplier'); assert.equal(state.inbox.length, 0); assert.equal(state.outbox.length, 0);
+  const original = await fetch(task.externalSource.url); assert.equal(original.status, 200); assert.match(original.headers.get('content-type'), /text\/plain/); assert.match(await original.text(), /Actual local context/);
+  fs.writeFileSync(path.join(selected, 'plan.md'), '- [x] Call the supplier\nActual local context');
+  const sync = await post(fixture.base, '/api/connectors/sync'); assert.equal(sync.status, 200);
+  const closed = await get(fixture.base, '/api/state'); assert.equal(closed.tasks.find(item => item.id === task.id).status, 'cancelled'); assert.equal(closed.tasks.filter(item => item.status === 'completed').length, 0);
+  const removed = await post(fixture.base, '/api/setup/local-sources/local_files/remove-scope', { index: 0 }); assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal((await get(fixture.base, '/api/setup')).localSources.local_files.connected, false);
+  assert.equal((await get(fixture.base, '/api/state')).documents.find(item => item.id === task.documentId).available, false);
+  assert.equal((await fetch(task.externalSource.url)).status, 404);
+});
 
 test('official device flows activate GitHub and Outlook together, preserve read-only routing, and disconnect independently', { timeout: 25_000 }, async t => {
   const fixture = await startConnectedFixture(); t.after(fixture.close);

@@ -10,6 +10,8 @@ failed read and disconnect one account while keeping the others connected.
 
 | Source | Sign-in | What is observed | External actions |
 | --- | --- | --- | --- |
+| Local folders | Native folder picker on macOS; absolute path on other systems | Markdown and UTF-8 text inside selected folders; explicit text to-dos | Read-only |
+| Apple Notes | macOS Automation consent, then choose Notes folders | Plain text in selected folders; locked notes and attachments excluded | Read-only; real-account acceptance pending |
 | Google Workspace | Desktop OAuth with PKCE | Gmail, Google Docs and changes | Off by default; Gmail sending and Docs editing need explicit additional authorization |
 | GitHub | Official device OAuth | Issues assigned to the signed-in user in repositories accessible to the app | Read-only; no comments, edits, closing, labels or merges |
 | Microsoft Outlook | Official device OAuth | Inbox email, initially the last 3 days, then Graph delta updates | Read-only; no mail sending or editing |
@@ -25,6 +27,32 @@ An empty read is a valid result. GitHub assignments become native issue tasks
 with their repository, number, URL and assignee. A source closure stops tracking;
 it does not create a verified agent completion. Outlook requests enter the same
 source-grounded request/evidence pipeline as other email.
+
+## Local sources
+
+Choose **Local folders** or **Apple Notes** in Connections. Neither needs an
+OAuth client, token or Full Disk Access. On macOS, Notes may ask the host
+application (such as Terminal when running `npm start`) for Automation access.
+Change that grant in System Settings → Privacy & Security → Automation.
+Only folders selected in Unprompted are observed. Removing a folder immediately
+invalidates its current evidence and stops its source tasks; historical records
+remain in the private workspace. Read contexts can be sent to the model you
+configured, just like connected cloud context.
+
+Local files support `.md`, `.markdown` and `.txt`; hidden files, symlinks and
+binary files are excluded. Observation is bounded to 500 text files, 512 KiB per
+file and 4 MiB of changed text per pass. Notes is bounded to 500 notes and
+512 Ki characters per note. Larger or inaccessible scopes produce a visible
+partial-read error; select a narrower folder. Only the first 100 explicit
+text to-dos in a document are tracked. `- [ ]`, `TODO:` and `☐` are supported;
+ordinary prose stays context. The Notes scripting interface does not expose
+native checklist completion reliably, so native Notes checkboxes are not a
+supported completion signal. A checked or removed source to-do never counts
+as verified agent completion.
+
+The Notes bridge uses Apple's public scripting interface, not the private Notes
+database. Automated tests use injected Notes responses; a real Notes account and
+the signed distribution's permission prompt still need manual acceptance.
 
 ## Provision applications once for a distribution
 

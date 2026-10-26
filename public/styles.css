@@ -1,4 +1,13 @@
 @charset "UTF-8";
+.native-scope-list { list-style:none; padding:0; margin:12px 0; }
+.native-scope-list li { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); }
+.native-scope-list li span { overflow-wrap:anywhere; min-width:0; }
+.native-scope-list button { min-width:40px; min-height:40px; }
+.home-connections > summary { cursor:pointer; padding:12px 0; color:var(--green); font-size:13px; }
+.inline-task-controls { border-top:1px solid var(--line); padding:16px 22px; }
+.inline-task-controls .task-management { margin:0; }
+.inline-task-controls .task-review { margin-top:12px; }
+.source-connection-card [data-native-path-form] { width:100%; }
 .model-onboarding { border: 1px solid var(--line); border-radius: 12px; padding: 24px; margin-bottom: 24px; background: var(--surface); }
 .model-onboarding[hidden] { display: none; }
 .model-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 18px; }

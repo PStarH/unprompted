@@ -1,5 +1,20 @@
 # Local API
 
+Local source endpoints are read only with respect to source content:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/setup/local-sources/{local_files,apple_notes}/select` | Open the macOS picker; optional `locale` and `observe` (default true). Local files also accept an absolute `path` for other platforms. |
+| POST | `/api/setup/local-sources/{local_files,apple_notes}/remove-scope` | Remove the selected folder by `id` from the current public setup response; invalidate its evidence. |
+| POST | `/api/setup/local-sources/{local_files,apple_notes}/forget` | Disconnect this local source and invalidate its evidence. |
+| GET | `/api/local-sources/documents/:id` | Revalidate scope and return fresh source text as `text/plain`; unavailable or revoked documents fail explicitly. |
+
+`GET /api/setup` includes `localSources`: platform availability, selected folder
+labels, connection health and document/task counts. Absolute folder paths and
+Notes account identifiers stay in the private setup store. Picker cancellation
+does not change saved grants. Notes has no write operation. Its native macOS
+permission flow still requires real-account acceptance.
+
 [← Documentation](README.md)
 
 Base URL: the address printed by the launcher, normally `http://127.0.0.1:4173`.

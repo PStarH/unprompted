@@ -1,5 +1,11 @@
 import { normalizeEvent, validateEventPayload } from './events.js';
 
+/** Native provider identifiers and filesystem metadata stay in private cursors. */
+export function publicSourceCursors(cursors = {}) {
+  return Object.fromEntries(Object.entries(cursors).map(([id, cursor]) => [id,
+    ['local_files', 'apple_notes'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || {}).length, counts: cursor.counts || {} } : cursor]));
+}
+
 /**
  * Connector boundary.
  *
@@ -87,7 +93,7 @@ export class CursorStore {
 
   describe() {
     return {
-      cursors: this.store.state.cursors || {},
+      cursors: publicSourceCursors(this.store.state.cursors),
       status: this.store.state.connectorStatus || {}
     };
   }

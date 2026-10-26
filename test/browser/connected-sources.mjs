@@ -16,14 +16,16 @@ for (const [url, id] of [['https://github.com/login/device', 'github'], ['https:
 try {
   await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
   const home = page.locator('#connectionCatalogHome'); await home.waitFor();
-  assert.equal(await home.locator('[data-connection-card]').count(), 3);
+  assert.equal(await home.locator('[data-connection-card]').count(), 5);
+  assert.equal(await home.locator('[data-native-source=local_files]').count(), 1);
+  assert.equal(await home.locator('[data-native-source=apple_notes]').count(), 1);
   assert.equal(await page.locator('#workspaceOnboarding').isVisible(), false, 'Google setup does not block selecting another source');
   const model = page.locator('[data-model-form]');
   await model.locator('[name="baseUrl"]').fill(fixture.endpoint + '/model/v1');
   await model.locator('[name="model"]').fill('scripted-model');
   await model.locator('button[type="submit"]').click();
   await page.waitForFunction(() => document.querySelector('#modelOnboarding')?.textContent.includes('Model connected'));
-  record('first-use-offers-three-real-sources-without-forcing-google-setup');
+  record('first-use-offers-local-and-cloud-sources-without-forcing-google-setup');
   for (const id of ['github', 'microsoft']) {
     const opened = page.waitForEvent('popup'); await home.locator(`[data-select-connection="${id}"]`).click();
     const popup = await opened; await popup.locator('#grant').waitFor();
@@ -52,7 +54,8 @@ try {
   assert.equal(await observation.locator('[name="enabled"]').isChecked(), false);
   record('one-observation-control-pauses-all-sources-and-survives-reload');
   fixture.controls.githubClosed = true;
-  await observation.locator('[data-sync-now]').click();
+  const synced = page.waitForResponse(response => response.url().endsWith('/api/connectors/sync') && response.request().method() === 'POST');
+  await observation.locator('[data-sync-now]').click(); await (await synced).finished();
   const state = await (await page.request.get(fixture.base + '/api/state')).json();
   assert.equal(state.tasks.find(task => task.kind === 'external_issue').status, 'cancelled');
   assert.equal(state.tasks.find(task => task.kind === 'external_issue').action, null);

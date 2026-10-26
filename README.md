@@ -36,7 +36,10 @@ connect model**. The application sends one real structured inference using
 invented content. Only a successful response saves the key locally and activates
 the connection; no restart is required. Keys are not returned by the API.
 
-Next, choose **Google Workspace, GitHub or Microsoft Outlook on the same page**.
+Next, choose **Local folders, Apple Notes (macOS), Google Workspace, GitHub or Microsoft Outlook on the same page**.
+Local folders need no cloud account: select a folder containing Markdown or text.
+Apple Notes uses macOS Automation permission and selected folders; its real-account
+acceptance is still pending. [Source permissions and limits →](docs/CONNECTORS.md)
 GitHub and Outlook use official device OAuth: copy a short code, confirm it on
 the provider’s page, and the connection activates automatically. No access-token
 pasting is needed. A source can be disconnected without stopping the others.
@@ -108,6 +111,7 @@ is separate from model-backed operation.
 | --- | --- |
 | Local demo | Self-starting scenario, evidence checks, prepared reply, simulated approval and verification |
 | Context | Email requests, native assigned issues, document updates and run records |
+| Local sources | Selected Markdown/text folders and a macOS Notes scripting bridge; read-only, explicit to-dos and document evidence |
 | GitHub | Device OAuth, assigned-issue discovery, update/reassignment tracking; read-only |
 | Microsoft Outlook | Device OAuth, inbox delta sync and model-backed request discovery; read-only |
 | Google Workspace | Optional Gmail / Drive / Docs connector; read-only setup is documented |
