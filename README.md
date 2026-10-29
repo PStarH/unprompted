@@ -20,7 +20,17 @@ Email and documents are the first sources; the product stays a general work part
 
 ## Start your agent
 
-You need **Node.js 20+** and your model provider's API endpoint, model ID and
+**macOS app (Apple silicon):** download `Unprompted-0.3.0-macos-arm64.zip` from
+[Releases](https://github.com/PStarH/unprompted/releases), check it with
+`shasum -a 256 -c Unprompted-0.3.0-macos-arm64.zip.sha256`, unzip, and move
+`Unprompted.app` to `/Applications`. The app is ad-hoc signed, not notarized:
+on first launch, right-click it and choose **Open**, or run
+`xattr -dr com.apple.quarantine /Applications/Unprompted.app`. Run it from an
+APFS disk; launching from an exFAT external drive can hang. Your data is kept in
+`~/Library/Application Support/Unprompted` and is not removed when you delete
+the app.
+
+**From source (any platform):** you need **Node.js 20+** and your model provider's API endpoint, model ID and
 API key. Local compatible models can work without a key. Install the locked
 dependencies once; no frontend build step is needed.
 
@@ -110,7 +120,7 @@ An email arrives → a commitment is discovered → evidence changes
 
 Unprompted is a **local first version** for one person, one machine, and one process. Connect your model, then one source. Local folders need no cloud account and start reading immediately. Sending and document edits stay off until you opt in. An empty result stays empty. If the model fails, that work stays unready.
 
-There is no signed download. Use Node.js 20 or newer, `npm ci --include=optional`, and `npm start`, then open the local address. Google, GitHub, Outlook, Slack, and Notion need an OAuth client you register, or a build that already includes one. This repository does not ship a public client ID. The macOS app builder produces an unsigned local package, not a notarized release. Read-only use on a live account is for you to confirm; it is not claimed as production-validated here.
+The macOS download is ad-hoc signed, not notarized by Apple. On other platforms, use Node.js 20 or newer, `npm ci --include=optional`, and `npm start`, then open the local address. Google, GitHub, Outlook, Slack, and Notion need an OAuth client you register, or a build that already includes one. This repository does not ship a public client ID. Read-only use on a live account is for you to confirm; it is not claimed as production-validated here.
 
 | Area | Current scope |
 | --- | --- |

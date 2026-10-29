@@ -13,7 +13,16 @@ Unprompted 关注你授权的工作与生活环境中的变化，关联已有工
 
 ## 开始使用 Agent
 
-需要 **Node.js 20+**，以及模型提供方的接口地址、模型 ID 和 API Key。
+**macOS 应用（Apple 芯片）：** 从 [Releases](https://github.com/PStarH/unprompted/releases)
+下载 `Unprompted-0.3.0-macos-arm64.zip`，用
+`shasum -a 256 -c Unprompted-0.3.0-macos-arm64.zip.sha256` 校验，解压后把
+`Unprompted.app` 移到 `/Applications`。应用为 ad-hoc 自签名，未经 Apple 公证：
+首次打开请右键选择**打开**，或运行
+`xattr -dr com.apple.quarantine /Applications/Unprompted.app`。请在 APFS 磁盘上运行；
+从 exFAT 外接盘启动可能卡住。数据保存在 `~/Library/Application Support/Unprompted`，
+删除应用不会删除数据。
+
+**从源码运行（任意平台）：** 需要 **Node.js 20+**，以及模型提供方的接口地址、模型 ID 和 API Key。
 本地兼容模型可以不填 Key。首次安装锁定依赖，无需构建前端。
 
 ```sh
@@ -80,7 +89,7 @@ Google 授权后会切换到该账号独立的真实工作区，并立即读取�
 
 这是**本地初版**：一个人、一台电脑、一个进程。先连接你的模型，再连接一个来源。本地文件夹不需要云账号，连接后立即开始读取。发送和修改文档默认关闭，直到你另行开启。没有结果就显示为空。模型失败时，这项工作保持未就绪。
 
-没有签名安装包。需要 Node.js 20 或更高版本，执行 `npm ci --include=optional` 和 `npm start`，然后打开本机地址。Google、GitHub、Outlook、Slack 和 Notion 需要注册 OAuth 客户端，或使用已经带上客户端的发行版。这个仓库不附带公开的 Client ID。macOS 应用构建器只生成未签名的本地包，不是经过公证的下载版。真实账号使用仍需验收，这里不把它说成已经完成生产验证。
+macOS 安装包为 ad-hoc 自签名，未经 Apple 公证。其他平台需要 Node.js 20 或更高版本，执行 `npm ci --include=optional` 和 `npm start`，然后打开本机地址。Google、GitHub、Outlook、Slack 和 Notion 需要注册 OAuth 客户端，或使用已经带上客户端的发行版。这个仓库不附带公开的 Client ID。真实账号使用仍需验收，这里不把它说成已经完成生产验证。
 
 | 模块 | 当前范围 |
 | --- | --- |
