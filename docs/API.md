@@ -37,6 +37,66 @@ checks permissions and current evidence on every action.
 | GET | `/api/trace?taskId=TASK_ID` | One task's decision chain; omit `taskId` for recent entries |
 | GET | `/documents/DOCUMENT_ID` | Built-in simulated document view |
 
+## Durable workspace (v0.3)
+
+These operations require the persistent SQLite workspace (409
+`DURABLE_WORKSPACE_REQUIRED` in the explicit JSON demonstration). All write
+operations use the same origin checks as task actions. None grants connector
+permissions.
+
+| Method | Path | Purpose / body |
+| --- | --- | --- |
+| GET | `/api/durable` | Actual SQLite configuration, bounded job metadata, retrieval/context/attention/learning settings |
+| GET | `/api/artifact-grants` | Authorized creation destinations, account availability and existing grants |
+| POST | `/api/artifact-grants` | `connectorId` (`google`, `microsoft`, `notion`, `apple_notes`), exact `targetId`, `confirmed:true`, optional `project`, `taskId`, `automatic` (default true); authorizes creation in that account and destination |
+| POST | `/api/artifact-grants/:id/revoke` | Stop future creation under that grant; dispatched outcomes still require reconciliation |
+| POST | `/api/tasks/:id/artifacts` | `grantId`, exact `reviewToken`, plus `title` and `body` for pages/notes; mail uses the task's prepared reply. Returns 202 and a queued request, not a verified write |
+| GET | `/api/situations` | Bounded list of active evidence-backed Situations; tasks expose their `situationId` when linked |
+| POST | `/api/situations/:id/probe` | Schedule a scoped Gmail reply check with `sourceEventId` and `scheduledAt`. The source must already be linked to the Situation; existing connector permissions and fresh sync coverage still apply. |
+| GET | `/api/policies` | Explicit rules, status and optimistic `version` |
+| POST | `/api/policies` | `instruction`, typed `predicate`, structured `effect`, optional scope/identities. Updates require `id` and `expectedVersion`. Unresolved identities remain draft. |
+| POST | `/api/policies/:id/disable` | `expectedVersion`; invalidate Hot Context atomically |
+| POST | `/api/instructions` | `text`, `kind:"fact"` (default) or `"policy"`, scope. A policy can supply `policy:{predicate,effect}` and confirmed `identities`. Ambiguity returns `needs_clarification`. |
+| GET | `/api/experiences` | Structured Experiences, provenance-based status and evidence counts |
+| POST | `/api/experiences/:id/trial` | Existing `taskId`, exact `reviewToken`; prepare a scoped format trial for review, without sending |
+| POST | `/api/experiences/:id/promote` | `expectedRevision`; still requires narrow low-risk eligibility and independent verified successes |
+| POST | `/api/experiences/:id/retire` | `expectedRevision`; stop retrieving this Experience |
+| POST | `/api/experiences/policy` | `expectedVersion` plus bounded learning thresholds or `autoPromote` (default false) |
+| POST | `/api/experiences/attention-policy` | Bounded interruption limits and `quietHours:{startHour,endHour,timeZone}` (or null) |
+| POST | `/api/experiences/context-policy` | Bounded clustering windows, event and association limits |
+| POST | `/api/experiences/retrieval-policy` | `expectedVersion` and bounded retrieval ranking weights |
+| POST | `/api/experiences/replay` | Up to 100 labeled `cases:[{query,relevantIds,scopes?}]`, optional options; retain aggregate offline metrics, execute no tools |
+| POST | `/api/tasks/:id/draft` | `body`, exact `reviewToken`; capture a minimal artifact revision and invalidate old review tokens |
+| POST | `/api/executions/:id/reconcile` | Read the provider to resolve a prior intent; an inconclusive result never enables a write |
+| POST | `/api/privacy/preview` | `kind`, `id`; return dependency counts before deletion |
+| POST | `/api/privacy/forget` | `kind`, `id`; cancel dependent work and remove derived local data, return `{deletion,state}` |
+| POST | `/api/privacy/requests/:id/retry` | Recheck remaining backup/WAL/external retention without reintroducing deleted content |
+| GET | `/api/privacy/requests/:id` | Actual deletion state and remaining retention/reconciliation |
+
+Supported Forget roots are event, situation, task, memory, task_memory, task_direction,
+experience, artifact, policy, feedback and outcome. The request reports local
+cleanup, WAL reader delays, registered backup deletion and pending external
+operations. It does not erase independent connector/model-provider copies.
+“Do not do this again” belongs in an explicit suppression policy, separately
+from Forget. See [the requirements](PRD.md) and [storage boundaries](ARCHITECTURE.md#storage-and-process-model).
+
+## External MCP client
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/mcp` | Redacted server status, discovered tools and read grants |
+| POST | `/api/mcp/import` | Save and connect `config` (`mcpServers` object or JSON string); optional `allowDeclaredRead` grants server-declared read tools |
+| POST | `/api/mcp/servers/:id` | Update `enabled`, `allowDeclaredRead`, `readTools` (array), `reconnect:true` or `remove:true` |
+
+`GET /api/setup` also includes `mcp`. Import/update returns `{mcp, setup}`.
+A failed connection is saved with `status:"failed"` and a sanitized `lastError`,
+so the user can correct or reconnect it. Invalid config fails with 400; concurrent
+MCP updates fail with 409. Secrets are never echoed. These routes are refused in
+the disposable demo. Configuration is private to the local installation, while
+call records (`task.mcpCalls`, at most 20) belong to the task's workspace.
+Native follow-up tasks may also retain a bounded `mcpInvestigation` suggestion;
+it is not verified completion or an external action. Known write tools are blocked.
+
 ## Model connection
 
 `POST /api/setup/model` accepts `baseUrl`, `model`, optional `apiKey`, and
@@ -113,6 +173,23 @@ Use this for a one-off live pull when automatic polling is disabled. Review
 connector status and errors; a failure must not be interpreted as a simulated
 success. [Connector setup →](CONNECTORS.md)
 
+`POST /api/connectors/google/search` performs an explicit, read-only search in
+the currently connected Google account. For example:
+
+```sh
+curl -X POST http://127.0.0.1:4173/api/connectors/google/search \
+  -H "Content-Type: application/json" \
+  -d '{"source":"gmail","query":"subject:proposal","limit":20}'
+```
+
+Use `source: "drive"` to search Google Doc names. `limit` is 1–25; provide the
+returned `nextPageToken` as `pageToken` to continue the same search. Gmail
+results contain message text capped at 16,000 characters; Docs results contain
+metadata and an official Docs link. Results are untrusted content, are not
+automatically ingested, and are not available as unrestricted model tools.
+Search is refused if the source is disconnected, its read scope is disabled, or
+authorization changes while the request is being prepared.
+
 ## Actions and feedback
 
 Use an ID from `/api/state` in place of `TASK_ID`; URL-encode it when constructing
@@ -133,6 +210,11 @@ and receive-timeout failures 408. See [transport limits](CONFIGURATION.md#http-t
 | POST | `/api/tasks/TASK_ID/retry` | Retry only when confirmed absence permits it |
 | POST | `/api/tasks/TASK_ID/cancel` | Close a waiting request |
 | POST | `/api/tasks/TASK_ID/reopen` | Restore a declined or closed request and recheck current evidence, without sending |
+| POST | `/api/tasks/TASK_ID/pause` | Persist a user pause; stop task assessment and new external execution |
+| POST | `/api/tasks/TASK_ID/resume` | Resume and recheck current sources without sending |
+| POST | `/api/tasks/TASK_ID/direction` | Add user requirements with `{text,scope}`; scope is `task` (default) or `similar` |
+| POST | `/api/tasks/TASK_ID/undo-direction` | Undo the current direction with `{id}` and recheck current evidence |
+| POST | `/api/memories/MEMORY_ID` | Edit, delete or restore scoped memory with `{operation,text?,version}`; version is its `updatedAt` |
 | POST | `/api/tasks/TASK_ID/feedback` | Record `label` and optional `reason` |
 | POST | `/api/tasks/TASK_ID/wait` | Persist `kind` (`document`, `reply`, `time`), optional `dependsOn`, `until`, `interruptOnRisk` |
 | POST | `/api/tasks/TASK_ID/patch/prepare` | Prepare source-backed changes; `{}` selects current evidence automatically |
@@ -144,6 +226,20 @@ and receive-timeout failures 408. See [transport limits](CONFIGURATION.md#http-t
 Feedback labels include `useful`, `not_useful`, `wrong_association`, `noise`, and
 `awaiting_evidence`. Direct API approval cannot bypass shadow mode, invalid task
 states, stale evidence, or authorization checks.
+
+Task directions are persisted user requirements, not permission grants. They
+invalidate the prepared reply and saved verification plan, then recheck evidence.
+They supplement the original content requirements; they do not silently replace
+the sender, recipient, source identity or original requirements. Unsupported
+requirements stay unresolved. Corrected tasks require review before a subsequent
+send, including when a standing authorization exists. Tasks with actions already
+started cannot be paused or rewritten; verify their result first.
+
+`similar` explicitly saves memory for the exact project and deliverable. Task-only
+directions do not create memory. An explicit task direction takes precedence over
+shared memory for that task. Deleting memory removes its future matching effect;
+the originating task keeps its explicit task-local direction. `/api/state` exposes
+these entries as `taskMemories`. Memory writes require the current version.
 
 Scoped corrections use the same feedback route with `label` set to `not_mine`,
 `duplicate`, `already_handled`, or `wrong_association`, plus an exact-match
@@ -220,7 +316,8 @@ URL are exposed only during an active authorization.
 `verifying`, `connected`, `cancelled`, `expired`, `failed` or `activation_failed`.
 The server owns provider polling intervals and refresh-token rotation.
 
-GitHub uses native `issue.updated` events. Tasks with `kind: external_issue`
-retain repository, number, assignee and source state. Closing/reassigning an
-issue stops tracking; it never creates an agent action receipt. Outlook uses
+GitHub uses native `issue.updated`, `pull_request.updated`, `content.changed`
+and `workflow.updated` events. Tasks keep the repository and source state.
+Closing or withdrawing the source stops tracking; it never creates an agent
+action receipt. Commits keep changed paths and omit file patches. Outlook uses
 account-namespaced email events and cannot select Gmail as its delivery adapter.

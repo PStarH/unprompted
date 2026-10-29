@@ -51,6 +51,13 @@ focused and cover the boundary you modify.
 | A reproducible scenario | [Scenario fixtures](../eval/scenarios.js), [test map](TESTING.md#where-to-add-a-test) | Expected silence, incomplete evidence and failure recovery as well as success |
 | An interaction improvement | [Interface](../public/app.js), [browser checks](TESTING.md#browser-interaction-contract) | Preserve drafts, focus and review identity during updates |
 
+The workspace uses [one presentation model](../public/workspace-model.js) and
+[shared task controls](../public/workspace.js) for Field, Index, Lanes, Spotlight
+and Pulse. Field is the initial view; an explicit selection is remembered on this
+device. Context can suggest Lanes but never replaces a user's choice. Layout and
+appearance preferences do not grant permissions. [Task guidance](../src/task-guidance.js)
+owns persisted pause, requirement correction, undo and exact-scope memory.
+
 [Contracts](../src/contracts.js) describe the artifacts crossing the layers and
 provide `validateContract` / `validateAll`. [Architecture](ARCHITECTURE.md)
 explains their wiring; [the API reference](API.md) covers HTTP consumers.
@@ -69,3 +76,25 @@ and explain the result. English and Chinese are both welcome.
 
 See [Contributing](../CONTRIBUTING.md) for review and licensing, and
 [Security](../SECURITY.md) for private vulnerability reports.
+
+## Durable services
+
+The shipped server uses `SqliteStore` and `DurableRuntime` from `src/durable/`.
+`JsonStore` examples remain isolated compatibility examples, without the v0.3
+durability/privacy contract. See [the baseline](PRD.md) and
+[executable schema](../src/durable/schema.sql).
+
+Add a FeatureRegistry key through reviewed source changes, never model output.
+Connector events must be durably admitted before a cursor advances. Task-run
+updates use input, state, lease and privacy versions. A new write adapter must
+pass independent authorization, enter the ledger's `beforeDispatch` boundary
+immediately before its side effect, declare conditional/idempotency support, and
+provide independent verification/reconciliation. An unresolved result retains its
+resource claim. A local token alone cannot fence a remote provider.
+
+Experiences need structured effects and live source IDs. Record available hints
+as `predicate_matched`; use `planner_declared` or `user_confirmed` only with actual
+attribution evidence. Do not grant permissions, generalize scope during compilation,
+or turn silence into approval. `HybridMemory` accepts an in-process encoder with
+`id`, `dimensions`, `semantic` and `encode(text)`; async encoders use `putAsync` /
+`searchAsync`, whose privacy/context guards reject late results.

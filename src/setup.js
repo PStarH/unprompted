@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
-import { connectionProvider, validPublicClientId } from './connection-catalog.js';
+import { connectionProvider, validClientSecret, validPublicClientId } from './connection-catalog.js';
 import { readRegularFile } from './local-files.js';
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
@@ -32,13 +32,13 @@ const DEFAULT_STATE = Object.freeze({
     refreshToken: null,
     accountEmail: null,
     accountId: null,
-    scopes: { readGmail: true, readDrive: true, docsWrite: false, gmailSend: false },
+    scopes: { readGmail: true, readDrive: true, docsWrite: false, gmailSend: false, gmailDrafts: false },
     grantedScopes: [],
     authorizationState: 'not_configured',
     authorizedAt: null,
     lastValidation: null
   },
-  permissions: { allowExternalWrites: false }
+  permissions: { allowExternalWrites: false, allowArtifactWrites: false }
 });
 
 export function defaultSetupDirectory(env = process.env, platform = process.platform, home = os.homedir()) {
@@ -62,7 +62,7 @@ function normalise(state) {
   result.version = 1;
   result.restartRequired = state.restartRequired === true;
   if (state.model && typeof state.model === 'object') result.model = { ...result.model, ...state.model };
-  for (const id of ['github', 'microsoft']) {
+  for (const id of ['github', 'microsoft', 'slack', 'notion']) {
     const saved = state.connections?.[id];
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.connections[id] = { ...saved };
   }
@@ -90,11 +90,12 @@ function normalise(state) {
       readGmail: state.google.scopes.readGmail === true,
       readDrive: state.google.scopes.readDrive === true,
       docsWrite: state.google.scopes.docsWrite === true,
-      gmailSend: state.google.scopes.gmailSend === true
+      gmailSend: state.google.scopes.gmailSend === true,
+      gmailDrafts: state.google.scopes.gmailDrafts === true
     };
   }
   if (Array.isArray(state.google?.grantedScopes)) result.google.grantedScopes = state.google.grantedScopes.filter(value => typeof value === 'string');
-  if (state.permissions && typeof state.permissions === 'object') result.permissions = { allowExternalWrites: state.permissions.allowExternalWrites === true };
+  if (state.permissions && typeof state.permissions === 'object') result.permissions = { allowExternalWrites: state.permissions.allowExternalWrites === true, allowArtifactWrites: state.permissions.allowArtifactWrites === true };
   return result;
 }
 
@@ -166,23 +167,42 @@ export class LocalSetupStore {
     return this.#write({ ...state, connections: { ...state.connections, [id]: next } });
   }
 
+  saveConnectionCredentials(id, { clientId, clientSecret } = {}) {
+    const provider = connectionProvider(id);
+    if (provider.flow !== 'code') throw new Error('This provider does not use a client secret.');
+    if (!validPublicClientId(clientId) || !validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
+    const state = this.get();
+    const old = state.connections[id] || {};
+    if (old.clientId === clientId && old.clientSecret === clientSecret) return state;
+    return this.#write({ ...state, connections: { ...state.connections, [id]: { clientId, clientSecret } } });
+  }
+
   saveConnectionAuthorization(id, authorization) {
-    connectionProvider(id);
+    const provider = connectionProvider(id);
     if (!validText(authorization?.accessToken, 32_000) || !validText(authorization?.account?.id, 512)
       || !validText(authorization?.account?.label, 320)) throw new Error('A verified provider account is required.');
     const state = this.get();
-    return this.#write({ ...state, connections: { ...state.connections, [id]: {
+    const previous = state.connections[id] || {};
+    const record = {
       clientId: authorization.clientId, accessToken: authorization.accessToken,
       refreshToken: authorization.refreshToken || null, expiresAt: authorization.expiresAt || null,
       account: { ...authorization.account }, scopes: Array.isArray(authorization.scopes) ? authorization.scopes : [],
-      authorizedAt: state.connections[id]?.account?.id === authorization.account.id ? state.connections[id].authorizedAt : new Date().toISOString()
-    } } });
+      authorizedAt: previous.account?.id === authorization.account.id ? previous.authorizedAt : new Date().toISOString()
+    };
+    if (provider.flow === 'code') {
+      const clientSecret = authorization.clientSecret || previous.clientSecret;
+      if (!validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
+      record.clientSecret = clientSecret;
+    }
+    return this.#write({ ...state, connections: { ...state.connections, [id]: record } });
   }
 
   clearConnection(id) {
-    connectionProvider(id);
-    const state = this.get(), clientId = state.connections[id]?.clientId;
-    return this.#write({ ...state, connections: { ...state.connections, [id]: clientId ? { clientId } : {} } });
+    const provider = connectionProvider(id);
+    const state = this.get(), saved = state.connections[id] || {}, kept = {};
+    if (saved.clientId) kept.clientId = saved.clientId;
+    if (provider.flow === 'code' && validClientSecret(saved.clientSecret)) kept.clientSecret = saved.clientSecret;
+    return this.#write({ ...state, connections: { ...state.connections, [id]: kept } });
   }
 
   setMonitoring(patch) {
@@ -224,7 +244,7 @@ export class LocalSetupStore {
       ...current,
       restartRequired: current.restartRequired || (changed && Boolean(current.google.refreshToken)),
       google,
-      permissions: changed ? { allowExternalWrites: false } : current.permissions
+      permissions: changed ? { ...current.permissions, allowExternalWrites: false } : current.permissions
     });
   }
 
@@ -236,7 +256,7 @@ export class LocalSetupStore {
     return this.#write({
       ...current,
       restartRequired: true,
-      permissions: accountChanged ? { allowExternalWrites: false } : current.permissions,
+      permissions: accountChanged ? { ...current.permissions, allowExternalWrites: false } : current.permissions,
       google: {
         ...current.google,
         refreshToken,
@@ -265,9 +285,11 @@ export class LocalSetupStore {
       readGmail: scopes.readGmail === true,
       readDrive: scopes.readDrive === true,
       docsWrite: scopes.docsWrite === true,
-      gmailSend: scopes.gmailSend === true
+      gmailSend: scopes.gmailSend === true,
+      gmailDrafts: scopes.gmailDrafts === true
     };
     if (selected.docsWrite && !selected.readDrive) throw new Error('Google Docs write access also requires Drive read access for version checks.');
+    if (selected.gmailDrafts && !selected.readGmail) throw new Error('Gmail draft access also requires Gmail read access for verification.');
     if (!Object.values(selected).some(Boolean)) throw new Error('Choose at least one Google access scope.');
     const current = this.get();
     const changed = JSON.stringify(selected) !== JSON.stringify(current.google.scopes || {});
@@ -284,7 +306,8 @@ export class LocalSetupStore {
       scopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
       scopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
       scopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
-      scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null
+      scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
+      scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
     ].filter(Boolean).some(scope => !granted.has(scope));
     if (missingGrant) {
       return this.#write({
@@ -305,14 +328,20 @@ export class LocalSetupStore {
       || (current.google.scopes?.docsWrite && granted.has('https://www.googleapis.com/auth/documents')))) {
       throw new Error('Request the Gmail send or Google Docs write scope before enabling external writes.');
     }
-    return this.#write({ ...current, restartRequired: current.restartRequired || current.permissions.allowExternalWrites !== enabled, permissions: { allowExternalWrites: enabled } });
+    return this.#write({ ...current, restartRequired: current.restartRequired || current.permissions.allowExternalWrites !== enabled, permissions: { ...current.permissions, allowExternalWrites: enabled } });
+  }
+
+  setArtifactWrites(enabled) {
+    if (typeof enabled !== 'boolean') throw new Error('allowArtifactWrites must be a boolean.');
+    const current = this.get();
+    return this.#write({ ...current, permissions: { ...current.permissions, allowArtifactWrites: enabled } });
   }
 
   clearGoogle({ keepClient = false } = {}) {
     const current = this.get();
     const hadLocalAuthorization = Boolean(current.google.clientId || current.google.refreshToken || current.permissions.allowExternalWrites);
     return this.#write({ ...current, restartRequired: current.restartRequired || hadLocalAuthorization,
-      google: { ...clone(DEFAULT_STATE.google), ...(keepClient ? { clientId: current.google.clientId, clientSecret: current.google.clientSecret, authorizationState: 'client_saved' } : {}) }, permissions: { allowExternalWrites: false } });
+      google: { ...clone(DEFAULT_STATE.google), ...(keepClient ? { clientId: current.google.clientId, clientSecret: current.google.clientSecret, authorizationState: 'client_saved' } : {}) }, permissions: { ...current.permissions, allowExternalWrites: false } });
   }
 
   clearRestartRequired() {
@@ -354,6 +383,8 @@ export class LocalSetupStore {
     const requestedDriveRead = scopes.readDrive === true && granted.has('https://www.googleapis.com/auth/drive.readonly');
     const requestedSend = scopes.gmailSend === true && granted.has('https://www.googleapis.com/auth/gmail.send');
     const requestedDocsWrite = scopes.docsWrite === true && granted.has('https://www.googleapis.com/auth/documents');
+    const requestedDrafts = scopes.gmailDrafts === true && granted.has('https://www.googleapis.com/auth/gmail.compose');
+    const permissions = this.get().permissions;
     if (output.GOOGLE_READ_GMAIL == null && google.refreshToken && !env.GOOGLE_REFRESH_TOKEN) output.GOOGLE_READ_GMAIL = requestedGmailRead ? 'true' : 'false';
     if (output.GOOGLE_READ_DRIVE == null && google.refreshToken && !env.GOOGLE_REFRESH_TOKEN) output.GOOGLE_READ_DRIVE = requestedDriveRead ? 'true' : 'false';
     if (output.GOOGLE_SEND_ENABLED == null && google.refreshToken && !env.GOOGLE_REFRESH_TOKEN) output.GOOGLE_SEND_ENABLED = requestedSend ? 'true' : 'false';
@@ -365,9 +396,12 @@ export class LocalSetupStore {
       output.GOOGLE_READ_DRIVE = requestedDriveRead && env.GOOGLE_READ_DRIVE !== 'false' ? 'true' : 'false';
       output.GOOGLE_SEND_ENABLED = requestedSend && env.GOOGLE_SEND_ENABLED !== 'false' ? 'true' : 'false';
       output.GOOGLE_DOCS_WRITE_ENABLED = requestedDocsWrite && env.GOOGLE_DOCS_WRITE_ENABLED !== 'false' ? 'true' : 'false';
-      output.UNPROMPTED_SHADOW_MODE = env.UNPROMPTED_SHADOW_MODE === 'true' || !this.get().permissions.allowExternalWrites ? 'true' : 'false';
+      output.GOOGLE_SEND_ENABLED = permissions.allowExternalWrites ? output.GOOGLE_SEND_ENABLED : 'false';
+      output.GOOGLE_DOCS_WRITE_ENABLED = permissions.allowExternalWrites ? output.GOOGLE_DOCS_WRITE_ENABLED : 'false';
+      output.GOOGLE_DRAFTS_ENABLED = requestedDrafts && env.GOOGLE_DRAFTS_ENABLED !== 'false' ? 'true' : 'false';
+      output.UNPROMPTED_SHADOW_MODE = env.UNPROMPTED_SHADOW_MODE === 'true' || !(permissions.allowExternalWrites || permissions.allowArtifactWrites) ? 'true' : 'false';
     }
-    if (output.UNPROMPTED_SHADOW_MODE == null) output.UNPROMPTED_SHADOW_MODE = !env.GOOGLE_REFRESH_TOKEN && this.get().permissions.allowExternalWrites ? 'false' : 'true';
+    if (output.UNPROMPTED_SHADOW_MODE == null) output.UNPROMPTED_SHADOW_MODE = !env.GOOGLE_REFRESH_TOKEN && (permissions.allowExternalWrites || permissions.allowArtifactWrites) ? 'false' : 'true';
     return output;
   }
 
@@ -386,7 +420,8 @@ export class LocalSetupStore {
       selectedScopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
       selectedScopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
       selectedScopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
-      selectedScopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null
+      selectedScopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
+      selectedScopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
     ].filter(Boolean).some(scope => !granted.has(scope));
     const connectionStatus = missingRequestedScope ? 'reauthorization_required'
       : hasRefreshToken && restartRequired ? 'restart_required'
@@ -497,7 +532,8 @@ export class GoogleOAuthSetup {
       scopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
       scopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
       scopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
-      scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null
+      scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
+      scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
     ].filter(Boolean);
     authUri.searchParams.set('scope', scopeUris.join(' '));
     authUri.searchParams.set('access_type', 'offline');
@@ -572,7 +608,8 @@ export class GoogleOAuthSetup {
         active.scopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
         active.scopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
         active.scopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
-        active.scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null
+        active.scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
+        active.scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
       ].filter(Boolean);
       if (requiredScopes.some(scope => !granted.has(scope))) {
         throw new Error('Google did not grant every requested scope.');

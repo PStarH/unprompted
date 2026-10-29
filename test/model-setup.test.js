@@ -144,7 +144,7 @@ test('the persistent source launcher starts unconfigured without playing the rul
     const timeout = setTimeout(() => child.kill('SIGKILL'), 5000);
     assert.equal(await exited, 0); clearTimeout(timeout);
   }
-  assert.equal(fs.existsSync(path.join(directory, 'state.json')), true);
+  assert.equal(fs.existsSync(path.join(directory, 'state.sqlite')), true);
 });
 
 test('a keyless saved model never inherits an orphaned environment key for another provider', t => {

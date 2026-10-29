@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { startGoogleFixture, connectGoogle, waitFor } from './fixtures/google-workspace.mjs';
 import { googleWorkspacePath } from '../src/setup.js';
+import { sqliteWorkspacePath } from '../src/durable/store.js';
 
 const get = (base, route) => fetch(base + route).then(response => response.json());
 const post = (base, route, body = {}) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -53,8 +54,8 @@ test('account switches isolate work and restart restores the same account worksp
   assert.notEqual(first.runtime.workspaceId, second.runtime.workspaceId);
   assert.ok(second.inbox.every(message => message.id.includes('reader-b')));
   assert.ok(second.documents.every(document => document.id.includes('reader-b')));
-  assert.ok(fs.existsSync(googleWorkspacePath(directory, 'reader-a')));
-  assert.ok(fs.existsSync(googleWorkspacePath(directory, 'reader-b')));
+  assert.ok(fs.existsSync(sqliteWorkspacePath(googleWorkspacePath(directory, 'reader-a'))));
+  assert.ok(fs.existsSync(sqliteWorkspacePath(googleWorkspacePath(directory, 'reader-b'))));
   assert.equal((await post(fixture.base, '/api/setup/google/forget')).status, 200);
   assert.equal((await get(fixture.base, '/api/setup')).google.hasClient, true, 'reconnecting does not require creating another Cloud client');
   await connectGoogle(fixture.base, { account: 'reader-a' }); await settled(fixture);

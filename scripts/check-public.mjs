@@ -10,14 +10,15 @@ export function publicFiles() {
   const names = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8' });
   return [...new Set(names.split('\0').filter(Boolean))].filter(name => fs.existsSync(path.join(root, name))).sort();
 }
-const privatePath = /(^|\/)(?:\.internal|outputs|data|films|\.workbuddy-ai|\.browser-cache|node_modules|\.aws|\.codex|\.agents)(\/|$)|^docs\/evidence\//;
+const privatePath = /(^|\/)(?:\.internal|outputs|data|films|\.workbuddy-ai|\.freebuff|\.browser-cache|node_modules|\.aws|\.codex|\.agents)(\/|$)|^docs\/evidence\/|^docs\/(?:ACTIVATION-.*|CONNECTOR-AUDIT|RELIABILITY-AUDIT)\.md$/;
 const credentialPath = /(^|\/)(?:\.env(?:\..*)?|client_secret[^/]*\.json|credentials\.json|token\.json|[^/]+\.(?:pem|key))$/i;
 const secrets = [
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/, /ya29\.[A-Za-z0-9_-]{15,}/,
   /1\/\/[A-Za-z0-9_-]{25,}/, /gh[pousr]_[A-Za-z0-9]{20,}/,
-  /github_pat_[A-Za-z0-9_]{30,}/, /sk-[A-Za-z0-9_-]{25,}/,
+  /github_pat_[A-Za-z0-9_]{30,}/, /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{25,}/,
   /GOCSPX-[A-Za-z0-9_-]{20,}/, /AIza[A-Za-z0-9_-]{30,}/
 ];
+export const hasCredentialSignature = line => secrets.some(pattern => pattern.test(line));
 const internalProse = /private\s+during\s+the\s+value-validation\s+phase|contributions\s+are\s+by\s+invitation|仓库.{0,12}保持私有|竞品|竞争背景|北极星指标|\/Users\/|\/Volumes\/WorkDisk\//i;
 function slug(heading) {
   return heading.toLowerCase().replace(/`([^`]+)`/g, '$1').replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/ /g, '-');
@@ -35,7 +36,7 @@ export function checkPublic(files = publicFiles()) {
     if (data.includes(0)) continue;
     const content = data.toString('utf8');
     content.split('\n').forEach((line, i) => {
-      if (secrets.some(pattern => pattern.test(line))) findings.push(`${name}:${i + 1}: credential signature`);
+      if (hasCredentialSignature(line)) findings.push(`${name}:${i + 1}: credential signature`);
       if (/\.(?:md|ya?ml)$/.test(name) && internalProse.test(line)) findings.push(`${name}:${i + 1}: internal document content or machine path`);
     });
     if (!name.endsWith('.md')) continue;

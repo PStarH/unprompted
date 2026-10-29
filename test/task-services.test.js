@@ -624,3 +624,26 @@ test('outcomes separate user-recognized real delivery from simulated work and ke
   assert.equal(metrics.management.activeDays.last7, 1, 'only the explicit approval counts as user activity');
   assert.match(metrics.value.note, /measure time saved/);
 });
+
+test('JSON compatibility document writes recheck pause and write revocation at the final provider boundary', async t => {
+  for (const change of ['pause', 'shadow']) await t.test(change, async () => {
+    const store = makeStore(); seedTask(store);
+    const engine = new WorkEngine(store, { reasoner: new NullReasoner() });
+    const services = engine.taskServices;
+    const patch = await services.prepareDocumentPatch('request:m1', {
+      provider: 'local', changes: [{ type: 'append', text: 'Pilot result: 12.5%', source: { kind: 'email', id: 'm1', quote: 'Pilot result: 12.5%' } }]
+    });
+    const before = store.state.documents.target.content;
+    let enter, release;
+    const entered = new Promise(resolve => { enter = resolve; }), gate = new Promise(resolve => { release = resolve; });
+    const apply = services.localDocumentProvider.apply.bind(services.localDocumentProvider);
+    services.localDocumentProvider.apply = async input => { enter(); await gate; return apply(input); };
+    const pending = services.applyDocumentPatch('request:m1', { patchId: patch.id, authorization: authorization(patch) });
+    await entered;
+    if (change === 'pause') store.mutate(state => { state.tasks['request:m1'].control = { paused: true }; });
+    else engine.policy.shadow = true;
+    release();
+    await assert.rejects(pending, /paused|no longer active|read-only/i);
+    assert.equal(store.state.documents.target.content, before);
+  });
+});

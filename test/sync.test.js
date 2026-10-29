@@ -7,7 +7,7 @@ import { JsonStore } from '../src/store.js';
 import { WorkEngine } from '../src/engine.js';
 import { SimulatedMailProvider } from '../src/providers.js';
 import { ConnectorSync } from '../src/connectors/sync.js';
-import { CursorStore, Connector } from '../src/connectors/connector.js';
+import { CursorStore, Connector, publicSourceCursors } from '../src/connectors/connector.js';
 import { normalizeEvent } from '../src/connectors/events.js';
 
 /**
@@ -51,6 +51,28 @@ const liveEmail = (id, subject = 'Northstar proposal — experiment results') =>
     id, from: 'alex@example.test', subject,
     body: 'Please update the Northstar project proposal with the latest experiment results and send it by Friday.'
   }
+});
+
+test('malformed pulls and ingestion failures never advance the cursor or stop other connectors', async () => {
+  const statuses = {}, committed = {};
+  const cursors = { get: () => null, set: (id, cursor) => { committed[id] = cursor; }, status: (id, status) => { statuses[id] = status; }, describe: () => ({ status: statuses }) };
+  const connectors = [new ScriptedConnector('bad', [{ cursor: { page: 1 } }]),
+    new ScriptedConnector('broken', [{ events: [{ id: 'bad' }], cursor: { page: 2 } }]),
+    new ScriptedConnector('good', [{ events: [], cursor: { page: 3 } }])];
+  const sync = new ConnectorSync({ connectors, cursors, engine: { ingest: () => { throw new Error('private data'); } } });
+  const result = await sync.run();
+  assert.deepEqual(result.results.map(item => item.failed), [true, true, false]);
+  assert.deepEqual(committed, { good: { page: 3 } });
+  assert.equal(statuses.bad.ok, false);
+  assert.equal(statuses.broken.ok, false);
+  assert.doesNotMatch(statuses.broken.lastError, /private data/);
+});
+
+test('public sync status does not disclose provider continuation tokens or account identifiers', () => {
+  const result = publicSourceCursors({ microsoft: { resumeUrl: 'https://graph.microsoft.com/delta?token=private', recovering: true },
+    github: { accountId: 'private-account', since: 'private-cursor' }, google: { gmail: { historyId: 'private-history' } } });
+  assert.deepEqual(result.microsoft, { checkpointStored: true, recovering: true });
+  assert.doesNotMatch(JSON.stringify(result), /private/);
 });
 
 test('a pull that never returns times out, commits no cursor, and allows the next run', async () => {
@@ -223,4 +245,31 @@ test('connector status and cursors survive a restart', async () => {
   await new ConnectorSync({ connectors: [nextConnector], cursors: new CursorStore(restored), engine: resumed }).run();
   assert.deepEqual(nextConnector.calls, [{ gmail: { historyId: 'h7' } }]);
   assert.equal(store.state.events.length, 1);
+});
+
+test('a bounded sync follows pages immediately and commits only ingested pages', async () => {
+  const { store, engine, cursors } = setup();
+  const connector = new ScriptedConnector('google', [
+    { events: [liveEmail('p1')], cursor: { page: 1 }, hasMore: true },
+    { events: [liveEmail('p2')], cursor: { page: 2 }, hasMore: true },
+    new Error('page unavailable')
+  ]);
+  const sync = new ConnectorSync({ connectors: [connector], cursors, engine });
+  const result = (await sync.run()).results[0];
+  assert.equal(result.failed, true); assert.equal(result.ingested, 2); assert.equal(result.pages, 3);
+  assert.deepEqual(cursors.get('google'), { page: 2 });
+  assert.equal(store.state.events.length, 2);
+});
+
+test('a sync caps page bursts and refuses a non-advancing continuation', async () => {
+  const { engine, cursors } = setup();
+  const connector = new ScriptedConnector('google', Array.from({ length: 6 }, (_, index) => ({ events: [], cursor: { page: index + 1 }, hasMore: true })));
+  const sync = new ConnectorSync({ connectors: [connector], cursors, engine });
+  const first = (await sync.run()).results[0];
+  assert.equal(first.pages, 5); assert.equal(first.hasMore, true); assert.equal(connector.calls.length, 5);
+  assert.deepEqual(cursors.get('google'), { page: 5 });
+  connector.pulls = [{ events: [], cursor: { page: 5 }, hasMore: true }];
+  const second = (await sync.run()).results[0];
+  assert.equal(second.failed, true); assert.match(second.error, /did not advance/);
+  assert.deepEqual(cursors.get('google'), { page: 5 });
 });

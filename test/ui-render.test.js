@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { visibleAttentionItems } from '../public/ux-state.js';
+import { taskState, workspaceConnections } from '../public/workspace-model.js';
 import { copy as localizedCopy, ui as localizedUi, setLocale } from '../public/i18n.js';
 
 /**
@@ -217,8 +218,9 @@ const agentPresentation = new Function('needsTaskDecision', 'attentionItems',
   `${extractFunction('agentPresentation')}\nreturn agentPresentation;`)(needsTaskDecision, attentionItems);
 const taskPresentation = new Function(`${extractFunction('taskPresentation')}\nreturn taskPresentation;`)();
 const taskTitle = new Function(`${extractFunction('taskTitle')}\nreturn taskTitle;`)();
-const renderTaskAction = new Function('escapeHtml', 'runtime', 'taskTitle',
-  `${extractFunction('renderTaskAction')}\nreturn renderTaskAction;`)(escapeHtml, runtimeState, taskTitle);
+const renderTaskAction = new Function('escapeHtml', 'runtime', 'taskTitle', 'taskState', 'workspaceConnections', 'setupState', 'nativeCopy', 'safeLink', 'current', 'sourceFollow',
+  `${extractFunction('renderTaskAction')}\nreturn renderTaskAction;`)(escapeHtml, runtimeState, taskTitle, taskState, workspaceConnections, null, zh => zh, value => value, { durable: true },
+  task => task?.kind === 'observed_task' || ['external_issue', 'external_review', 'external_change', 'external_check'].includes(task?.kind));
 
 test('an offline workspace never claims to be idle, working or up to date', () => {
   for (const status of ['completed', 'investigating', 'waiting_for_information', 'ready_for_approval']) {
@@ -268,18 +270,24 @@ test('the compact draft escapes sender content, scope and task identifiers', () 
   assert.match(html, /&lt;iframe/);
 });
 
+test('a stale user-edited draft remains visible for explicit review without an approval action', () => {
+  const html = renderTaskAction({ id: 'request:one', status: 'waiting_for_information', userDraftStale: true, inputVersion: 1, processedInputVersion: 1, assessment: { complete: true }, draft: { userEdited: true, body: '<script>user text</script>' } });
+  assert.match(html, /data-edit-draft="request:one"/);
+  assert.match(html, /&lt;script&gt;user text&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>|data-action="approve"/);
+});
+
 test('first-use empty states follow the selected language across overview, activity, context and agreements', () => {
   const cases = [
     ['renderEvents', []], ['renderHistory', []],
     ['renderContext', { documents: [], runs: [] }],
-    ['renderRecent', { tasks: [], events: [] }],
     ['renderGrants', { calibrations: [] }], ['renderConnectors', undefined]
   ];
   try {
     for (const locale of ['en', 'zh-CN']) {
       setLocale(locale);
       for (const [name, input] of cases) {
-        const render = new Function('copy', 'ui', 'runtime', `${extractRawFunction(name)}\nreturn ${name};`)(localizedCopy, localizedUi, null);
+        const render = new Function('copy', 'ui', 'runtime', 'escapeHtml', `${extractRawFunction(name)}\nreturn ${name};`)(localizedCopy, localizedUi, null, escapeHtml);
         const html = render(input);
         if (locale === 'en') assert.doesNotMatch(html, /\p{Script=Han}/u, name);
         else assert.match(html, /\p{Script=Han}/u, name);

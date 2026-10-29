@@ -102,6 +102,36 @@ test('Outlook consumes Graph delta links with account-namespaced IDs and refuses
   assert.equal(calls.length, 1, 'an untrusted continuation must never receive the bearer token');
 });
 
+test('Outlook resets an expired delta cursor without losing the outage window or trusting Location', async () => {
+  const calls = [];
+  const connector = new OutlookConnector({ auth, account: { id: 'ms-user', label: 'reader@example.test' }, fetchImpl: async url => {
+    calls.push(url);
+    if (calls.length === 1) return new Response(JSON.stringify({ error: { code: 'syncStateNotFound', message: 'private' } }), { status: 410, headers: { location: 'https://attacker.test/steal' } });
+    return json({ value: [], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$skiptoken=next' });
+  } });
+  const result = await connector.pull({ cursor: { resumeUrl: 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=expired' } });
+  assert.equal(calls.length, 2);
+  assert.equal(new URL(calls[1]).origin, 'https://graph.microsoft.com');
+  assert.equal(new URL(calls[1]).searchParams.has('$filter'), false);
+  assert.equal(result.cursor.recovering, true);
+  assert.match(result.cursor.resumeUrl, /skiptoken=next/);
+});
+
+test('Outlook preserves the old checkpoint on failed recovery and does not reset permission failures', async () => {
+  let calls = 0;
+  const connector = new OutlookConnector({ auth, account: { id: 'ms-user', label: 'reader@example.test' }, fetchImpl: async () => {
+    calls++;
+    return new Response('{}', { status: calls === 1 ? 410 : 503 });
+  } });
+  const cursor = { resumeUrl: 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=expired' };
+  await assert.rejects(connector.pull({ cursor }), error => error.status === 503);
+  assert.equal(calls, 2);
+  calls = 0;
+  connector.fetchImpl = async () => { calls++; return new Response('{}', { status: 403 }); };
+  await assert.rejects(connector.pull({ cursor }), error => error.status === 403);
+  assert.equal(calls, 1);
+});
+
 test('an Outlook request cannot be delivered through a writable Gmail adapter', t => {
   const state = store(t); let gmailWrites = 0;
   const gmail = { kind: 'gmail', live: true, canSend: true, send() { gmailWrites++; }, lookup: () => ({ status: 'not_found' }) };
@@ -112,6 +142,46 @@ test('an Outlook request cannot be delivered through a writable Gmail adapter', 
   const task = Object.values(state.state.tasks)[0]; assert.equal(task.status, 'ready_for_approval'); assert.equal(task.draft.providerKind, 'outlook');
   assert.equal(task.draft.canSend, false); assert.throws(() => engine.approve(task.id), /not enabled for this source/);
   assert.equal(gmailWrites, 0); assert.equal(task.action, null);
+});
+
+test('GitHub pull request reviews, repository commits and Actions runs become native work without copying file patches', async t => {
+  const sha = 'a'.repeat(40);
+  const pull = { id: 90, number: 3, title: 'Review the retry policy', body: 'Please review the change.', state: 'open', updated_at: '2026-10-26T12:00:00Z',
+    user: { login: 'author' }, repository_url: 'https://api.github.com/repos/team/project', html_url: 'https://github.com/team/project/pull/3' };
+  const commit = { sha, html_url: `https://github.com/team/project/commit/${sha}`, commit: { message: 'Adjust the retry boundary\n\nMore context', author: { date: '2026-10-26T12:05:00Z' } },
+    author: { login: 'author' }, files: [{ filename: 'src/retry.js', patch: 'SECRET_PATCH_DO_NOT_STORE' }] };
+  const run = { id: 55, name: 'CI', status: 'completed', conclusion: 'failure', updated_at: '2026-10-26T12:06:00Z', head_branch: 'main', event: 'push',
+    triggering_actor: { login: 'author' }, html_url: 'https://github.com/team/project/actions/runs/55' };
+  const connector = new GitHubConnector({ auth, account, now: () => Date.parse('2026-10-26T13:00:00Z'), fetchImpl: async url => {
+    if (url.includes('/search/issues')) return json(url.includes('review-requested') ? { items: [pull] } : { items: [] });
+    if (url.includes('/user/repos')) return json([{ full_name: 'team/project', default_branch: 'main', pushed_at: '2026-10-26T12:05:00Z' }]);
+    if (url.includes(`/commits/${sha}`)) return json(commit);
+    if (url.includes('/commits?')) return json([commit]);
+    if (url.includes('/actions/runs')) return json({ workflow_runs: [run] });
+    if (url.includes('/issues?')) return json([]);
+    return json(pull);
+  } });
+  const result = await connector.pull();
+  const kinds = Object.fromEntries(result.events.map(event => [event.type, event]));
+  assert.equal(kinds['pull_request.updated'].payload.work, 'review_requested');
+  assert.equal(kinds['content.changed'].payload.files[0], 'src/retry.js');
+  assert.equal(kinds['workflow.updated'].payload.conclusion, 'failure');
+  assert.doesNotMatch(JSON.stringify(result.events), /SECRET_PATCH_DO_NOT_STORE/);
+  const state = store(t); bindConnectionAccount(state, 'github', '123'); const engine = new WorkEngine(state);
+  for (const event of result.events) engine.ingest(event);
+  const tasks = Object.values(state.state.tasks);
+  assert.deepEqual(tasks.map(task => task.kind).sort(), ['external_change', 'external_check', 'external_review']);
+  assert.equal(tasks.every(task => task.status === 'waiting_for_information' && task.action == null), true);
+  assert.equal(state.state.outbox.length, 0);
+  connector.fetchImpl = async url => {
+    if (url.includes('/search/issues') || url.includes('/user/repos')) return json(url.includes('/search/') ? { items: [] } : []);
+    if (url.includes('/issues?')) return json([]);
+    return json({ ...pull, state: 'closed', merged: true, updated_at: '2026-10-26T12:30:00Z', requested_reviewers: [] });
+  };
+  const withdrawn = await connector.pull({ cursor: result.cursor });
+  engine.ingest(withdrawn.events.find(event => event.type === 'pull_request.updated'));
+  assert.equal(state.state.tasks['review:github:123:pr:90'].status, 'cancelled');
+  assert.equal(state.state.tasks['change:github:123:commit:' + sha].status, 'waiting_for_information');
 });
 
 test('temporarily unavailable GitHub issues are rechecked and restored even when the provider revision did not change', async t => {

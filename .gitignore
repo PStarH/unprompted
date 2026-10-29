@@ -2,6 +2,7 @@
 .internal/
 outputs/
 .workbuddy-ai/
+.freebuff/
 docs/evidence/
 films/
 
@@ -15,6 +16,11 @@ credentials.json
 token.json
 google-oauth-client.json
 connector-clients.json
+mcp.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.migration-backup
 *.pem
 *.key
 

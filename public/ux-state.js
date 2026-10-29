@@ -80,6 +80,7 @@ export function visibleAttentionItems(state) {
     }
   }
   return (state.notifications || []).filter(item => {
+    if (['pending', 'digest'].includes(item.deliveryState)) return false;
     const task = tasks.find(candidate => candidate.id === item.taskId);
     if (item.kind === 'blocker' && task?.status === 'blocked' && task.action) return false;
     // Stalled prompts are normal-priority reminders. Keep deadline, risk and

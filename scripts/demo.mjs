@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const usage = 'Usage: npm run demo -- [--port 4173] [--no-open | --open]';
+const usage = 'Usage: npm run demo -- [--port 4173] [--memories 0..100] [--no-open | --open]';
 
 export async function chooseDemoPort(preferred, { strict = false, attempts = 20 } = {}) {
   for (let offset = 0; offset < (strict ? 1 : attempts); offset++) {
@@ -32,8 +32,14 @@ export async function launchDemo(args = process.argv.slice(2)) {
   let requested = process.env.PORT || '4173';
   let strict = Boolean(process.env.PORT);
   let openBrowser = Boolean(process.stdin.isTTY && !process.env.CI);
+  let memoryCount = 0;
   for (let index = 0; index < args.length; index++) {
     if (args[index] === '--port' && args[index + 1]) { requested = args[++index]; strict = true; }
+    else if (args[index] === '--memories' && args[index + 1]) {
+      const value = args[++index];
+      if (!/^\d+$/.test(value) || Number(value) > 100) throw new Error(usage);
+      memoryCount = Number(value);
+    }
     else if (args[index] === '--no-open') openBrowser = false;
     else if (args[index] === '--open') openBrowser = true;
     else throw new Error(usage);
@@ -49,7 +55,7 @@ export async function launchDemo(args = process.argv.slice(2)) {
     UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'),
     UNPROMPTED_STATE_FILE: path.join(directory, 'state.json'),
     UNPROMPTED_SHADOW_MODE: 'false', UNPROMPTED_FORCE_SIMULATION: 'true',
-    UNPROMPTED_SYNC_INTERVAL_MS: '0'
+    UNPROMPTED_SYNC_INTERVAL_MS: '0', UNPROMPTED_DEMO_MEMORY_COUNT: String(memoryCount)
   });
   console.log('\nStarting a fresh Unprompted demo…');
   if (port !== Number(requested)) console.log(`Port ${requested} is busy; using ${port}.`);
@@ -89,6 +95,7 @@ export async function launchDemo(args = process.argv.slice(2)) {
       console.log('Review the reply → Send simulated reply → See the verified result.');
       console.log('中文界面：查看回复 → 发送模拟回复 → 查看核验结果。');
       console.log('Nothing goes to real contacts. This temporary workspace is removed on exit.');
+      if (memoryCount) console.log(`Memory preview includes ${memoryCount} clearly labeled sample memories.`);
       console.log('Ctrl+C to stop. Your own workspace: npm start\n');
       if (openBrowser) {
         const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';

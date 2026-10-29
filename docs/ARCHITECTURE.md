@@ -3,9 +3,10 @@
 [← Documentation](README.md)
 
 Unprompted turns a change in an authorized environment into justified work.
-The implementation is a small Node.js application with a local JSON store and a
-browser interface. Its deterministic demo requires no installed packages. Pi
-Agent Core and its model layer are pinned optional runtime dependencies.
+The implementation is a small Node.js application with SQLite, FTS5 and a browser
+interface. `better-sqlite3` is a pinned required dependency; Pi Agent Core, its
+model layer and the official MCP client are pinned optional dependencies.
+The explicit rule-only demo retains its JSON store. See the [v0.3 baseline](PRD.md).
 
 ## Follow one piece of work
 
@@ -32,6 +33,7 @@ after a verified action result.
 | Commitment lifecycle | Relate trusted thread messages, retain request revisions, invalidate withdrawn work | `src/commitments.js`, `src/engine.js` |
 | Task services | Persist waits, corrections, owned follow-ups and versioned document patches | `src/task-services.js`, `src/task-management.js`, `src/document-delivery.js` |
 | Local setup and observation | Private OAuth configuration, continuous sync, process state | `src/setup.js`, `src/monitoring.js` |
+| External tools | Private MCP configuration, owned stdio/HTTP/SSE connections, read grants and bounded model/tool loop | `src/mcp.js`, `src/tool-loop.js` |
 | Verification and attention | Reconcile results, raise decisions, update metrics | `src/verification.js`, `src/notifications.js`, `src/metrics.js`, `src/trace.js` |
 
 `server.js` provides the HTTP/SSE boundary and runtime wiring. `public/` is the
@@ -89,6 +91,47 @@ Google writes require a separate provider flag, permission and Docs revision
 control. Writes are followed by readback; interrupted or uncertain writes are
 recorded without blind replay. Preparing a patch has no external effect.
 
+## MCP investigation
+
+MCP is a client integration: external services supply tools to the agent, rather
+than exposing an Unprompted MCP server. Both Standard and Pi receive scoped read
+adapters. Every invocation rechecks the current task/reasoning attempt,
+connection generation, catalog and user grant; changed tasks and revoked
+connections discard late results. MCP text is untrusted model context and an
+audited task source, separate from verified document evidence. Native issue and
+local-to-do investigations can read their source document, suggest a next step
+and queue an explicitly authorized work artifact without changing source ownership.
+
+`src/task-tools.js` supplies `read_task_source`, `search_documents` and
+`read_document` to both harnesses. Source text comes from the current task's
+message, provider assignment or explicit to-do. Documents include the direct
+source document and up to eight correlated, available documents, with user
+association corrections applied. Every read rechecks the current task lease,
+reasoning fence, activation and connector revocation. Reads are recorded in the
+execution ledger as workspace context; they do not grant write access or prove
+task completion. Pi omits duplicate built-in tools when the shared adapters are
+present. Destination grant and policy changes invalidate tool investigation
+caches, including tasks that already have a prepared reply.
+
+Native creation uses `create_work_artifact` and a separate durable write job.
+It revalidates the task, exact user grant, account, destination, context and
+payload at dispatch, then reads the provider to verify the result. A review
+policy permits investigation while refusing automatic creation. Provider-native
+withdrawals invalidate existing work even when new activation is suppressed.
+`test/connector-harness.test.js` exercises the full path through actual connector
+normalization, SQLite jobs, both model/tool loops and scripted provider readback.
+
+The Standard MCP loop allows four provider turns and eight tool calls, sharing
+the existing rate/concurrency budget; Pi retains its existing limits. At most 24
+tools are exposed per run, four MCP calls may execute concurrently, and each
+call has a 15-second deadline and a 6,000-character text result. Server catalogs
+are bounded to 64 tools and installation config to 12 servers. Enabled services
+reconnect in the background on startup. Disable/remove aborts the transport and
+closes owned processes. Credentials remain in a separate private `mcp.json`,
+excluded from public projections and task exports. Server read annotations are
+claims trusted through the user's grant, not sandbox enforcement; known writes
+are blocked and arbitrary MCP tool polling is not task discovery.
+
 ## Attention
 
 History is an activity record, not a stream of user notifications. Decisions
@@ -111,17 +154,59 @@ See [product direction](PRODUCT_DIRECTION.md) for the distinction between engine
 
 ## Storage and process model
 
-One local JSON file stores one user's workspace. Writes are atomic, with an
-exclusive process lock and stale-process recovery. Schema migrations preserve
-recorded tasks, events, and the outbox; derived assessments and unapproved
-legacy drafts may be rebuilt. Pending approved actions are reconciled.
+Normal workspaces use a private SQLite database per account, with WAL,
+foreign keys, a five-second busy timeout, `synchronous=FULL`, core secure deletion
+and FTS5 secure deletion. The lockfile pins better-sqlite3 12.11.1 / SQLite 3.53.2;
+startup verifies that runtime. All mutations use short coordinated transactions;
+async writes retry bounded SQLite contention only after rollback. No model,
+connector or file I/O runs inside a transaction.
 
-Store mutation callbacks are synchronous transactions. Failed callbacks or writes
-restore the in-memory snapshot; closed handles and stale same-process handles
-cannot commit. Reopening an old handle is required after `STORE_CONFLICT`.
-Rollback replaces `store.state`, so failed-operation callers reread current
-objects rather than retaining detached references. See the
-[testing guide](TESTING.md) for reproducible checks.
+`src/durable/schema.sql` defines the normalized inbox, tasks, jobs, runs, ledger,
+claims, memory, policies, Experiences and lineage. `SqliteStore` retains a versioned
+compatibility projection for existing engine modules. Job and task tokens reject
+stale workers. New task input invalidates old plans; checkpoints include input,
+context and privacy versions. Expired jobs enter recovery before becoming runnable.
+The JSON migration commits and verifies SQLite before retiring the original to a
+private `.migration-backup`. An uncertain legacy write is imported as `unknown`,
+with a resource claim; migration never treats it as a failed operation to resend.
+
+The ledger commits an intent before dispatch, checks authorization again at the
+actual provider boundary, and retains unresolved resource claims after timeout or
+lease expiry. Google Docs uses required revision preconditions and readback.
+Gmail search absence is insufficient to prove a timed-out send never happened;
+providers without reliable reconciliation require manual resolution. Local tokens
+cannot fence a remote service that does not validate them. The rule-only demo and
+framework `JsonStore` remain explicit compatibility paths, outside v0.3 guarantees.
+
+Memory retrieval combines FTS5 trigram search and in-process lexical n-gram vectors
+through reciprocal-rank fusion. This default is `semantic:false`; `HybridMemory`
+accepts an injected local semantic encoder with an explicit model ID and dimensions.
+Caches carry context/privacy versions. Hot Context is a projection of grounded
+memories and explicit policies, never a separate editable authority. Unknown or
+stale typed features cannot activate a predicate, including under negation.
+
+Working Context requires provider anchors or independent project-specific evidence;
+common people and topics cannot merge arbitrary clusters. Default limits are 12
+events, three candidate associations and 30-minute bursts. Attention defaults to
+three interactive interruptions/hour and ten-minute separation, with digests and
+quiet hours. Deferring a question never authorizes its action.
+
+`ExperienceService` keeps source IDs, structured effects and exact plan-step
+attribution. Candidate format guidance can prepare an existing draft under review;
+only verified, attributable independent work contributes supervised successes.
+Silence is neutral; heavy rewrites create override evidence rather than automatic
+rejection. Explicit rejection applies deterministic scoped stop-loss immediately.
+Low-risk promotion needs three independent successes by default and starts off.
+Trigger/omission hints remain advisory; promotion never changes tool permissions.
+Offline replay retains aggregate retrieval/arbitration metrics and invokes no tools.
+
+Forget increments privacy/generation fences, cancels dependent tasks and compilation,
+removes FTS/vectors/checkpoints/caches/derived records, and deletes registered local
+migration backups. It reconciles already dispatched operations, truncates WAL once
+readers release their snapshots, and reports pending retention instead of claiming
+forensic erasure. Opaque HMAC record identities prevent deleted source reingestion;
+no semantic tombstone is retained. Copies already sent to a model or connector,
+filesystem snapshots and independent backups follow their own retention policies.
 
 State contains synchronized content and evidence excerpts, so it must stay out
 of public bug reports and commits. It is not encrypted. See
@@ -151,8 +236,9 @@ they cannot authorize another send or create a verified completion. See the
 | --- | --- |
 | Event engine, correlation, evidence checks, policy, UI, persistence | Implemented with automated coverage |
 | Built-in email/document/run scenario and outbox | Simulated; exercises the real engine |
-| GitHub assigned issues and Microsoft Outlook inbox | Official device OAuth, bounded read-only sync and source-specific task handling |
-| Native local sources | Selected Markdown/text folders and macOS Notes bridge; read-only. Real Notes account and signed-app permission acceptance remain outstanding |
+| GitHub issues, pull requests, commits, Actions runs, and Microsoft Outlook inbox | Official device OAuth, bounded read-only sync and source-specific task handling |
+| Slack direct messages and Notion pages | Browser authorization code, fixed localhost redirect, bounded read-only sync |
+| Native local sources | Selected Markdown/text folders and macOS Notes. Note creation needs a separate folder grant; real Notes account and signed-app permission acceptance remain outstanding |
 | Gmail / Drive / Docs incremental connector | Implemented; read-only setup is available for local testing |
 | Gmail send and read-back | Implemented and tested against scripted transports; not a production-validation claim |
 | Primary model interpretation and legacy assist mode | Primary blocks readiness until a grounded review; assist retains deterministic fallback |
@@ -160,7 +246,7 @@ they cannot authorize another send or create a verified completion. See the
 | Scoped pre-authorization, correction history, notification dedupe | Implemented |
 | Source-backed document patches, waits, task corrections and shared dependencies | Implemented with scripted and local integration coverage |
 | Browser OAuth setup, continuous observation and local macOS app builder | Implemented; signing and real-account validation are separate |
-| General desktop control, calendar, Slack, unrestricted autonomous document rewriting | Not implemented |
+| General desktop control, calendar, unrestricted autonomous document rewriting | Not implemented |
 | Hosted service, authentication, multi-user tenancy | Not implemented |
 
 ## Known limitations
@@ -186,6 +272,23 @@ Read [Contributing](../CONTRIBUTING.md), [Testing](TESTING.md), and the
 as an example of the distinction between scripted tests and live verification.
 
 ## Interface
+
+Field, Index, Lanes, Spotlight and Pulse share the same task model, selection,
+correction composer and controls. Field is the initial overview. Explicit view
+and appearance choices are remembered locally; contextual suggestions never
+replace a user's view. On narrow screens, Field expands the selected task in
+place. Pulse groups repetitive checks and keeps one selected event.
+
+Memory, Connections and Settings are independent pages with direct hash routes.
+Task-level source excerpts and memory scope open in a native dialog; closing it
+returns focus to the same task without changing the view or losing a correction
+draft. Shared memory editing remains on the full Memory page.
+
+`public/workspace-model.js` derives presentation states from recorded execution,
+verification, pause and connection state. `src/task-guidance.js` persists user
+requirements, pause/resume, undo and exact-scope memory. Corrections invalidate
+the reply and patch review identity before evidence is checked again. Task-local
+direction takes precedence over similar-task memory and never changes permission.
 
 The browser keeps drafts, file selections, expanded details and keyboard focus
 across streamed updates. It supports English and Chinese, reduced motion and

@@ -7,7 +7,7 @@ const normaliseNewlines = value => String(value ?? '').replace(/\r\n?/g, '\n');
 const sha = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 
 export function requestSignature(task) {
-  return sha(JSON.stringify(task?.request || null));
+  return sha(JSON.stringify([task?.request || null, Number(task?.guidanceRevision) || 0]));
 }
 
 function paragraphText(paragraph) {
@@ -229,7 +229,7 @@ export class GoogleDocsWriteProvider {
     return { ...(await this.connector.auth.headers()), 'content-type': 'application/json' };
   }
 
-  async #request(documentId, { method = 'GET', body = null, suffix = '', beforeRequest = null } = {}) {
+  async #request(documentId, { method = 'GET', body = null, suffix = '', beforeRequest = null, signal = null } = {}) {
     const controller = new AbortController();
     let timer;
     let requestStarted = false;
@@ -239,13 +239,14 @@ export class GoogleDocsWriteProvider {
       if (controller.signal.aborted) throw timeoutError || new Error('Google Docs request was aborted before the HTTP call started.');
       // Run the caller's final policy/version check after asynchronous auth
       // header acquisition and immediately before handing the request to fetch.
+      signal?.throwIfAborted();
       beforeRequest?.();
       requestStarted = true;
       const response = await this.fetchImpl(`${DOCS_API}/${encodeURIComponent(documentId)}${suffix}`, {
         method,
         headers,
         ...(body ? { body: JSON.stringify(body) } : {}),
-        signal: controller.signal
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
       });
       if (!response?.ok) {
         const error = new Error(response?.status === 403
@@ -272,6 +273,7 @@ export class GoogleDocsWriteProvider {
       return await Promise.race([operation(), timeout]);
     } catch (error) {
       if (method === 'POST' && requestStarted && error.status == null) error.writeOutcomeUnknown = true;
+      if (method === 'POST' && !requestStarted) error.definitiveNoEffect = true;
       error.requestStarted ??= requestStarted;
       throw error;
     } finally {
@@ -279,11 +281,11 @@ export class GoogleDocsWriteProvider {
     }
   }
 
-  async read(document) {
+  async read(document, { signal = null } = {}) {
     if (!this.supports(document)) throw new Error('Google Docs patching requires a currently available Google document.');
     const enabled = this.validate();
     if (!enabled.ok) throw new Error(enabled.reason);
-    const remote = await this.#request(document.externalId);
+    const remote = await this.#request(document.externalId, { signal });
     return { content: googleDocumentText(remote), revisionId: remote.revisionId || null, raw: remote };
   }
 
@@ -296,10 +298,10 @@ export class GoogleDocsWriteProvider {
     return { revisionId: remote.revisionId, content: remote.content, provider: this.id, simulated: false, raw: remote.raw };
   }
 
-  async apply({ document, changes, requiredRevisionId, beforeWrite = null }) {
+  async apply({ document, changes, requiredRevisionId, beforeWrite = null, signal = null }) {
     const permitted = this.validate({ forWrite: true });
     if (!permitted.ok) throw new Error(permitted.reason);
-    const current = await this.read(document);
+    const current = await this.read(document, { signal });
     if (!requiredRevisionId || current.revisionId !== requiredRevisionId) {
       const error = new Error('The Google Doc revision changed after patch preparation; prepare and review a new patch.');
       error.stale = true;
@@ -322,7 +324,7 @@ export class GoogleDocsWriteProvider {
         method: 'POST',
         suffix: ':batchUpdate',
         body: { requests, writeControl: { requiredRevisionId } },
-        beforeRequest: beforeWrite
+        beforeRequest: beforeWrite, signal
       });
       accepted = true;
     } catch (error) {
@@ -332,7 +334,7 @@ export class GoogleDocsWriteProvider {
     }
     let readback;
     try {
-      readback = await this.read(document);
+      readback = await this.read(document, { signal });
     } catch (error) {
       error.writeOutcomeUnknown = accepted;
       throw error;

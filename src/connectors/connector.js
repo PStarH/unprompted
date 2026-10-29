@@ -3,7 +3,8 @@ import { normalizeEvent, validateEventPayload } from './events.js';
 /** Native provider identifiers and filesystem metadata stay in private cursors. */
 export function publicSourceCursors(cursors = {}) {
   return Object.fromEntries(Object.entries(cursors).map(([id, cursor]) => [id,
-    ['local_files', 'apple_notes'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || {}).length, counts: cursor.counts || {} } : cursor]));
+    ['local_files', 'apple_notes'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || {}).length, counts: cursor.counts || {} }
+      : cursor ? { checkpointStored: true, ...(cursor.recovering === true ? { recovering: true } : {}) } : null]));
 }
 
 /**
@@ -54,8 +55,15 @@ export class Connector {
 
   async verify() { return { status: 'unknown', receipt: null }; }
 
+  /** Bounded history discovery. The default is honest unavailability, not an empty mailbox. */
+  async listHistoricalEvents() { return { events: [], networkCalls: 0, unavailable: true }; }
+
+  // Enabled operations for this configured instance, never provider marketing
+  // capabilities or evidence that a remote grant is still valid.
+  capabilities() { return { read: [], search: [], pagination: [], incremental: [], observation: 'none', providerPush: false, write: [], verify: [] }; }
+
   describe() {
-    return { id: this.id, kind: this.kind, live: this.live, shadow: Boolean(this.shadow), ...this.validate() };
+    return { id: this.id, kind: this.kind, live: this.live, shadow: Boolean(this.shadow), ...this.validate(), capabilities: this.capabilities() };
   }
 }
 

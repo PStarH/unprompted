@@ -70,10 +70,28 @@ export class ConnectorSync {
   }
 
   async #syncOne(connector) {
+    // A single observation can finish a small multi-page backlog promptly. Each
+    // page commits only after its events are ingested, and the cap keeps one
+    // large source from monopolising the observation loop.
+    const pages = [], started = Date.now();
+    for (let index = 0; index < 5; index++) {
+      const result = await this.#syncPage(connector);
+      pages.push(result);
+      if (result.failed || result.partial || !result.hasMore || Date.now() - started >= 30000) break;
+    }
+    const last = pages.at(-1);
+    return { ...last, ingested: pages.reduce((count, page) => count + (page.ingested || 0), 0),
+      duplicates: pages.reduce((count, page) => count + (page.duplicates || 0), 0), pages: pages.length };
+  }
+
+  async #syncPage(connector) {
     const cursor = this.cursors.get(connector.id);
     let pulled;
     try {
       pulled = await this.#pullWithTimeout(connector, cursor);
+      if (!pulled || !Array.isArray(pulled.events) || (pulled.errors != null && !Array.isArray(pulled.errors))) {
+        throw new Error('Connector returned an invalid pull result; the cursor was not advanced.');
+      }
     } catch (error) {
       // The pull itself failed. Record it and ingest nothing.
       this.cursors.status(connector.id, {
@@ -85,22 +103,31 @@ export class ConnectorSync {
       return { connector: connector.id, ingested: 0, duplicates: 0, failed: true, error: error.message };
     }
 
-    const events = Array.isArray(pulled?.events) ? pulled.events : [];
+    const events = pulled.events;
+    const cursorChanged = Boolean(pulled?.cursor) && JSON.stringify(cursor ?? null) !== JSON.stringify(pulled.cursor);
+    if (pulled.hasMore === true && !cursorChanged) {
+      const message = 'Connector pagination did not advance; the cursor was not changed.';
+      this.cursors.status(connector.id, { ok: false, lastError: message, eventsIngested: 0, lastSyncAt: this.now() });
+      return { connector: connector.id, ingested: 0, duplicates: 0, failed: true, error: message };
+    }
     let ingested = 0;
     let duplicates = 0;
-    for (const event of events) {
+    try { for (const event of events) {
       // Ingest is synchronous and idempotent; a replayed provider event is
       // counted rather than reprocessed.
       const outcome = this.engine.ingest(event);
       if (outcome?.duplicate) duplicates += 1;
       else ingested += 1;
+    } } catch {
+      const message = 'Connector event ingestion failed; the cursor was not advanced. The next sync will replay the batch.';
+      this.cursors.status(connector.id, { ok: false, lastError: message, eventsIngested: ingested, eventsDuplicate: duplicates, lastSyncAt: this.now() });
+      return { connector: connector.id, ingested, duplicates, failed: true, error: message };
     }
 
     // The connector returns the cursor it is willing to commit to. A failed
     // scope keeps its previous value, so committing is always safe.
     const errors = Array.isArray(pulled?.errors) ? pulled.errors : [];
     const partial = Boolean(pulled?.partial) || errors.length > 0;
-    const cursorChanged = Boolean(pulled?.cursor) && JSON.stringify(cursor ?? null) !== JSON.stringify(pulled.cursor);
     if (cursorChanged) this.cursors.set(connector.id, pulled.cursor);
 
     const statusPatch = {
@@ -121,7 +148,7 @@ export class ConnectorSync {
       this.cursors.status(connector.id, { ...statusPatch, lastSyncAt: this.now() });
     }
 
-    return { connector: connector.id, ingested, duplicates, partial, errors, failed: false };
+    return { connector: connector.id, ingested, duplicates, partial, errors, failed: false, hasMore: pulled.hasMore === true };
   }
 
   describe() {

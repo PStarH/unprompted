@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { startFixtureServer } from '../browser/fixture-server.mjs';
 
 export async function startGoogleFixture({ provisioned = true, directory = null, root = null } = {}) {
-  const controls = { apiDisabled: false, rejectTask: false, rejectModel: false, empty: false, identityVerified: true };
+  const controls = { apiDisabled: false, rejectTask: false, rejectModel: false, empty: false, identityVerified: true, searchPaged: false };
   const calls = [];
   const requests = http.createServer(async (req, res) => {
     try {
@@ -32,8 +32,12 @@ export async function startGoogleFixture({ provisioned = true, directory = null,
       if (controls.apiDisabled && url.pathname.includes('/gmail/')) return json({ error: { details: [{ reason: 'SERVICE_DISABLED' }] } }, 403);
       if (url.pathname.endsWith('/gmail/v1/users/me/profile')) return json({ historyId: '100', emailAddress: `${account}@example.test` });
       if (url.pathname.endsWith('/gmail/v1/users/me/history')) return json({ historyId: '100', history: [] });
-      if (url.pathname.endsWith('/gmail/v1/users/me/messages')) return json({ messages: controls.empty ? [] : [{ id: `mail-${account}` }] });
-      if (url.pathname.includes('/gmail/v1/users/me/messages/')) return json({ id: `mail-${account}`, threadId: `thread-${account}`, payload: {
+      if (url.pathname.endsWith('/gmail/v1/users/me/messages')) {
+        if (controls.searchPaged && url.searchParams.get('q') === 'Cedar') return json(url.searchParams.get('pageToken') === 'next'
+          ? { messages: [{ id: `mail-${account}-2` }] } : { messages: [{ id: `mail-${account}` }], nextPageToken: 'next' });
+        return json({ messages: controls.empty ? [] : [{ id: `mail-${account}` }] });
+      }
+      if (url.pathname.includes('/gmail/v1/users/me/messages/')) return json({ id: decodeURIComponent(url.pathname.split('/').at(-1)), threadId: `thread-${account}`, payload: {
         mimeType: 'text/plain', headers: [{ name: 'From', value: 'Alex <alex@example.test>' }, { name: 'To', value: `${account}@example.test` },
           { name: 'Subject', value: 'Cedar proposal' }, { name: 'Date', value: new Date().toUTCString() }],
         body: { data: Buffer.from('Please update the Cedar proposal to include sample size and conclusion and send it back.').toString('base64url') }

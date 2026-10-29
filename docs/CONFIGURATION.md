@@ -70,17 +70,22 @@ The browser connection flow and the bundled local app are described in the
 its observation immediately. Environment-managed credentials remain the
 operator's responsibility on a later boot.
 
-## GitHub and Outlook client provisioning
+## GitHub, Outlook, Slack and Notion client provisioning
 
 Set `UNPROMPTED_GITHUB_CLIENT_ID` or `UNPROMPTED_MICROSOFT_CLIENT_ID` to the
-registered public application ID. Alternatively set `UNPROMPTED_CONNECTOR_CLIENTS_FILE`
-to a JSON with `github.clientId` and/or `microsoft.clientId`. The local app builder
-accepts `--connector-clients PATH` and bundles only these public values.
+registered public application ID. Slack and Notion also need
+`UNPROMPTED_SLACK_CLIENT_ID` with `UNPROMPTED_SLACK_CLIENT_SECRET`, and
+`UNPROMPTED_NOTION_CLIENT_ID` with `UNPROMPTED_NOTION_CLIENT_SECRET`.
+Alternatively set `UNPROMPTED_CONNECTOR_CLIENTS_FILE` to a JSON file with
+`github.clientId`, `microsoft.clientId`, and Slack or Notion `clientId` plus
+`clientSecret`. The local app builder accepts `--connector-clients PATH`.
 
-End users use official device OAuth; they do not supply access tokens or client
-secrets. Refresh tokens are stored in private local setup, with guarded rotation
-and cancellation. The integrations are read-only. See [Connectors](CONNECTORS.md)
-for exact application registration, scopes and supported behavior.
+GitHub and Outlook use device OAuth. Slack and Notion use a browser authorization
+code and the fixed redirects `http://localhost:53682/oauth/slack` and
+`http://localhost:53682/oauth/notion`. End users authorize their own accounts.
+Access tokens are not pasted into the app. Refresh tokens stay in private local
+setup. These integrations are read-only. See [Connectors](CONNECTORS.md) for
+registration, scopes and supported behavior.
 
 ## Google client provisioning
 
@@ -126,7 +131,7 @@ adds interpretation only where deterministic coverage is incomplete. The
 ### Pi tool loop
 
 Set `UNPROMPTED_AGENT_HARNESS=pi` to use Pi Agent Core 1.4.0 instead of the
-default `classic` one-shot adapter. Install the pinned optional packages using
+default `classic` adapter (one provider turn unless MCP tools are enabled). Install the pinned optional packages using
 Node.js **22.19 or newer**:
 
 ```sh
@@ -140,7 +145,7 @@ to use the classic adapter; the deterministic demo still needs no installation.
 Pi can search and read up to eight documents correlated with the current task.
 The engine rechecks availability and task scope on each read; each chunk is at
 most 4,000 characters. Document excerpts and selected chunks may be sent to the
-configured model. Pi exposes no send, shell, filesystem, or permission tool.
+configured model. Pi’s built-in tools expose no send, shell, filesystem, or permission operation. Separately authorized MCP tools follow their server’s access scope; see [MCP setup](CONNECTORS.md#external-mcp-tools).
 Actions continue through the engine's existing authorization and receipt checks.
 
 Each run allows at most four actual model requests, eight tool attempts and
@@ -214,6 +219,7 @@ See [the quality report](TESTING.md) for measurements and fault coverage.
 | `GOOGLE_READ_GMAIL` / `GOOGLE_READ_DRIVE` | `true` | Enable each read scope |
 | `GOOGLE_GMAIL_QUERY` | unset | Optional initial Gmail query |
 | `GOOGLE_SEND_ENABLED` | `false` | Explicit opt-in to the live send path |
+| `GOOGLE_DRAFTS_ENABLED` | `false` | Enable the Gmail draft adapter; also requires `gmail.compose`, a confirmed mailbox destination grant and writes permitted by policy |
 | `GOOGLE_DOCS_WRITE_ENABLED` | `false` | Separate Google Docs write provider opt-in; Gmail send scope does not grant this |
 | `GOOGLE_REQUEST_TIMEOUT_MS` | `20000` | Per-request timeout |
 | `GOOGLE_SYNC_BUDGET_MS` | `120000` | Total budget for a connector pull |
@@ -224,7 +230,7 @@ See [the quality report](TESTING.md) for measurements and fault coverage.
 ## What stays on your machine
 
 There is no project-hosted backend or analytics endpoint. The server binds to
-localhost. In normal mode, the local JSON state can contain synchronized email,
+localhost. In normal mode, the local SQLite workspace can contain synchronized email,
 document and selected local-source content, requests, evidence excerpts, drafts,
 and action history.
 **Treat that state as personal data.** Do not attach it to an issue or PR.
@@ -252,3 +258,23 @@ workspace. **Ctrl+C** stops either mode.
 For a normal workspace, stop its process before backing up or moving the state
 file. Don't delete its lock while a process is using it. One process may write a
 state file at a time; use a separate port and state file for another instance.
+
+## Durable workspace (v0.3)
+
+Normal startup requires `npm ci --include=optional`. SQLite 3.53.2 is bundled in
+the locked better-sqlite3 dependency and verified on startup; Node's older built-in
+SQLite is not used. A logical `*-state.json` path maps to `*-state.sqlite`.
+Old JSON workspaces migrate once and retain a private `.migration-backup`. Do not
+edit the SQLite files while the app is running. The explicit simulation uses JSON;
+`UNPROMPTED_STORAGE=sqlite` can enable durable storage in an isolated fixture.
+
+Memory manages grounded facts, explicit activation rules and learned Experiences.
+Settings manages quiet hours, interruption budgets and low-risk automatic promotion
+(default off). None of these grants connector writes. Forget reports local cleanup,
+WAL readers, registered backups and unresolved external operations separately.
+See [storage and retention boundaries](ARCHITECTURE.md#storage-and-process-model).
+
+Framework users can inject a local semantic encoder into `HybridMemory`; the
+default encoder is lexical n-gram hashing, explicitly `semantic:false`. Embeddings
+and query caches stay in process/local SQLite. Remote model calls still transmit
+the selected task context according to the configured provider's retention policy.

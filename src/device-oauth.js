@@ -26,18 +26,18 @@ export class DeviceOAuth {
   describe(id) { return { ...(this.status.get(id) || { phase: 'idle' }) }; }
   #status(id, phase, values = {}) { this.status.set(id, { phase, updatedAt: new Date(this.now()).toISOString(), ...values }); }
 
-  async start(id, { clientId = null, observe = true } = {}) {
+  async start(id, { clientId = null, observe = true, drafts = false } = {}) {
     const provider = connectionProvider(id);
     this.cancel(id);
     const configured = this.setup.getConnection(id);
     const selected = clientId == null ? configured.pendingClientId || configured.clientId : clientId;
     if (!validPublicClientId(selected)) throw new Error('Enter the registered public Client ID, not an access token or secret.');
-    const session = { controller: new AbortController(), clientId: selected, observe: observe === true, timer: null };
+    const session = { controller: new AbortController(), clientId: selected, observe: observe === true, drafts: drafts === true, timer: null };
     this.sessions.set(id, session); this.#status(id, 'starting');
     try {
       const response = await providerJSON(provider.deviceUrl, { provider: id, origin: new URL(provider.deviceUrl).origin,
         fetchImpl: this.fetchImpl, method: 'POST', signal: session.controller.signal,
-        form: { client_id: selected, ...(provider.scope ? { scope: provider.scope } : {}) }, maxChars: 32_000, allowOAuthError: true });
+        form: { client_id: selected, ...(provider.scope ? { scope: `${provider.scope}${id === 'microsoft' && drafts === true ? ' Mail.ReadWrite' : ''}` } : {}) }, maxChars: 32_000, allowOAuthError: true });
       if (this.sessions.get(id) !== session) return this.describe(id);
       if (response.error) throw new Error('The provider rejected device authorization.');
       const verification = new URL(response.verification_uri);
@@ -82,7 +82,8 @@ export class DeviceOAuth {
       }
       if (data.error) { this.#finish(id, session, data.error === 'access_denied' || data.error === 'authorization_declined' ? 'cancelled' : data.error === 'expired_token' ? 'expired' : 'failed'); return; }
       if (typeof data.access_token !== 'string' || !data.access_token || data.access_token.length > 32_000) throw new Error('Invalid token response.');
-      if (id === 'microsoft' && !String(data.scope || '').split(/\s+/).some(scope => /(?:^|\/)Mail\.Read$/i.test(scope))) throw new Error('Mail read access was not granted.');
+      if (id === 'microsoft' && !String(data.scope || '').split(/\s+/).some(scope => /(?:^|\/)Mail\.Read(?:Write)?$/i.test(scope))) throw new Error('Mail read access was not granted.');
+      if (id === 'microsoft' && session.drafts && !String(data.scope || '').split(/\s+/).some(scope => /(?:^|\/)Mail\.ReadWrite$/i.test(scope))) throw new Error('Mail draft access was not granted.');
       this.#status(id, 'verifying');
       const account = await providerIdentity(id, data.access_token, { fetchImpl: this.fetchImpl, signal: session.controller.signal });
       if (this.sessions.get(id) !== session) return;
@@ -134,14 +135,32 @@ export class SavedConnectionAuth {
   }
   async #refresh(saved) {
     const provider = connectionProvider(this.id);
-    const data = await providerJSON(provider.tokenUrl, { provider: this.id, origin: new URL(provider.tokenUrl).origin,
-      fetchImpl: this.fetchImpl, method: 'POST', maxChars: 64_000, allowOAuthError: true,
-      form: { client_id: saved.clientId, grant_type: 'refresh_token', refresh_token: saved.refreshToken } });
-    if (data.error || !data.access_token || typeof data.access_token !== 'string') throw new Error('The connection expired. Reconnect this account.');
+    const origin = new URL(provider.tokenUrl).origin;
+    let data;
+    if (provider.flow === 'code' && this.id === 'notion') {
+      if (!saved.clientSecret) throw new Error('The connection expired. Reconnect this account.');
+      data = await providerJSON(provider.tokenUrl, { provider: this.id, origin, fetchImpl: this.fetchImpl, method: 'POST', maxChars: 64_000, allowOAuthError: true,
+        headers: { authorization: `Basic ${Buffer.from(`${saved.clientId}:${saved.clientSecret}`).toString('base64')}`, 'Notion-Version': '2022-06-28' },
+        body: { grant_type: 'refresh_token', refresh_token: saved.refreshToken } });
+    } else if (provider.flow === 'code') {
+      if (this.id !== 'slack' && !saved.clientSecret) throw new Error('The connection expired. Reconnect this account.');
+      data = await providerJSON(provider.tokenUrl, { provider: this.id, origin, fetchImpl: this.fetchImpl, method: 'POST', maxChars: 64_000, allowOAuthError: true,
+        form: { client_id: saved.clientId, grant_type: 'refresh_token', refresh_token: saved.refreshToken, ...(this.id === 'slack' ? {} : { client_secret: saved.clientSecret }) } });
+      if (data?.ok === false || data?.token_type === 'bot') throw new Error('The connection expired. Reconnect this account.');
+    } else {
+      data = await providerJSON(provider.tokenUrl, { provider: this.id, origin, fetchImpl: this.fetchImpl, method: 'POST', maxChars: 64_000, allowOAuthError: true,
+        form: { client_id: saved.clientId, grant_type: 'refresh_token', refresh_token: saved.refreshToken } });
+    }
+    const accessToken = typeof data?.access_token === 'string' ? data.access_token : data?.authed_user?.access_token;
+    const refreshToken = data?.refresh_token || data?.authed_user?.refresh_token;
+    const expiresIn = Number(data?.expires_in || data?.authed_user?.expires_in);
+    if (data?.error || !accessToken) throw new Error('The connection expired. Reconnect this account.');
+    data = { ...data, access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn };
     const current = this.setup.getConnection(this.id);
     if (this.disabled || current.account?.id !== saved.account.id || current.refreshToken !== saved.refreshToken) throw new Error('The connection changed while refreshing.');
     this.setup.saveConnectionAuthorization(this.id, { ...current, accessToken: data.access_token,
       refreshToken: data.refresh_token || current.refreshToken,
+      scopes: typeof data.scope === 'string' ? data.scope.split(/[\s,]+/).filter(Boolean) : current.scopes,
       expiresAt: Number(data.expires_in) > 0 ? new Date(this.now() + Number(data.expires_in) * 1000).toISOString() : null });
     return data.access_token;
   }

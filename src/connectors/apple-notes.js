@@ -9,6 +9,12 @@ export class AppleNotesConnector extends Connector {
       account: { id: scopeId, label: 'Selected Apple Notes folders' } });
   }
   validate() { return { ok: this.live, missing: this.live ? [] : ['Selected Notes folder'], detail: 'Read only selected Notes folders through macOS Automation. Locked notes and attachments are not read.' }; }
+  capabilities() { return { ...super.capabilities(), read: this.live ? ['notes.selected_text'] : [], incremental: this.live ? ['notes.snapshot'] : [], observation: this.live ? 'poll' : 'none' }; }
+  async listHistoricalEvents({ limit = 20 } = {}) {
+    if (!this.live) return { events: [], networkCalls: 0, unavailable: true };
+    const page = await this.pull({ cursor: null });
+    return { events: (page.events || []).slice(0, Math.max(1, Math.min(20, Number(limit) || 20))), networkCalls: 0, unavailable: false };
+  }
   async pull({ cursor = null } = {}) {
     if (!this.live) throw new ConnectorError('No Notes folder is connected.', { connectorId: this.id });
     const previous = cursor?.documents || {}, known = Object.fromEntries(Object.values(previous).map(doc => [`$${doc.providerId}`, { stamp: doc.stamp, folderId: doc.folderId, unavailable: doc.unavailable }]));

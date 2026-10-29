@@ -157,3 +157,21 @@ test('observation cannot be enabled without a live connector and preserves a clo
   assert.equal(restarted.describe().status, 'off');
   restarted.stop();
 });
+
+test('remaining pages receive bounded prompt continuations, while failures and pause stop them', async t => {
+  const f = fixture(t);
+  let next = { results: [{ connector: 'google', failed: false, partial: false, hasMore: true }] }, calls = 0;
+  const monitor = new MonitoringService({ sync: { async run() { calls++; return next; } }, setup: f.setup, connectors: [{ live: true }], now: f.now, setTimer: f.setTimer, clearTimer: f.clearTimer });
+  await monitor.setSettings({ enabled: true, intervalMs: 60000 }); await monitor.whenIdle();
+  for (let index = 0; index < 4; index++) {
+    assert.equal(f.timers[0].delayMs, 1000);
+    f.timers.shift().callback(); await monitor.whenIdle();
+  }
+  assert.equal(calls, 5); assert.equal(f.timers[0].delayMs, 60000, 'continuous backlog cannot monopolise polling indefinitely');
+  next = { results: [{ connector: 'google', failed: true, error: 'rate limited', hasMore: true }] };
+  await monitor.runNow();
+  assert.equal(f.timers[0].delayMs, 60000, 'a failure never creates a rapid retry');
+  await monitor.setSettings({ enabled: false });
+  assert.equal(f.timers.length, 0);
+  monitor.stop();
+});

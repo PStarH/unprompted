@@ -6,12 +6,12 @@
  * identifiers and timestamps are preserved so evidence can cite them later.
  */
 
-export const EVENT_TYPES = ['email.received', 'issue.updated', 'task.observed', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed'];
+export const EVENT_TYPES = ['email.received', 'issue.updated', 'pull_request.updated', 'content.changed', 'workflow.updated', 'task.observed', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed', 'timer.due'];
 
 /** Registry publications: the generalized name plus the original experiment-only one. */
 export const REGISTRY_EVENT_TYPES = ['record.published', 'experiment.run.completed'];
 
-export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'local_files', 'apple_notes'];
+export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes', 'internal'];
 
 export class EventValidationError extends Error {
   constructor(message) {
@@ -71,6 +71,21 @@ export function validateDocumentUnavailablePayload(payload) {
   return true;
 }
 
+function validateGitHubWork(event) {
+  const work = event.payload;
+  let url;
+  try { url = new URL(work?.url); }
+  catch { throw new EventValidationError('GitHub work payload is incomplete or invalid.'); }
+  const common = work?.id && typeof work.title === 'string' && work.repository && typeof work.active === 'boolean'
+    && ['open', 'closed', 'unavailable'].includes(work.state) && Number.isFinite(Date.parse(work.updatedAt))
+    && url.protocol === 'https:' && url.hostname === 'github.com' && !url.username && !url.password;
+  if (!common) throw new EventValidationError('GitHub work payload is incomplete or invalid.');
+  if (event.type === 'pull_request.updated' && (!Number.isSafeInteger(work.number) || !['review_requested', 'changes_requested'].includes(work.work))) throw new EventValidationError('Pull request payload is incomplete or invalid.');
+  if (event.type === 'content.changed' && (typeof work.sha !== 'string' || !/^[a-f0-9]{40}$/.test(work.sha) || !Array.isArray(work.files))) throw new EventValidationError('Repository change payload is incomplete or invalid.');
+  if (event.type === 'workflow.updated' && !Number.isSafeInteger(work.runId)) throw new EventValidationError('Actions payload is incomplete or invalid.');
+  return true;
+}
+
 export function validateRunPayload(payload) {
   const missing = ['id', 'completedAt'].filter(field => !payload?.[field]);
   if (missing.length) throw new EventValidationError(`Run record payload is missing: ${missing.join(', ')}`);
@@ -79,6 +94,11 @@ export function validateRunPayload(payload) {
 
 export function validateEventPayload(event) {
   validateRecordId(event.payload?.id);
+  if (event.type === 'timer.due') {
+    if (event.source !== 'internal' || event.connectorId !== 'scheduler' || typeof event.payload.situationId !== 'string' || !event.payload.situationId
+      || !Number.isFinite(Date.parse(event.payload.scheduledAt))) throw new EventValidationError('Situation timer payload is invalid.');
+    return true;
+  }
   if (event.type === 'task.observed') {
     const item = event.payload;
     if (!['local_files', 'apple_notes'].includes(event.connectorId) || event.source !== event.connectorId
@@ -101,6 +121,7 @@ export function validateEventPayload(event) {
     if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.username || url.password) throw new EventValidationError('Issue source URL is invalid.');
     return true;
   }
+  if (event.type === 'pull_request.updated' || event.type === 'content.changed' || event.type === 'workflow.updated') return validateGitHubWork(event);
   if (event.type === 'email.received') return validateEmailPayload(event.payload);
   if (event.type === 'document.modified') return validateDocumentPayload(event.payload);
   if (event.type === 'document.unavailable') return validateDocumentUnavailablePayload(event.payload);

@@ -11,6 +11,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { publicClientConfiguration } from '../src/connection-catalog.js';
 import { readRegularFile } from '../src/local-files.js';
+import { copyApplicationTree, copyDependencyTree } from './bundle-files.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NODE_VERSION = 'v22.23.4';
@@ -28,7 +29,7 @@ for (let index = 0; index < args.length; index++) {
   if (args[index] === '--out' && args[index + 1]) output = path.resolve(args[++index]);
   else if (args[index] === '--google-client' && args[index + 1]) googleClientFile = path.resolve(args[++index]);
   else if (args[index] === '--connector-clients' && args[index + 1]) connectorClientFile = path.resolve(args[++index]);
-  else throw new Error('Usage: node scripts/build-macos-app.mjs [--out PATH] [--google-client DESKTOP_JSON] [--connector-clients PUBLIC_CLIENT_JSON]');
+  else throw new Error('Usage: node scripts/build-macos-app.mjs [--out PATH] [--google-client DESKTOP_JSON] [--connector-clients CONNECTOR_CLIENT_JSON]');
 }
 let provisionedGoogleClient = null;
 if (googleClientFile) {
@@ -115,8 +116,8 @@ try {
   assertSystemDependencies(dependencies);
 
   fs.mkdirSync(appRoot, { recursive: true });
-  fs.cpSync(path.join(ROOT, 'src'), path.join(appRoot, 'src'), { recursive: true });
-  fs.cpSync(path.join(ROOT, 'public'), path.join(appRoot, 'public'), { recursive: true });
+  copyApplicationTree(path.join(ROOT, 'src'), path.join(appRoot, 'src'));
+  copyApplicationTree(path.join(ROOT, 'public'), path.join(appRoot, 'public'));
   for (const filename of ['server.js', 'package.json']) fs.copyFileSync(path.join(ROOT, filename), path.join(appRoot, filename));
   if (provisionedGoogleClient) fs.writeFileSync(path.join(appRoot, 'google-oauth-client.json'), JSON.stringify(provisionedGoogleClient) + '\n');
   if (provisionedConnectorClients) fs.writeFileSync(path.join(appRoot, 'connector-clients.json'), JSON.stringify(provisionedConnectorClients) + '\n');
@@ -125,11 +126,16 @@ try {
 
   const piPackages = ['@earendil-works/pi-agent-core', '@earendil-works/pi-ai'];
   const piInstalled = piPackages.every(name => fs.existsSync(path.join(ROOT, 'node_modules', name, 'package.json')));
+  const mcpInstalled = fs.existsSync(path.join(ROOT, 'node_modules', '@modelcontextprotocol/client', 'package.json'));
+  const sqliteInstalled = fs.existsSync(path.join(ROOT, 'node_modules', 'better-sqlite3', 'package.json'));
+  if (!sqliteInstalled) throw new Error('The durable workspace requires SQLite. Run npm ci before building the app.');
+  copyDependencyTree(path.join(ROOT, 'node_modules'), path.join(appRoot, 'node_modules'));
+  const sqliteRuntime = JSON.parse(run(nodePath, ['--input-type=module', '-e', "import {DurableDatabase} from './src/durable/database.js'; const d=new DurableDatabase(':memory:'); console.log(JSON.stringify(d.describe())); d.close();"], { cwd: appRoot }).trim());
+  if (mcpInstalled) run(nodePath, ['--input-type=module', '-e', "await Promise.all([import('@modelcontextprotocol/client'),import('@modelcontextprotocol/client/stdio')])"], { cwd: appRoot });
   let piHarness;
   if (piInstalled) {
     // Pi is optional at runtime, but a self-contained .app must include its
     // locked package tree so an end user never needs npm or a system Node.
-    fs.cpSync(path.join(ROOT, 'node_modules'), path.join(appRoot, 'node_modules'), { recursive: true, preserveTimestamps: true });
     run(nodePath, ['--input-type=module', '-e', "await Promise.all([import('@earendil-works/pi-agent-core'),import('@earendil-works/pi-ai'),import('@earendil-works/pi-ai/api/openai-completions')])"], { cwd: appRoot });
     const lock = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, 'utf8')) : { packages: {} };
     piHarness = {
@@ -201,11 +207,11 @@ done
 <key>CFBundleName</key><string>Unprompted</string>
 <key>CFBundleDisplayName</key><string>Unprompted</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>0.2.0</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>0.3.0</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSAppleEventsUsageDescription</key><string>Unprompted reads only the Notes folders you select to observe your work. It does not modify notes.</string>
+<key>NSAppleEventsUsageDescription</key><string>Unprompted reads the Notes folders you select and can create notes in a selected folder when you explicitly authorize it.</string>
 </dict></plist>
 `;
   fs.writeFileSync(path.join(contents, 'Info.plist'), plist);
@@ -224,6 +230,8 @@ done
     linkedLibraryCheck: 'all linked libraries are in /System/Library or /usr/lib',
     packageLockIncluded: fs.existsSync(path.join(appRoot, 'package-lock.json')),
     piHarness,
+    mcpClient: { available: mcpInstalled, runtimeImportCheck: mcpInstalled ? 'passed with bundled Node runtime' : 'not installed at build time' },
+    sqliteRuntime,
     signature: 'The app bundle is unsigned and unpublished.'
   };
   fs.writeFileSync(path.join(resources, 'runtime', 'verification.json'), `${JSON.stringify(verification, null, 2)}\n`);

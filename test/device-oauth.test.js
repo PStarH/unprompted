@@ -79,6 +79,31 @@ test('Microsoft must grant Mail.Read before a verified account can be saved', as
   assert.equal(oauth.describe('microsoft').phase, 'failed'); assert.equal(setup.getConnection('microsoft').accessToken, undefined);
 });
 
+test('Microsoft draft consent requires the requested Mail.ReadWrite grant rather than accepting read-only consent', async t => {
+  const setup = fixture(t), time = clock();
+  const oauth = new DeviceOAuth(setup, { ...time, fetchImpl: async (url, options) => {
+    if (url.endsWith('/devicecode')) {
+      const scope = new URLSearchParams(options.body).get('scope');
+      assert.match(scope, /Mail.ReadWrite/);
+      assert.doesNotMatch(scope, /Mail.Send/);
+      return json({ device_code: 'private', user_code: 'CODE1234', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900 });
+    }
+    return json({ access_token: 'private-access', scope: 'User.Read Mail.Read' });
+  } });
+  t.after(() => oauth.close());
+  await oauth.start('microsoft', { clientId: 'registered-microsoft-client', drafts: true }); await time.tick();
+  assert.equal(oauth.describe('microsoft').phase, 'failed');
+  assert.equal(setup.getConnection('microsoft').accessToken, undefined);
+});
+
+test('refresh persists reduced provider scopes instead of retaining a revoked draft permission', async t => {
+  const setup = fixture(t);
+  setup.saveConnectionAuthorization('microsoft', { clientId: 'client', accessToken: 'old-private', refreshToken: 'refresh', expiresAt: '2020-01-01T00:00:00Z', account: { id: 'user', label: 'user@example.test' }, scopes: ['Mail.ReadWrite'] });
+  const auth = new SavedConnectionAuth(setup, 'microsoft', { fetchImpl: async () => json({ access_token: 'new-private', expires_in: 3600, scope: 'User.Read Mail.Read' }) });
+  await auth.accessToken();
+  assert.deepEqual(setup.getConnection('microsoft').scopes, ['User.Read', 'Mail.Read']);
+});
+
 test('refresh rotation is persisted atomically and a disconnected account cannot be restored by a late refresh', async t => {
   const setup = fixture(t);
   setup.saveConnectionAuthorization('microsoft', { clientId: 'client', accessToken: 'old-private', refreshToken: 'old-refresh', expiresAt: '2020-01-01T00:00:00Z', account: { id: 'user-a', label: 'user@example.test' } });

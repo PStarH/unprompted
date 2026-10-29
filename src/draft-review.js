@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 export function draftReviewToken(task) {
   if (!task.draft) return null;
   return createHash('sha256').update(JSON.stringify([
-    task.id, task.documentId, Number(task.commitment?.revision || 1), task.draft
+    task.id, task.documentId, Number(task.commitment?.revision || 1), task.guidance?.id || null, task.evidence?.signature || null, task.draft,
+    ...(task.inputVersion != null ? [task.inputVersion, task.privacyEpoch] : [])
   ])).digest('hex');
 }

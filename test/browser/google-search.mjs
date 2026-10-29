@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import { startGoogleFixture, connectGoogle, waitFor } from '../fixtures/google-workspace.mjs';
+const { chromium } = await import(process.env.UNPROMPTED_PLAYWRIGHT_MODULE || 'playwright');
+const fixture = await startGoogleFixture();
+let browser;
+try {
+  await connectGoogle(fixture.base);
+  await waitFor(() => fetch(fixture.base + '/api/setup').then(response => response.json()), state => !state.google.activating && !state.monitoring.running && state.monitoring.lastOutcome);
+  fixture.controls.searchPaged = true;
+  browser = await chromium.launch({ channel: process.env.UNPROMPTED_BROWSER_CHANNEL || undefined, headless: true });
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, locale: 'en-US' });
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto(fixture.base + '/#sources');
+  await page.locator('#languageSelect').selectOption('en');
+  await page.locator('#googleSearchPanel').waitFor();
+  assert.match(await page.locator('#googleSearchPanel h2').textContent(), /Search Google/);
+  await page.locator('#googleSearchForm [name=query]').fill('Cedar');
+  await page.locator('#googleSearchForm').evaluate(form => form.requestSubmit());
+  await page.locator('#googleSearchResults summary').filter({ hasText: 'Cedar proposal' }).waitFor();
+  await page.locator('#googleSearchResults summary').click();
+  assert.match(await page.locator('#googleSearchResults pre').textContent(), /sample size/);
+  await page.locator('#googleSearchMore').click();
+  await page.waitForFunction(() => document.querySelectorAll('#googleSearchResults summary').length === 2);
+  assert.equal(await page.locator('#googleSearchMore').isHidden(), true);
+  await page.locator('#googleSearchForm [name=source]').selectOption('drive');
+  await page.locator('#googleSearchForm').evaluate(form => form.requestSubmit());
+  await page.locator('#googleSearchResults a').waitFor();
+  assert.match(await page.locator('#googleSearchResults a').getAttribute('href'), /^https:\/\/docs\.google\.com\//);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  await page.locator('#languageSelect').selectOption('zh-CN');
+  assert.match(await page.locator('#googleSearchPanel h2').textContent(), /搜索 Google/);
+  assert.deepEqual(errors, []);
+  console.log(JSON.stringify({ passed: 7, errors }));
+} finally { await browser?.close(); await fixture.close(); }

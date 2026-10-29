@@ -1,6 +1,6 @@
 # Documentation
 
-Run `npm start`, connect your model, then choose a local or cloud source. Local
+Run `npm ci --include=optional` once, then `npm start`, connect your model, then choose a local or cloud source. Local
 folders need no cloud account; Apple Notes is available on macOS. New sources
 apply without restarting. The explicit rule-only example is available to
 developers as `npm run demo`.
@@ -13,6 +13,7 @@ developers as `npm run demo`.
 | Configure connectors in Chinese | [连接器配置](CONNECTORS.zh-CN.md) |
 | Configure a model, permissions or local storage | [Configuration](CONFIGURATION.md) |
 | Configure Google Workspace in detail | [Google integration](LIVE_INTEGRATION.md) |
+| Read the v0.3 requirements and acceptance cases | [Implementation baseline](PRD.md) |
 | Understand the engine and its boundaries | [Architecture](ARCHITECTURE.md) |
 | Change a complete framework workflow | [First workflow](EXTENDING.md) |
 | Run checks or add a regression | [Testing](TESTING.md) |

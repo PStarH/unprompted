@@ -2,6 +2,7 @@ import {
   explainRequest, interpretRequestWithReasoner, recoverRequestCandidateWithReasoner,
   extractDeadline, extractRequiredContent, analyseRequest, hasRequestForm, isAutomatedSender, normaliseDateLocale
 } from './requests.js';
+import { createHash } from 'node:crypto';
 import {
   commitmentScope, sameCommitment, requestRevisionSignature, isWithdrawalMessage,
   isRescheduleMessage, narrowCommitmentsByMessage, isTrustedThreadSender, unquotedMessageFields
@@ -15,6 +16,7 @@ import { STRATEGY_IDS } from './probes/strategies.js';
 import { determineFreshness, runRecord, relevantRuns } from './freshness.js';
 import { evidenceSignature, claim, unknownItem, sourceRef, evidenceItem } from './evidence.js';
 import { PermissionPolicy, PermissionDeniedError } from './permissions.js';
+import { ToolSafetyGateway, validReceipt } from './tool-gateway.js';
 import { SimulatedMailProvider, UncertainDeliveryError } from './providers.js';
 import { validateEventPayload, EVENT_TYPES, REGISTRY_EVENT_TYPES } from './connectors/events.js';
 import { createReasoner } from './reasoning.js';
@@ -34,8 +36,9 @@ import { TaskServices } from './task-services.js';
 import { projectWorkspaceTaskManagement } from './task-management.js';
 import { draftReviewToken } from './draft-review.js';
 import { REASONING_RECOVERY, reasoningFailure, reasoningMayResume } from './reasoning-recovery.js';
-import { ingestAssignedIssue, ingestObservedTask } from './external-work.js';
+import { ingestAssignedIssue, ingestGitHubWork, ingestObservedTask, isSourceFollowTask } from './external-work.js';
 import { publicSourceCursors } from './connectors/connector.js';
+import { effectiveTaskRequest, matchingTaskMemories, pauseTask, directTask, undoTaskDirection, updateTaskMemory } from './task-guidance.js';
 
 /**
  * The work engine.
@@ -101,7 +104,7 @@ function describeDay(iso) {
 }
 
 /** A task is finished — completed, or closed by the user — and inert to new evidence. */
-const isSettled = task => task.status === 'completed' || task.status === 'cancelled' || task.userDismissed === true;
+const isSettled = task => task.status === 'completed' || task.status === 'cancelled' || task.userDismissed === true || task.control?.paused === true;
 
 /**
  * A document whose source says it was removed, trashed, or is inaccessible is
@@ -139,6 +142,7 @@ export class WorkEngine {
     provider = null,
     policy = new PermissionPolicy(),
     reasoner = null,
+    externalTools = null,
     documentProvider = null,
     mode = null,
     stallAfterMs = DEFAULT_STALL_AFTER_MS,
@@ -151,6 +155,10 @@ export class WorkEngine {
     this.documentProvider = documentProvider;
     this.policy = policy;
     this.reasoner = reasoner || createReasoner(process.env);
+    this.externalTools = externalTools ? scope => {
+      const tools = externalTools(scope);
+      return this.durableRuntime && scope.taskId ? this.durableRuntime.wrapReadTools(tools, scope.taskId) : tools;
+    } : null;
     this.mode = mode || store.state.mode || 'simulation';
     this.stallAfterMs = Number.isFinite(Number(stallAfterMs)) ? Math.max(0, Number(stallAfterMs)) : DEFAULT_STALL_AFTER_MS;
     // Numeric dates are read only from explicit configuration or a
@@ -166,7 +174,8 @@ export class WorkEngine {
     this.executingActions = new Set();
     this.planCache = new PlanCache();
     this.taskServices = new TaskServices(this, { documentProvider });
-    this.recover();
+    this.toolGateway = new ToolSafetyGateway(this);
+    if (!store.durable) this.recover();
   }
 
   /**
@@ -201,6 +210,7 @@ export class WorkEngine {
   async whenSettled() {
     // Finishing one job can start another, such as a scoped send after model refinement.
     while (this.pending.size) await Promise.allSettled([...this.pending]);
+    if (this.durableRuntime && !this.durableRuntime.inWorker()) await this.durableRuntime.whenIdle();
   }
 
   /** Settle a provider call synchronously when the provider is synchronous. */
@@ -212,10 +222,12 @@ export class WorkEngine {
   publicState() {
     const state = this.store.state;
     const now = stamp();
-    const taskValues = Object.values(state.tasks);
+    const taskValues = Object.values(state.tasks).filter(task => !task.privacyInvalidated);
     const managementByTaskId = projectWorkspaceTaskManagement(taskValues, state, now);
     return {
       revision: state.revision,
+      ...(this.durableRuntime ? { durable: this.durableRuntime.describe() } : {}),
+      ...(this.durableRuntime ? { groundedMemories: this.store.db.prepare('SELECT id,scope_type,scope_key,content,version,source_kind,source_id FROM user_memories').all() } : {}),
       mode: this.mode,
       runtime: state.runtime,
       simulation: state.simulation,
@@ -227,6 +239,7 @@ export class WorkEngine {
       })),
       taskWaits: Object.values(state.taskWaits || {}),
       taskFeedbackRules: Object.values(state.taskFeedbackRules || {}),
+      taskMemories: Object.values(state.taskMemories || {}),
       documentPatches: Object.values(state.documentPatches || {}),
       followUps: Object.values(state.followUps || {}),
       dependencyDecisions: Object.values(state.dependencyDecisions || {}),
@@ -278,6 +291,10 @@ export class WorkEngine {
   // ---------------------------------------------------------------- ingestion
 
   ingest(input) {
+    return this.durableRuntime ? this.durableRuntime.ingest(input, event => this.ingestLegacy(event)) : this.ingestLegacy(input);
+  }
+
+  ingestLegacy(input, { confirmedCancellation = false, situationTaskIds = [], interpretedSituationId = null } = {}) {
     if (!input?.type || !EVENT_TYPES.includes(input.type)) throw new Error('Invalid event type');
     const event = {
       id: input.id || `${input.connectorId || 'local'}:${input.providerEventId}`,
@@ -289,24 +306,41 @@ export class WorkEngine {
       summary: '',
       relations: [],
       disposition: '',
-      payload: input.payload
+      payload: input.payload,
+      meta: input.meta || {}
     };
+    if (this.durableRuntime && input.activation) event.activation = input.activation;
+    if (input.suppressForwardActivation === true) event.suppressForwardActivation = true;
+    if (situationTaskIds.length) event.situationTaskIds = situationTaskIds;
+    if (interpretedSituationId) event.interpretedSituationId = interpretedSituationId;
     if (!event.id) throw new Error('Event requires an id');
     validateEventPayload(event);
     if (this.store.state.events.some(existing => existing.id === event.id)) return { duplicate: true, id: event.id };
 
     let result;
-    if (event.type === 'email.received') result = this.#ingestEmail(event);
+    if (event.type === 'email.received') result = this.#ingestEmail(event, { confirmedCancellation });
     else if (event.type === 'issue.updated') {
       result = ingestAssignedIssue(this.store, event);
+      if (result.taskId) this.#maybeInvestigateNativeTask(result.taskId);
       this.changed();
     }
-    else if (event.type === 'task.observed') { result = ingestObservedTask(this.store, event); this.changed(); }
+    else if (event.type === 'pull_request.updated' || event.type === 'content.changed' || event.type === 'workflow.updated') {
+      result = ingestGitHubWork(this.store, event);
+      if (result.taskId) this.#maybeInvestigateNativeTask(result.taskId);
+      this.changed();
+    }
+    else if (event.type === 'task.observed') { result = ingestObservedTask(this.store, event); if (result.taskId) this.#maybeInvestigateNativeTask(result.taskId); this.changed(); }
     else if (event.type === 'document.modified') result = this.#ingestDocument(event);
     else if (event.type === 'document.unavailable') result = this.#ingestDocumentUnavailable(event);
     else if (REGISTRY_EVENT_TYPES.includes(event.type)) result = this.#ingestRunRecord(event);
+    else if (event.type === 'timer.due') {
+      event.disposition = 'timer_due'; event.summary = 'Scheduled Situation reevaluation';
+      this.store.mutate(state => state.events.push(event));
+      result = { duplicate: false, id: event.id, disposition: event.disposition, relations: [] };
+      this.changed();
+    }
     else throw new Error(`Unhandled event type: ${event.type}`);
-    this.taskServices.processObservedEvent(event);
+    if (!event.suppressForwardActivation || event.disposition === 'request_withdrawn') this.taskServices.processObservedEvent(event);
     return result;
   }
 
@@ -433,7 +467,7 @@ export class WorkEngine {
     if (task.requestHistory.length > 100) task.requestHistory.splice(0, task.requestHistory.length - 100);
     task.actionVersion = Number(task.actionVersion || 0) + 1;
     task.updatedAt = stamp();
-    task.draft = null;
+    if (!task.draft?.userEdited) task.draft = null;
     task.evidence = null;
     task.assessment = null;
     task.progress = null;
@@ -445,7 +479,7 @@ export class WorkEngine {
     this.#supersedeReasoning(task, 'request_revised');
     if (!activeAction) task.status = 'newly_discovered';
     record(this.store.state, 'request_revision',
-      `The same thread and delivery scope revised this request (${kind}); revision ${nextRevision} replaced the old draft and invalidated its action version.`, task.id, event.id);
+      `The same thread and delivery scope revised this request (${kind}); revision ${nextRevision} invalidated its action version${task.draft?.userEdited ? ' and preserved your edited draft for review' : ' and replaced the old draft'}.`, task.id, event.id);
     return !activeAction;
   }
 
@@ -460,7 +494,7 @@ export class WorkEngine {
     task.commitment.lastSourceAt = at;
     task.commitment.status = pending ? 'withdrawn_pending_reconciliation' : 'withdrawn';
     task.actionVersion = Number(task.actionVersion || 0) + 1;
-    task.draft = null;
+    if (!task.draft?.userEdited) task.draft = null;
     task.reasoningPlan = null;
     task.reasoningAttemptedFor = null;
     this.#supersedeReasoning(task, 'request_withdrawn');
@@ -515,7 +549,7 @@ export class WorkEngine {
     return request;
   }
 
-  #ingestEmail(event) {
+  #ingestEmail(event, { confirmedCancellation = false } = {}) {
     const message = event.payload;
     const sourceAt = sourceTimestamp(message, event);
     const threadKey = message.threadId ? String(message.threadId) : `message:${message.id}`;
@@ -533,7 +567,7 @@ export class WorkEngine {
     const trusted = Object.values(state.tasks || {}).filter(task => isTrustedThreadSender(task, message));
     const namedTrusted = narrowCommitmentsByMessage(trusted, message);
     const directiveCandidates = namedTrusted.length ? namedTrusted : trusted;
-    const withdrawalTarget = isWithdrawalMessage(message) && directiveCandidates.length === 1 ? directiveCandidates[0] : null;
+    const withdrawalTarget = (confirmedCancellation || isWithdrawalMessage(message)) && directiveCandidates.length === 1 ? directiveCandidates[0] : null;
     const reschedule = isRescheduleMessage(message) && directiveCandidates.length === 1 && !request
       ? extractDeadline(activeText, { now: message.receivedAt || event.at, dateLocale: this.#dateLocale() })
       : null;
@@ -555,6 +589,13 @@ export class WorkEngine {
       if (!current.inbox.some(item => item.id === message.id)) current.inbox.push({ ...message, connectorId: event.connectorId, source: event.source });
       event.summary = `Email received · ${message.subject}`;
 
+      if (event.meta.originClass === 'AUTOMATION') {
+        event.disposition = 'context_only';
+        event.rejection = { code: 'automated_response', detail: 'Provider metadata identifies this message as automated; it cannot independently create work.' };
+        record(current, 'observation', event.rejection.detail, null, event.id);
+        return;
+      }
+
       if (withdrawalTarget) {
         const latestAt = Date.parse(withdrawalTarget.commitment?.lastSourceAt || '');
         if (Number.isFinite(latestAt) && Date.parse(sourceAt) < latestAt) {
@@ -567,6 +608,12 @@ export class WorkEngine {
           event.disposition = 'request_withdrawn';
           event.relations = [withdrawalTarget.id];
         }
+        return;
+      }
+
+      if (event.suppressForwardActivation) {
+        event.disposition = 'suppressed_by_user_policy';
+        event.rejection = { code: 'user_policy', detail: 'Activation suppressed by an explicit user policy.' };
         return;
       }
 
@@ -634,6 +681,13 @@ export class WorkEngine {
           event.disposition = 'request_revision';
           event.relations = [target.id];
         }
+        return;
+      }
+
+      if (['PASSIVE_OBSERVER', 'SHARED_GROUP'].includes(event.meta.principalRole)) {
+        event.disposition = 'context_only';
+        event.rejection = { code: 'responsibility_not_established', detail: 'Recipient metadata does not establish that this request belongs to the user.' };
+        record(current, 'observation', event.rejection.detail, null, event.id);
         return;
       }
 
@@ -710,6 +764,7 @@ export class WorkEngine {
   }
 
   #maybeRecoverUnrecognizedMessage(event, generation = null, { now = Date.now(), dueOnly = false } = {}) {
+    if (event.meta?.originClass === 'AUTOMATION' || ['PASSIVE_OBSERVER', 'SHARED_GROUP'].includes(event.meta?.principalRole)) return false;
     if (!this.reasoner?.available?.()) return false;
     if (this.pendingDiscovery.has(event.id)) return false;
     const message = event.payload;
@@ -722,6 +777,7 @@ export class WorkEngine {
     const maxAttempts = Math.max(1, Math.min(2, Number(work.maxAttempts) || 2));
     const attempts = Math.max(0, Number(work.attempts) || 0);
     if (attempts >= maxAttempts) return false;
+    if (this.durableRuntime && !this.durableRuntime.canDiscover(event.id)) { this.durableRuntime.scheduleDiscovery(event.id); return true; }
     const attempt = attempts + 1;
     const requestId = `${event.id}:discover-attempt:${attempt}`;
     this.store.mutate(state => {
@@ -736,6 +792,7 @@ export class WorkEngine {
       dateLocale: this.#dateLocale(),
       onError: error => { failure = error; }
     }).then(request => {
+      if (this.durableRuntime && !this.durableRuntime.canDiscover(event.id)) return;
       const current = this.store.state.events.find(item => item.id === event.id);
       if (!current || current.reasoning?.status !== 'running' || current.reasoning.attempts !== attempt) return;
       const latestGeneration = this.threadGenerations.get(threadKey) ?? currentGeneration;
@@ -985,21 +1042,26 @@ export class WorkEngine {
     if (task.reasoning) task.reasoning = { ...task.reasoning, status: 'superseded' };
   }
 
-  #beginReasoningWork(taskId, kind, signature, { resume = false } = {}) {
+  #beginReasoningWork(taskId, kind, signature, { resume = false, contextKey = '' } = {}) {
     const task = this.store.state.tasks[taskId];
     if (!task || isSettled(task)) return { started: false, work: null };
     const requestVersion = Number(task.commitment?.revision || 1);
-    const key = `${taskId}:${requestVersion}:${kind}:${signature}`;
+    const key = `${taskId}:${requestVersion}:${kind}:${signature}${contextKey ? `:tools:${contextKey}` : ''}${this.durableRuntime ? `:input:${task.inputVersion}` : ''}`;
     const existing = task.reasoningWork;
     if (existing?.key === key && !resume) return { started: false, work: existing };
     const maxAttempts = Math.max(1, Math.min(3, Number(existing?.maxAttempts) || 2));
     const attempts = existing?.key === key ? Number(existing.attempts) || 0 : 0;
     if (existing?.key === key && !['pending', 'running', 'failed'].includes(existing.status)) return { started: false, work: existing };
     if (attempts >= maxAttempts) return { started: false, work: existing };
+    if (this.durableRuntime && !this.durableRuntime.canRun(taskId)) {
+      this.durableRuntime.scheduleTask(taskId, key);
+      return { started: false, work: existing, deferred: true };
+    }
     const work = {
       key, kind, signature, requestVersion, status: 'running', attempts: attempts + 1,
       maxAttempts, updatedAt: stamp(), lastError: null
     };
+    if (this.durableRuntime) { work.durableFence = this.durableRuntime.capture(taskId); work.inputVersion = task.inputVersion; }
     this.store.mutate(state => {
       const current = state.tasks[taskId];
       if (!current || isSettled(current) || Number(current.commitment?.revision || 1) !== requestVersion) return;
@@ -1029,7 +1091,7 @@ export class WorkEngine {
 
   #reasoningWorkIsCurrent(taskId, work) {
     const task = this.store.state.tasks[taskId];
-    return Boolean(task && !isSettled(task) && task.reasoningWork?.key === work.key &&
+    return Boolean(task && !isSettled(task) && (!this.durableRuntime || this.durableRuntime.isCurrent(taskId, work.durableFence)) && task.reasoningWork?.key === work.key &&
       task.reasoningWork?.attempts === work.attempts &&
       task.reasoningWork?.status === 'running' &&
       Number(task.commitment?.revision || 1) === work.requestVersion);
@@ -1058,7 +1120,7 @@ export class WorkEngine {
         current.reasoning = failure;
         if (this.reasoner.preferModelInterpretation) {
           current.status = 'waiting_for_information';
-          current.draft = null;
+          if (!current.draft?.userEdited) current.draft = null;
           current.reason = 'Model reasoning failed. Reconnect or retry before continuing.';
         }
         current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: String(error.message).slice(0, 500), updatedAt: failure.at, ...reasoningFailure(error, work) };
@@ -1091,6 +1153,7 @@ export class WorkEngine {
           return;
         }
         this.#finishReasoningWork(taskId, work, 'complete', { detail: 'The deterministic request stayed in place.' });
+        if (this.externalTools?.({ isCurrent: () => false })?.length) this.#maybeProposeProbes(taskId);
         return;
       }
       this.store.mutate(state => {
@@ -1113,6 +1176,7 @@ export class WorkEngine {
           taskId);
       }
       this.assess(taskId);
+      if (this.externalTools?.({ isCurrent: () => false })?.length) this.#maybeProposeProbes(taskId);
       this.changed();
     }).catch(error => {
       // A model failure must never disturb the deterministic baseline.
@@ -1129,15 +1193,16 @@ export class WorkEngine {
    * request rather than re-deriving it on every event.
    */
   #planFor(task) {
-    const signature = planSignature(task.request);
+    const request = effectiveTaskRequest(task, this.store.state);
+    const signature = planSignature(request);
     // Cache only deterministic plans. Model quotations belong to this task's request.
-    const baseline = this.planCache.get(signature) || this.planCache.set(signature, buildDeterministicPlan(task.request));
+    const baseline = this.planCache.get(signature) || this.planCache.set(signature, buildDeterministicPlan(request));
     let checkpoint = task.reasoningPlan;
     // Older states already hold bounded, validated model specs in the evidence projection.
     if (!checkpoint && task.reasoningAttemptedFor === signature && Array.isArray(task.evidence?.plan?.specs) && task.evidence.plan.specs.some(spec => spec.origin === 'model')) {
       checkpoint = checkpointPlan({ ...task.evidence.plan, signature });
     }
-    return restorePlan({ ...baseline, requestId: task.id }, checkpoint, task.request);
+    return restorePlan({ ...baseline, requestId: task.id }, checkpoint, request);
   }
 
   #taskSourceMessage(task) {
@@ -1165,15 +1230,19 @@ export class WorkEngine {
    */
   #maybeProposeProbes(taskId, { resume = false } = {}) {
     const task = this.store.state.tasks[taskId];
-    if (!task) return;
+    if (!task || isSettled(task) || !task.request) return;
+    if (isSourceFollowTask(task)) return this.#maybeInvestigateNativeTask(taskId, { resume });
     if (!this.reasoner?.available?.()) return;
     const plan = this.#planFor(task);
     const uncovered = plan.unverifiable.map(item => item.text);
     const hasOnlyWeakCoverage = plan.specs.length === 0 ||
       plan.specs.every(spec => spec.origin === 'derived');
-    if (!uncovered.length && !hasOnlyWeakCoverage) return;
-    if (task.reasoningAttemptedFor === plan.signature) return; // do not re-ask for the same request
-    const begun = this.#beginReasoningWork(taskId, 'probes', plan.signature, { resume });
+    const externalToolNames = (this.externalTools?.({ isCurrent: () => false }) || []).map(tool => tool.name).sort();
+    const hasExternalTools = externalToolNames.length > 0;
+    const toolContextKey = JSON.stringify([externalToolNames, this.durableRuntime?.database.get('context_version') || null]);
+    if (!uncovered.length && !hasOnlyWeakCoverage && !hasExternalTools) return;
+    if (task.reasoningAttemptedFor === plan.signature && (!hasExternalTools || task.mcpInvestigatedFor === toolContextKey)) return;
+    const begun = this.#beginReasoningWork(taskId, 'probes', plan.signature, { resume, contextKey: toolContextKey });
     if (!begun.started) return;
     const work = begun.work;
     const correlated = rankCandidates(task.request, Object.fromEntries(Object.entries(this.store.state.documents)
@@ -1182,24 +1251,40 @@ export class WorkEngine {
     const pending = Promise.resolve().then(() => {
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return null;
       return this.reasoner.proposeProbes({
-      request: task.request,
+      request: effectiveTaskRequest(task, this.store.state),
       uncovered,
       providers: PROVIDER_IDS,
       strategies: STRATEGY_IDS,
       contextHints: correlated.slice(0, 5).map(document => `${document.title} (#${document.id})`),
-      ...(this.reasoner.id === 'pi' ? { documents: () => {
+      planningContext: this.durableRuntime?.planningContext(taskId) || null,
+      externalTools: this.externalTools?.({
+        taskId,
+        isCurrent: () => this.#reasoningWorkIsCurrent(taskId, work),
+        onCall: call => {
+          if (this.durableRuntime && !this.#reasoningWorkIsCurrent(taskId, work)) return;
+          this.store.mutate(state => {
+            const current = state.tasks[taskId];
+            if (!current) return;
+            current.mcpCalls = [...(current.mcpCalls || []), call].slice(-20);
+            record(state, 'mcp_tool', `MCP ${call.serverId} · ${call.tool}: ${call.status}.`, taskId);
+          });
+          this.changed();
+        }
+      }) || [],
+      ...(this.reasoner.id === 'pi' ? { wrapReadTools: this.durableRuntime ? tools => this.durableRuntime.wrapReadTools(tools, taskId, { provider: 'document_store' }) : null, documents: () => {
         const current = this.store.state.tasks[taskId];
-        if (!current || isSettled(current) || planSignature(current.request) !== plan.signature) return [];
+        if (!current || isSettled(current) || !this.#reasoningWorkIsCurrent(taskId, work) || planSignature(effectiveTaskRequest(current, this.store.state)) !== plan.signature) return [];
         return rankCandidates(current.request, Object.fromEntries(Object.entries(this.store.state.documents)
-          .filter(([, document]) => documentAvailable(document)))).ranked.slice(0, 8).map(entry => entry.document);
+          .filter(([id, document]) => documentAvailable(document) && !this.#documentExcludedByFeedback(current, id)))).ranked.slice(0, 8).map(entry => entry.document);
       } } : {})
     }, reasoningKey);
     }).then(proposals => {
       const current = this.store.state.tasks[taskId];
-      if (!this.#reasoningWorkIsCurrent(taskId, work) || !current || isSettled(current) || planSignature(current.request) !== plan.signature) return;
+      if (!this.#reasoningWorkIsCurrent(taskId, work) || !current || isSettled(current) || planSignature(effectiveTaskRequest(current, this.store.state)) !== plan.signature) return;
       if (!proposals?.length) {
         this.store.mutate(state => {
           state.tasks[taskId].reasoningAttemptedFor = plan.signature;
+          state.tasks[taskId].mcpInvestigatedFor = toolContextKey;
           state.tasks[taskId].reasoningWork = { ...work, status: 'complete', updatedAt: stamp(), detail: 'The model proposed no usable probes.' };
           state.tasks[taskId].reasoning = {
             status: 'no_proposal', at: stamp(), detail: 'The model proposed no usable probes.',
@@ -1209,9 +1294,10 @@ export class WorkEngine {
         });
         return;
       }
-      const merged = applyModelProposals(plan, proposals, task.request);
+      const merged = applyModelProposals(plan, proposals, effectiveTaskRequest(task, this.store.state));
       this.store.mutate(state => {
         state.tasks[taskId].reasoningAttemptedFor = plan.signature;
+        state.tasks[taskId].mcpInvestigatedFor = toolContextKey;
         state.tasks[taskId].reasoningPlan = checkpointPlan(merged);
         state.tasks[taskId].reasoningWork = { ...work, status: 'complete', updatedAt: stamp() };
         state.tasks[taskId].reasoning = {
@@ -1259,6 +1345,71 @@ export class WorkEngine {
     return true;
   }
 
+  /** Newly authorized tools investigate active work once, without resending
+   * actions or changing completion evidence. Existing in-flight plans drain. */
+  investigateWithTools() {
+    if (!this.externalTools?.({ isCurrent: () => false })?.length) return;
+    for (const task of Object.values(this.store.state.tasks)) {
+      if (isSettled(task) || !task.request || task.action || task.reasoningWork?.status === 'running') continue;
+      this.#maybeProposeProbes(task.id);
+    }
+  }
+
+  documentsForTask(taskId) {
+    const task = this.store.state.tasks[taskId];
+    if (!task || task.privacyInvalidated || task.control?.paused || isSettled(task)) return [];
+    const documents = Object.fromEntries(Object.entries(this.store.state.documents).filter(([id, document]) => documentAvailable(document)
+      && !this.durableRuntime?.privacy.permissionRevoked(document.source) && !this.#documentExcludedByFeedback(task, id)));
+    const direct = documents[task.documentId] || documents[task.request?.source?.id];
+    const ranked = rankCandidates(effectiveTaskRequest(task, this.store.state), documents).ranked.map(entry => entry.document);
+    return [...new Map([...(direct ? [direct] : []), ...ranked].map(document => [document.id, document])).values()].slice(0, 8);
+  }
+
+  #maybeInvestigateNativeTask(taskId, { resume = false } = {}) {
+    const task = this.store.state.tasks[taskId];
+    if (!task || isSettled(task) || !this.reasoner.available?.() || !this.reasoner.investigateTask || !this.externalTools) return false;
+    const names = this.externalTools({ isCurrent: () => false }).map(tool => tool.name).sort();
+    if (!names.length) return false;
+    const directions = task.guidance ? [task.guidance.text] : matchingTaskMemories(task, this.store.state).map(memory => memory.text);
+    const signature = createHash('sha256').update(JSON.stringify([task.subject, task.externalSource, task.guidance?.id, directions, names, ...(this.durableRuntime ? [task.inputVersion, this.durableRuntime.database.get('context_version')] : [])])).digest('hex');
+    if (task.mcpInvestigation?.signature === signature) return false;
+    const begun = this.#beginReasoningWork(taskId, 'mcp_context', signature, { resume });
+    if (!begun.started) return false;
+    const work = begun.work;
+    const externalTools = this.externalTools({ taskId, isCurrent: () => this.#reasoningWorkIsCurrent(taskId, work), onCall: call => {
+      if (this.durableRuntime && !this.#reasoningWorkIsCurrent(taskId, work)) return;
+      this.store.mutate(state => {
+        const current = state.tasks[taskId]; if (!current) return;
+        current.mcpCalls = [...(current.mcpCalls || []), call].slice(-20);
+        record(state, 'mcp_tool', `MCP ${call.serverId} · ${call.tool}: ${call.status}.`, taskId);
+      }); this.changed();
+    } });
+    const pending = Promise.resolve().then(() => {
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return '';
+      return this.reasoner.investigateTask({ task, directions, externalTools, planningContext: this.durableRuntime?.planningContext(taskId) || null }, `${work.key}:attempt:${work.attempts}`);
+    }).then(nextStep => {
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
+      this.store.mutate(state => {
+        const current = state.tasks[taskId];
+        current.mcpInvestigation = { signature, nextStep: String(nextStep || '').slice(0, 600), at: stamp() };
+        current.reasoningWork = { ...work, status: 'complete', updatedAt: stamp() };
+        current.reasoning = { status: 'ok', at: stamp() };
+        record(state, 'mcp_investigation', 'Prepared a read-only investigation suggestion; source ownership and task completion are unchanged.', taskId);
+      }); this.changed();
+    }).catch(error => {
+      if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
+      this.store.mutate(state => {
+        const current = state.tasks[taskId];
+        current.reasoningWork = { ...work, status: 'failed', updatedAt: stamp(), lastError: String(error.message).slice(0, 500), ...reasoningFailure(error, work) };
+        current.reasoning = { status: 'failed', at: stamp(), detail: String(error.message).slice(0, 500) };
+        record(state, 'reasoning_failure', 'MCP investigation failed. No outcome or completion was inferred.', taskId);
+      }); this.changed();
+    });
+    this.pendingReasoning.set(work.key, pending);
+    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); });
+    this.#track(pending); return true;
+  }
+
   // ---------------------------------------------------------------- assessment
 
   /** The date a probe actually found, used as the freshness comparison input. */
@@ -1270,7 +1421,8 @@ export class WorkEngine {
 
   assess(taskId, eventId = null, { force = false, allowAutomation = true } = {}) {
     const task = this.store.state.tasks[taskId];
-    if (!task || isSettled(task) || ['external_issue', 'observed_task'].includes(task.kind)) return;
+    if (this.durableRuntime?.tasks.hasPendingSemantic(taskId)) return;
+    if (!task || isSettled(task) || isSourceFollowTask(task)) return;
     const state = this.store.state;
 
     const feedbackExcluded = [];
@@ -1555,13 +1707,22 @@ export class WorkEngine {
         interpretation: task.request.interpretedBy
       };
       if (complete) {
-        target.draft = this.#buildDraft(target, document, criteria, freshness, claims);
-        target.status = 'ready_for_approval';
-        record(current, 'preparation',
-          `Satisfied all ${criteria.length} criterion/criteria in ${document.title} with direct evidence; prepared a reply for approval. Nothing was sent.`,
-          taskId, eventId);
+        if (target.draft?.userEdited) {
+          const currentDraft = target.draft.documentId === document.id && target.draft.documentVersion === document.version
+            && Number(target.draft.requestVersion || 1) === Number(target.commitment?.revision || 1);
+          target.userDraftStale = !currentDraft;
+          target.status = currentDraft ? 'ready_for_approval' : 'waiting_for_information';
+          target.reason = currentDraft ? 'Your edited draft is preserved for your review.' : 'Your edited draft is preserved; review the changed evidence before updating it.';
+        } else {
+          target.draft = this.#buildDraft(target, document, criteria, freshness, claims);
+          target.status = 'ready_for_approval';
+          record(current, 'preparation',
+            `Satisfied all ${criteria.length} criterion/criteria in ${document.title} with direct evidence; prepared a reply for approval. Nothing was sent.`,
+            taskId, eventId);
+        }
       } else {
-        target.draft = null;
+        if (target.draft?.userEdited) { target.userDraftStale = true; target.reason = 'Your edited draft is preserved while the evidence is rechecked.'; }
+        else target.draft = null;
         target.status = this.#primaryReviewMissing(target) && target.reasoningWork?.status === 'running' ? 'investigating' : 'waiting_for_information';
         const why = [
           missing.length ? `not satisfied: ${missing.join('; ')}` : null,
@@ -1612,8 +1773,18 @@ export class WorkEngine {
     // and strengthened verification is exactly the uncertainty a grant cannot
     // cover: a competing source could contradict the draft, so the action needs
     // a fresh approval even though the user pre-authorised this flow.
-    if (allowAutomation && grant && !this.policy.shadow && verification.depth !== 'enhanced') this.#runPreAuthorized(taskId, grant);
+    const activation = this.durableRuntime?.activationFor(this.store.state.tasks[taskId]);
+    if (allowAutomation && grant && !this.policy.shadow && verification.depth !== 'enhanced' && this.#roleAllowsAutomaticWrite(this.store.state.tasks[taskId]) && (!activation || activation.activate && !activation.requiresReview)) this.#runPreAuthorized(taskId, grant);
     this.changed();
+  }
+
+  #roleAllowsAutomaticWrite(task) {
+    const origin = this.store.state.events.find(event => event.type === 'email.received' && event.payload?.id === task?.sourceEmailId);
+    if (!task?.sourceEmailId) return true;
+    // Legacy simulation fixtures predate recipient metadata. Real messages
+    // without grounded attribution require an individual approval.
+    if (!origin?.meta?.principalRole && origin?.source === 'simulated') return true;
+    return origin?.meta?.principalRole === 'DIRECT_ACTOR';
   }
 
   #providerForTask(task) {
@@ -1689,6 +1860,8 @@ export class WorkEngine {
    */
   approve(taskId, options = {}) {
     const task = this.#requireTask(taskId);
+    if (this.durableRuntime?.tasks.hasPendingSemantic(taskId)) throw Object.assign(new Error('A new source update must be interpreted before this action can be approved.'), { code: 'REVIEW_REQUIRED' });
+    if (task.control?.paused) throw new Error('This task is paused. Resume it before sending.');
     const provider = this.#providerForTask(task);
     if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet. Wait for reasoning or retry the failed model request.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
@@ -1756,12 +1929,13 @@ export class WorkEngine {
 
     const requestVersion = Number(task.commitment?.revision || 1);
     const actionVersion = Number(task.actionVersion || 0) + 1;
-    const versionSuffix = requestVersion > 1 ? `:r${requestVersion}` : '';
+    const versionSuffix = (requestVersion > 1 ? `:r${requestVersion}` : '') + (this.durableRuntime ? `:i${task.inputVersion}` : '');
     const action = {
       id: `send:${taskId}:${document.version}${versionSuffix}`,
       idempotencyKey: `send:${taskId}:${document.version}${versionSuffix}`,
       version: actionVersion,
       commitmentRevision: requestVersion,
+      ...(this.durableRuntime ? { inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch } : {}),
       actionClass: 'execute_external',
       permission: 'user_approved',
       approvedAt: approval.approvedAt,
@@ -1796,7 +1970,7 @@ export class WorkEngine {
    */
   #lookupSafely(idempotencyKey, options = {}, provider = this.provider) {
     const normalize = value => {
-      if (value?.status === 'not_found') return value;
+      if (value?.status === 'not_found') return this.durableRuntime?.normalizeLookup(idempotencyKey, provider, value) || value;
       if (value?.status === 'found' && typeof value.receipt?.id === 'string' && value.receipt.id.trim() &&
         (!value.receipt.idempotencyKey || value.receipt.idempotencyKey === idempotencyKey)) return value;
       return {
@@ -1813,7 +1987,8 @@ export class WorkEngine {
     });
     let result;
     try {
-      result = provider.lookup(idempotencyKey, options);
+      const savedReceipt = this.durableRuntime?.ledger.byKey(idempotencyKey)?.provider_receipt_id;
+      result = this.toolGateway.read(signal => provider.lookup(idempotencyKey, { ...options, receiptId: options.receiptId || savedReceipt || null, signal }));
     } catch (error) {
       return failed(error);
     }
@@ -1836,12 +2011,14 @@ export class WorkEngine {
       receipt: null,
       detail: `The send was accepted but could not be independently verified: ${error.message}`
     });
+    const normalize = value => value?.status === 'found' && validReceipt(value.receipt || receipt, { key: receipt?.idempotencyKey, receiptId: receipt?.id })
+      ? { ...value, receipt: value.receipt || receipt } : { status: 'unknown', receipt: null, detail: 'The provider did not verify this exact accepted operation.' };
     let result;
     try {
       if (typeof provider.verifyReceipt === 'function') {
-        result = provider.verifyReceipt(receipt);
+        result = this.toolGateway.read(signal => provider.verifyReceipt(receipt, { signal }));
       } else if (typeof provider.lookup === 'function') {
-        result = provider.lookup(receipt?.idempotencyKey, { receiptId: receipt?.id });
+        result = this.toolGateway.read(signal => provider.lookup(receipt?.idempotencyKey, { receiptId: receipt?.id, signal }));
       } else {
         return failed(new Error('the provider exposes no way to read the receipt back'));
       }
@@ -1849,9 +2026,9 @@ export class WorkEngine {
       return failed(error);
     }
     if (result && typeof result.then === 'function') {
-      return result.then(value => value, error => failed(error));
+      return result.then(normalize, error => failed(error));
     }
-    return result || failed(new Error('the provider returned no verification result'));
+    return normalize(result);
   }
 
   #actionIsCurrent(taskId, actionId) {
@@ -1903,11 +2080,12 @@ export class WorkEngine {
 
   #actionCanRecordResult(taskId, action) {
     const current = this.store.state.tasks[taskId]?.action;
-    return Boolean(current && current.id === action.id && current.version === action.version &&
+    return Boolean(current && (!this.durableRuntime || this.durableRuntime.isCurrent(taskId, action.durableFence, { allowDirty: true })) && current.id === action.id && current.version === action.version &&
       !['verified_live', 'verified_simulated'].includes(current.status));
   }
 
   execute(taskId, options = {}) {
+    if (this.store.state.tasks[taskId]?.control?.paused) throw new Error('This task is paused. Resume it before sending.');
     const task = this.#requireTask(taskId);
     if (!task.action) throw new Error('External action has no approval');
     const key = this.#actionKey(taskId, task.action);
@@ -1927,7 +2105,7 @@ export class WorkEngine {
     this.policy.authorize({ actionClass: task.action.actionClass || 'execute_external', approval: task.action, taskId });
 
     const actionId = task.action.id;
-    const actionIdentity = { id: actionId, version: task.action.version };
+    const actionIdentity = { id: actionId, version: task.action.version, ...(this.durableRuntime ? { durableFence: this.durableRuntime.capture(taskId) } : {}) };
     this.store.mutate(state => {
       const current = state.tasks[taskId];
       if (current?.action?.id === actionId) current.action.phase = 'lookup';
@@ -1945,6 +2123,14 @@ export class WorkEngine {
       });
       return this.#resolve(this.#sendSafely(task, options), outcome => {
         if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
+        if (outcome.denied) {
+          this.store.mutate(state => {
+            const current = state.tasks[taskId];
+            current.actionHistory = [...(current.actionHistory || []), { ...current.action, status: 'withheld_before_dispatch' }].slice(-50);
+            current.action = null; current.status = 'ready_for_approval'; current.guidanceReviewRequired = true; current.reason = outcome.blocked;
+          });
+          this.changed(); return this.store.state.tasks[taskId];
+        }
         if (outcome.blocked) return this.uncertain(taskId, outcome.blocked);
         if (outcome.receipt) {
           // Accepted is not verified. Read the message back before claiming it exists.
@@ -1973,14 +2159,23 @@ export class WorkEngine {
   #sendSafely(task, options) {
     let result;
     try {
-      result = this.#providerForTask(task).send({
+      const provider = this.#providerForTask(task);
+      const payload = {
         idempotencyKey: task.action.idempotencyKey,
         to: task.draft.to,
         subject: task.draft.subject,
         body: task.draft.body,
         documentUrl: task.draft.documentUrl,
         threadId: this.store.state.inbox.find(item => item.id === task.sourceEmailId)?.threadId || null
-      }, options.failureMode);
+      };
+      const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(payload.body).digest('hex') };
+      const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
+      result = this.durableRuntime ? this.durableRuntime.external(task, {
+        provider, tool: 'send', actionFamily: 'email.send', resourceId,
+        key: task.action.idempotencyKey,
+        effect,
+        payload, deferDispatch: provider.dispatchGuard === true, send: (signal, beforeDispatch) => provider.send(payload, options.failureMode, { signal, beforeDispatch })
+      }) : provider.send(payload, options.failureMode, { beforeDispatch: () => this.toolGateway.authorize({ taskId: task.id, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: task.action.idempotencyKey, payload, effect }) });
     } catch (error) {
       return this.#sendFailure(error);
     }
@@ -1991,11 +2186,16 @@ export class WorkEngine {
   }
 
   #sendFailure(error) {
-    if (error instanceof UncertainDeliveryError) return {};
+    if (error.definitiveNoEffect && ['AUTHORIZATION_REQUIRED', 'REVIEW_REQUIRED', 'ACTIVATION_SUPPRESSED'].includes(error.code)) return { denied: true, blocked: 'Authorization changed before dispatch. Nothing was sent; review the draft before continuing.' };
+    if (error instanceof UncertainDeliveryError || error.ambiguous) return {};
     return { blocked: `Delivery failed: ${error.message}. No automatic retry was attempted.` };
   }
 
   confirm(taskId, receipt, reconciled, via = reconciled ? 'lookup' : 'receipt') {
+    if (this.durableRuntime) {
+      this.durableRuntime.verifiedAction(taskId, receipt);
+      if (!this.durableRuntime.confirmCurrentContext(taskId, receipt)) return this.store.state.tasks[taskId];
+    }
     let verifiedAction = null;
     let withdrawn = false;
     let recheckRevision = false;
@@ -2024,7 +2224,7 @@ export class WorkEngine {
           task.commitment.status = 'active';
           task.status = 'newly_discovered';
           task.reason = 'The previous approved action was verified after the request changed. The revised request needs a fresh assessment and approval.';
-          task.draft = null;
+          if (!task.draft?.userEdited) task.draft = null;
           task.evidence = null;
           task.assessment = null;
           task.progress = null;
@@ -2110,9 +2310,9 @@ export class WorkEngine {
   reconcile(taskId) {
     const task = this.#requireTask(taskId);
     if (!task.action) throw new Error('No approved action to reconcile');
-    this.policy.authorize({ actionClass: task.action.actionClass || 'execute_external', approval: task.action, taskId });
+    this.policy.authorize({ actionClass: 'observe', taskId });
     const actionId = task.action.id;
-    const actionIdentity = { id: actionId, version: task.action.version };
+    const actionIdentity = { id: actionId, version: task.action.version, ...(this.durableRuntime ? { durableFence: this.durableRuntime.capture(taskId) } : {}) };
     const startingStatus = task.action.status;
     return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), result => {
       if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
@@ -2148,6 +2348,7 @@ export class WorkEngine {
   }
 
   retry(taskId) {
+    if (this.store.state.tasks[taskId]?.control?.paused) throw new Error('This task is paused. Resume it before retrying.');
     const task = this.#requireTask(taskId);
     if (!task.action || task.action.status !== 'confirmed_absent') throw new Error('Retry requires confirmed absence and prior approval');
     const requestVersion = Number(task.commitment?.revision || 1);
@@ -2192,6 +2393,7 @@ export class WorkEngine {
   reject(taskId) {
     const task = this.#requireTask(taskId);
     if (task.status !== 'ready_for_approval') throw new Error('Task is not awaiting approval');
+    this.durableRuntime?.userFeedback(taskId, 'explicit_rejection');
     this.store.mutate(state => {
       state.tasks[taskId].status = 'blocked';
       state.tasks[taskId].userDismissed = true;
@@ -2209,6 +2411,7 @@ export class WorkEngine {
   reopen(taskId) {
     const task = this.#requireTask(taskId);
     if (task.kind === 'external_issue' && (!task.externalSource.assigned || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This issue is no longer actively assigned to the connected account.');
+    if (['external_review', 'external_change', 'external_check'].includes(task.kind) && (task.externalSource.active === false || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This GitHub work is no longer open for the connected account.');
     if (task.kind === 'observed_task' && (task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.[task.sourceConnectorId] !== task.externalSource.accountId)) throw new Error('This local to-do is no longer open in the connected source.');
     if (task.action || !['blocked', 'cancelled'].includes(task.status)) {
       throw new Error('Only a declined or closed request without an action can be reopened');
@@ -2217,7 +2420,9 @@ export class WorkEngine {
       const target = state.tasks[taskId];
       target.status = 'waiting_for_information';
       target.userDismissed = false;
-      target.draft = null;
+      if (target.control?.paused) target.control = { ...target.control, paused: false, updatedAt: stamp() };
+      if (target.draft?.userEdited) target.userDraftStale = true;
+      else target.draft = null;
       target.reason = null;
       target.updatedAt = stamp();
       record(state, 'reopening', 'User restored this request. Rechecking current evidence; nothing is sent by restoring it.', taskId);
@@ -2321,6 +2526,20 @@ export class WorkEngine {
     return this.taskServices.waitForTask(taskId, condition);
   }
 
+  setTaskPaused(taskId, paused) { return pauseTask(this, taskId, paused); }
+  directTask(taskId, direction) { this.durableRuntime?.userFeedback(taskId, 'explicit_rejection'); return directTask(this, taskId, direction); }
+  undoTaskDirection(taskId, id) { return undoTaskDirection(this, taskId, id); }
+  updateTaskMemory(id, operation) { return updateTaskMemory(this, id, operation); }
+
+  recheckTaskGuidance(taskId) {
+    this.assess(taskId, null, { force: true, allowAutomation: false });
+    const task = this.store.state.tasks[taskId];
+    if (!task || isSettled(task)) return;
+    const source = this.#taskSourceMessage(task);
+    if (source && this.#primaryReviewMissing(task)) this.#maybeRefineWithModel(taskId, source);
+    else this.#maybeProposeProbes(taskId);
+  }
+
   recordTaskFeedback(taskId, feedback = {}) {
     const result = this.taskServices.recordTaskFeedback(taskId, feedback);
     if (result.label === 'wrong_association') this.assess(taskId, null, { force: true, allowAutomation: false });
@@ -2351,7 +2570,7 @@ export class WorkEngine {
     this.store.mutate(state => {
       const current = state.tasks[taskId];
       current.status = 'cancelled';
-      if (['external_issue', 'observed_task'].includes(current.kind)) current.userDismissed = true;
+      if (isSourceFollowTask(current)) current.userDismissed = true;
       current.updatedAt = stamp();
       current.reason = 'Closed by the user while waiting for information. Nothing was sent.';
       current.draft = null;
@@ -2536,7 +2755,7 @@ export class WorkEngine {
    * interruption about the same task would be noise, not information.
    */
   #stallWorthy(task, state, at) {
-    if (['external_issue', 'observed_task'].includes(task.kind)) return false;
+    if (isSourceFollowTask(task)) return false;
     if (task.status !== 'waiting_for_information') return false;
     const since = task.progress?.at ? Date.parse(task.progress.at) : NaN;
     if (!Number.isFinite(since) || at - since < this.stallAfterMs) return false;
@@ -2833,6 +3052,12 @@ export class WorkEngine {
   /** Execute inside a stated, scoped pre-authorisation, then verify as usual. */
   executePreAuthorized(taskId, grant = null) {
     const task = this.#requireTask(taskId);
+    if (this.durableRuntime?.tasks.hasPendingSemantic(taskId)) throw Object.assign(new Error('A new source update must be interpreted before this action can proceed.'), { code: 'REVIEW_REQUIRED' });
+    if (this.policy.shadow) this.policy.authorize({ actionClass: 'execute_external', taskId });
+    if (!this.#roleAllowsAutomaticWrite(task)) throw Object.assign(new Error('The user\'s responsibility for this message is not established; individual approval is required.'), { code: 'REVIEW_REQUIRED' });
+    const activation = this.durableRuntime?.activationFor(task);
+    if (activation && (!activation.activate || activation.requiresReview)) throw Object.assign(new Error('An explicit user policy requires review before this task may act.'), { code: 'REVIEW_REQUIRED' });
+    if (task.control?.paused || task.guidanceReviewRequired) throw new Error('The task was paused or corrected by the user. Review the updated task before sending.');
     const provider = this.#providerForTask(task);
     if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
@@ -2893,12 +3118,13 @@ export class WorkEngine {
       throw new Error(reason);
     }
     const actionVersion = Number(task.actionVersion || 0) + 1;
-    const versionSuffix = requestVersion > 1 ? `:r${requestVersion}` : '';
+    const versionSuffix = (requestVersion > 1 ? `:r${requestVersion}` : '') + (this.durableRuntime ? `:i${task.inputVersion}` : '');
     const action = {
       id: `send:${taskId}:${document.version}${versionSuffix}`,
       idempotencyKey: `send:${taskId}:${document.version}${versionSuffix}`,
       version: actionVersion,
       commitmentRevision: requestVersion,
+      ...(this.durableRuntime ? { inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch } : {}),
       actionClass: 'execute_external',
       permission: 'pre_authorized',
       source: resolved.source,
@@ -2959,11 +3185,13 @@ export class WorkEngine {
         if (message) this.#maybeRefineWithModel(task.id, message);
       }
     }
+    this.investigateWithTools();
+    this.durableRuntime?.modelChanged();
     this.changed();
   }
 
   #primaryReviewMissing(task) {
-    if (['external_issue', 'observed_task'].includes(task.kind)) return false;
+    if (isSourceFollowTask(task)) return false;
     return this.reasoner.preferModelInterpretation === true &&
       !(task.modelReview?.status === 'verified' && task.modelReview.requestVersion === Number(task.commitment?.revision || 1));
   }
@@ -3024,6 +3252,14 @@ export class WorkEngine {
   #resumeReasoningForTask(taskId, { now = Date.now(), dueOnly = false } = {}) {
     const task = this.store.state.tasks[taskId];
     if (!task || isSettled(task) || !this.reasoner?.available?.()) return false;
+    if (isSourceFollowTask(task)) {
+      const work = task.reasoningWork;
+      if (work && !['pending', 'running', 'failed'].includes(work.status)) return false;
+      if (dueOnly && !reasoningMayResume(work, now, { automatic: true })) return false;
+      if (work?.status === 'failed' && !reasoningMayResume(work, now)) return false;
+      if (this.pendingReasoning.has(work?.key) || this.pendingReasoning.size >= REASONING_RECOVERY.maxStartsPerSweep) return false;
+      return this.#maybeInvestigateNativeTask(taskId, { resume: Boolean(work) });
+    }
     const source = this.store.state.inbox.find(item => item.id === task.sourceEmailId) ||
       this.store.state.inbox.find(item => item.id === task.request?.source?.id);
     if (!source) return false;

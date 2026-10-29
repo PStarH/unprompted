@@ -28,6 +28,7 @@ export class MonitoringService {
     this.running = false;
     this.currentRun = Promise.resolve(null);
     this.stopped = false;
+    this.continuationRuns = 0;
     this.settings = setup.get().monitoring;
   }
 
@@ -39,6 +40,7 @@ export class MonitoringService {
 
   start() {
     this.stopped = false;
+    this.continuationRuns = 0;
     this.settings = this.setup.get().monitoring;
     if (this.settings.enabled && this.hasLiveConnector) return this.#runAndSchedule();
     return Promise.resolve(this.describe());
@@ -59,6 +61,7 @@ export class MonitoringService {
     this.setup.setMonitoring({ enabled: nextEnabled, intervalMs: interval, userConfigured: true });
     this.settings = this.setup.get().monitoring;
     this.stopped = false;
+    this.continuationRuns = 0;
     this.#clearTimer();
     if (nextEnabled) {
       // The first pull begins immediately; the next one is scheduled only when
@@ -72,7 +75,7 @@ export class MonitoringService {
     if (this.running) return { skipped: 'A sync is already running.', results: [] };
     this.currentRun = this.#run();
     const outcome = await this.currentRun;
-    if (this.settings.enabled && !this.stopped) this.#schedule();
+    if (this.settings.enabled && !this.stopped) this.#schedule(outcome);
     return outcome;
   }
 
@@ -81,13 +84,17 @@ export class MonitoringService {
     this.timer = null;
   }
 
-  #schedule() {
+  #schedule(outcome) {
     this.#clearTimer();
     if (this.stopped || !this.settings.enabled || !this.hasLiveConnector || this.running) return;
+    const results = outcome?.results || [];
+    const more = results.some(result => result.hasMore) && results.every(result => !result.failed && !result.partial);
+    const fast = more && this.continuationRuns < 4;
+    this.continuationRuns = fast ? this.continuationRuns + 1 : 0;
     this.timer = this.setTimer(() => {
       this.timer = null;
       void this.#runAndSchedule();
-    }, this.settings.intervalMs);
+    }, fast ? 1000 : this.settings.intervalMs);
     this.timer?.unref?.();
   }
 
@@ -95,7 +102,7 @@ export class MonitoringService {
     if (this.running) return this.currentRun;
     this.currentRun = this.#run();
     const outcome = await this.currentRun;
-    if (this.settings.enabled && !this.stopped) this.#schedule();
+    if (this.settings.enabled && !this.stopped) this.#schedule(outcome);
     return outcome;
   }
 

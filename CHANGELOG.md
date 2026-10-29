@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.2.0 public preview
+## 0.3.0 — 2026-10-28
 
 Unprompted is an early, local-first proactive agent implementation. This preview
 connects your own model and authorized workspace sources to discover actual work.
@@ -9,18 +9,19 @@ action → verified result loop for framework contributors.
 
 ### First experience
 
-- Choose local folders, Apple Notes on macOS, Google Workspace, GitHub or
-  Microsoft Outlook from the home page. Local file access is limited to selected
-  Markdown/text folders; Apple Notes is read-only and its real-account
-  permission flow still needs manual acceptance.
+- Choose local folders, Apple Notes on macOS, Google Workspace, GitHub,
+  Microsoft Outlook, Slack or Notion from the home page. Local file access is
+  limited to selected Markdown/text folders. Apple Notes creation requires a
+  separately authorized folder; its real-account flow still needs acceptance.
 - GitHub and Outlook use official device OAuth and verify the signed-in account
   before activation. Distributions can provision public Client IDs once;
   self-hosted installs can enter them in the application.
 - GitHub assignments retain native issue identity, repository, source link and
   assignee. Reassignment, closure and unavailable access stop tracking without
   claiming the agent completed the issue. Outlook reads inbox delta updates.
-- Multiple sources activate without restart and disconnect independently. Delivery
-  follows the task's source; read-only Outlook cannot use Gmail's send transport.
+- Multiple sources activate without restart and disconnect independently. Gmail
+  and Outlook can save drafts, and Notion and Apple Notes can create content in
+  separately authorized destinations. Sending uses its independent authorization.
 - A connector guide, synthetic OAuth/provider fixtures and a connector issue
   template provide an account-free path for new contributors. Historical design
   and audit notes are excluded from the maintained public documentation.

@@ -40,6 +40,12 @@ assert.match(manifest.checksumSource, /^https:\/\/nodejs\.org\//);
 assert.match(manifest.archiveSha256, /^[a-f0-9]{64}$/);
 assert.ok(manifest.linkedLibraries.every(item => item.startsWith('/System/Library/') || item.startsWith('/usr/lib/')), 'runtime links only to system libraries');
 assert.equal(manifest.packageLockIncluded, true, 'the lockfile is included in the local app');
+if (manifest.sqliteRuntime) {
+  const sqlite = JSON.parse(run(nodePath, ['--input-type=module', '-e', "import {DurableDatabase} from './src/durable/database.js';const d=new DurableDatabase(':memory:');console.log(JSON.stringify(d.describe()));d.close();"], { cwd: appRoot }).trim());
+  assert.equal(sqlite.sqliteVersion, manifest.sqliteRuntime.sqliteVersion);
+  assert.equal(sqlite.synchronous, 'FULL'); assert.equal(sqlite.ftsSecureDelete, true);
+}
+if (manifest.mcpClient?.available) run(nodePath, ['--input-type=module', '-e', "await Promise.all([import('@modelcontextprotocol/client'),import('@modelcontextprotocol/client/stdio')])"], { cwd: appRoot });
 if (manifest.piHarness?.available) {
   assert.ok(fs.existsSync(path.join(appRoot, 'node_modules', '@earendil-works', 'pi-agent-core', 'package.json')));
   assert.ok(fs.existsSync(path.join(appRoot, 'node_modules', '@earendil-works', 'pi-ai', 'package.json')));

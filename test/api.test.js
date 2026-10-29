@@ -460,7 +460,7 @@ test('an unchanged boot does not rewrite the state file, and a changed runtime r
     summary: '', relations: [], disposition: '', payload: {}
   });
   fs.writeFileSync(stateFile, JSON.stringify(seeded, null, 2) + '\n');
-  const sha = () => createHash('sha256').update(fs.readFileSync(stateFile)).digest('hex');
+  const sha = () => createHash('sha256').update(fs.readFileSync(stateFile.replace(/\.json$/, '.sqlite'))).digest('hex');
 
   const boot = async (extraEnv = {}) => {
     const reservation = net.createServer();
@@ -491,17 +491,19 @@ test('an unchanged boot does not rewrite the state file, and a changed runtime r
   };
 
   const first = await boot();
-  first.child.kill('SIGKILL');
-  assert.equal(first.health.revision, 1, 'the first boot records its runtime report');
+  await new Promise(resolve => { first.child.once('exit', resolve); first.child.kill('SIGTERM'); });
+  assert.ok(first.health.revision > 0, 'the first boot commits migration and its runtime report');
+  assert.equal(fs.existsSync(stateFile), false, 'JSON is retired only after verified migration');
+  assert.equal(fs.existsSync(stateFile + '.migration-backup'), true);
   const firstHash = sha();
 
   const second = await boot();
-  second.child.kill('SIGKILL');
-  assert.equal(second.health.revision, 1, 'an unchanged boot must not bump the revision');
+  await new Promise(resolve => { second.child.once('exit', resolve); second.child.kill('SIGTERM'); });
+  assert.equal(second.health.revision, first.health.revision, 'an unchanged boot must not bump the revision');
   assert.equal(sha(), firstHash, 'an unchanged boot must not rewrite the file');
 
   const third = await boot({ UNPROMPTED_DATE_LOCALE: 'DD/MM' });
-  third.child.kill('SIGKILL');
+  await new Promise(resolve => { third.child.once('exit', resolve); third.child.kill('SIGTERM'); });
   assert.ok(third.health.revision > second.health.revision, 'a changed runtime report must still be recorded');
   assert.notEqual(sha(), firstHash, 'a changed runtime report rewrites the file');
 });

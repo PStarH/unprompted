@@ -15,7 +15,7 @@ export class NativeSourceBridge {
   constructor({ platform = process.platform, spawnImpl = spawn } = {}) { Object.assign(this, { platform, spawnImpl }); }
   async run(operation, payload = {}, { signal, timeoutMs = operation.startsWith('choose-') ? 120_000 : 30_000 } = {}) {
     if (this.platform !== 'darwin') throw new NativeAccessError('UNSUPPORTED');
-    if (!['choose-files', 'choose-notes', 'read-notes'].includes(operation)) throw new NativeAccessError('NATIVE_ACCESS_FAILED');
+    if (!['choose-files', 'choose-notes', 'read-notes', 'create-note'].includes(operation)) throw new NativeAccessError('NATIVE_ACCESS_FAILED');
     if (signal?.aborted) throw new NativeAccessError('CANCELLED');
     return new Promise((resolve, reject) => {
       let child;
@@ -49,4 +49,5 @@ export class NativeSourceBridge {
   chooseFiles(options = {}) { return this.run('choose-files', { locale: options.locale }, options); }
   chooseNotes(options = {}) { return this.run('choose-notes', { locale: options.locale }, options); }
   readNotes(folders, known, options = {}) { return this.run('read-notes', { folders, known }, options); }
+  createNote(folder, content, options = {}) { return this.run('create-note', { folder, ...content }, options); }
 }

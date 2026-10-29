@@ -1,6 +1,10 @@
+import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Connector, ConnectorError } from './connector.js';
 import { toNormalizedEvents } from './connector.js';
+import { emailPrincipalRole, simpleMailboxList } from './principal-role.js';
 import { readTextBounded } from '../bounded.js';
+import { normalizeAddress } from '../commitments.js';
 
 /**
  * Google Workspace connector — Gmail + Drive/Docs.
@@ -21,6 +25,9 @@ import { readTextBounded } from '../bounded.js';
  * will refuse to execute.
  */
 
+export const gmailMessageId = key => `<unprompted-${createHash('sha256').update(String(key)).digest('hex')}@unprompted.local>`;
+const legacyMessageId = key => `<unprompted-${String(key).replace(/[^a-zA-Z0-9]/g, '-')}@unprompted.local>`;
+
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1';
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
@@ -30,6 +37,7 @@ const DOCUMENT_LIST_LIMIT = 20;
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_SYNC_BUDGET_MS = 120000;
 const DEFAULT_MAX_DOCUMENT_CHARS = 1000000;
+const MAX_GOOGLE_JSON_CHARS = 4000000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_BASE_MS = 500;
 const MAX_RETRY_DELAY_MS = 30000;
@@ -215,7 +223,7 @@ export class GoogleWorkspaceConnector extends Connector {
       ? config.sleep
       : ms => new Promise(resolve => setTimeout(resolve, ms));
     this.random = typeof config.random === 'function' ? config.random : Math.random;
-    this.deadline = null;
+    this.syncDeadline = new AsyncLocalStorage();
     this.auth = auth || new GoogleAuth({ ...config, fetchImpl, timeoutMs: this.timeoutMs });
   }
 
@@ -235,9 +243,27 @@ export class GoogleWorkspaceConnector extends Connector {
     };
   }
 
+  capabilities() {
+    const configured = this.live && this.validate().ok;
+    const mail = configured && this.config.readGmail !== false, docs = configured && this.config.readDrive !== false;
+    // Sent-mail readback is part of the delivery contract, not optional.
+    const send = mail && this.sendEnabled;
+    const patch = configured && this.config.docsWriteEnabled === true && !this.shadow;
+    return {
+      read: [...(mail ? ['gmail.messages'] : []), ...(docs ? ['drive.google_docs'] : [])],
+      search: [...(mail ? ['gmail.messages'] : []), ...(docs ? ['drive.google_docs'] : [])],
+      pagination: [...(mail ? ['gmail.history', 'gmail.initial_listing', 'gmail.search'] : []), ...(docs ? ['drive.changes', 'drive.listing', 'drive.search'] : [])],
+      incremental: [...(mail ? ['gmail.history'] : []), ...(docs ? ['drive.changes'] : [])],
+      observation: configured ? 'poll' : 'none', providerPush: false,
+      write: [...(send ? ['gmail.approved_reply'] : []), ...(patch ? ['docs.approved_patch'] : [])],
+      verify: [...(send ? ['gmail.sent_readback'] : []), ...(patch ? ['docs.revision_readback'] : [])]
+    };
+  }
+
   /** Fail fast once the sync deadline has passed instead of starting more I/O. */
   #checkBudget() {
-    if (this.deadline != null && Date.now() >= this.deadline) {
+    const deadline = this.syncDeadline.getStore();
+    if (deadline != null && Date.now() >= deadline) {
       throw new ConnectorError(
         `Google sync exceeded its ${this.syncBudgetMs}ms time budget; the cursor was not advanced.`,
         { connectorId: this.id, retryable: true, timeout: true }
@@ -247,8 +273,9 @@ export class GoogleWorkspaceConnector extends Connector {
 
   /** Never let a single request outlive the remaining sync budget. */
   #requestTimeoutMs() {
-    if (this.deadline == null) return this.timeoutMs;
-    return Math.max(1, Math.min(this.timeoutMs, this.deadline - Date.now()));
+    const deadline = this.syncDeadline.getStore();
+    if (deadline == null) return this.timeoutMs;
+    return Math.max(1, Math.min(this.timeoutMs, deadline - Date.now()));
   }
 
   async #backoff(attempt, retryAfter = null) {
@@ -267,7 +294,7 @@ export class GoogleWorkspaceConnector extends Connector {
    * never retried here: a lost response may mean the provider already acted,
    * so the caller must reconcile instead (see the mail adapter).
    */
-  async #request(url, { method = 'GET', body = null, headers = {}, retry = method === 'GET' } = {}) {
+  async #request(url, { method = 'GET', body = null, headers = {}, retry = method === 'GET', beforeDispatch = null, signal = null } = {}) {
     this.#checkBudget();
     const authHeaders = await this.auth.headers();
     const attempts = retry ? this.maxRetries + 1 : 1;
@@ -279,12 +306,12 @@ export class GoogleWorkspaceConnector extends Connector {
       let response;
       try {
         response = await withTimeout(
-          Promise.resolve().then(() => this.fetchImpl(url, {
+          Promise.resolve().then(() => { beforeDispatch?.(); return this.fetchImpl(url, {
             method,
             headers: { ...authHeaders, ...headers },
             ...(body ? { body } : {}),
-            signal: controller.signal
-          })),
+            signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
+          }); }),
           this.#requestTimeoutMs(),
           () => new ConnectorError(`Google request timed out after ${this.timeoutMs}ms.`, {
             connectorId: this.id, retryable: true, timeout: true
@@ -292,6 +319,7 @@ export class GoogleWorkspaceConnector extends Connector {
           () => controller.abort()
         );
       } catch (error) {
+        if (error.code && ['RUN_INVALIDATED', 'TASK_DIRTY', 'CONTEXT_CHANGED', 'CHECKPOINT_INVALID', 'LEASE_LOST', 'AUTHORIZATION_REQUIRED'].includes(error.code)) { error.definitiveNoEffect = true; throw error; }
         lastError = error instanceof ConnectorError
           ? error
           : new ConnectorError(`Google request failed: ${error.message}`, { connectorId: this.id, retryable: true });
@@ -304,7 +332,8 @@ export class GoogleWorkspaceConnector extends Connector {
       if (response.status === 403) {
         let disabled = false;
         try {
-          const detail = await response.json();
+          const detail = await withTimeout(Promise.resolve().then(() => response.json()), this.#requestTimeoutMs(),
+            () => new ConnectorError('Google error response timed out.', { connectorId: this.id, timeout: true }), () => controller.abort());
           const reasons = [...(detail.error?.details || []).map(item => item.reason), ...(detail.error?.errors || []).map(item => item.reason)];
           disabled = reasons.some(reason => reason === 'SERVICE_DISABLED' || reason === 'accessNotConfigured');
         } catch { /* malformed diagnostics do not change the denied result */ }
@@ -330,7 +359,15 @@ export class GoogleWorkspaceConnector extends Connector {
       // The deadline may have passed while waiting for the response. Do not
       // process a late response as if the sync still had time left.
       this.#checkBudget();
-      return response.json();
+      return withTimeout(Promise.resolve().then(async () => {
+        let body;
+        try { body = await readTextBounded(response, MAX_GOOGLE_JSON_CHARS, 'Google response'); }
+        catch (error) { throw new ConnectorError(`Could not read a bounded Google response: ${error.message}`, { connectorId: this.id, retryable: false }); }
+        try { return typeof body === 'string' ? JSON.parse(body) : body; }
+        catch { throw new ConnectorError('Google returned an invalid JSON response.', { connectorId: this.id, retryable: false }); }
+      }), this.#requestTimeoutMs(),
+        () => new ConnectorError('Google response body timed out.', { connectorId: this.id, retryable: true, timeout: true }),
+        () => controller.abort());
     }
 
     throw lastError || new ConnectorError('Google request failed without a response.', { connectorId: this.id, retryable: true });
@@ -338,11 +375,11 @@ export class GoogleWorkspaceConnector extends Connector {
 
   /** Incremental sync. Returns events plus a cursor to resume from. */
   async pull({ cursor = null } = {}) {
-    this.deadline = Date.now() + this.syncBudgetMs;
-    try {
+    return this.syncDeadline.run(Date.now() + this.syncBudgetMs, async () => {
       const errors = [];
       const nextCursor = { ...(cursor || {}) };
       const events = [];
+      let hasMore = false;
 
       if (this.config.readGmail !== false) {
         try {
@@ -359,6 +396,7 @@ export class GoogleWorkspaceConnector extends Connector {
           const drive = await this.#pullDrive(cursor?.drive || null);
           events.push(...drive.events);
           nextCursor.drive = drive.cursor;
+          hasMore ||= drive.hasMore === true;
           for (const error of drive.errors || []) {
             errors.push({ scope: 'drive', message: error.message, retryable: Boolean(error.retryable) });
           }
@@ -367,10 +405,71 @@ export class GoogleWorkspaceConnector extends Connector {
         }
       }
 
-      return { events, cursor: nextCursor, errors, partial: errors.length > 0 };
-    } finally {
-      this.deadline = null;
+      return { events, cursor: nextCursor, errors, partial: errors.length > 0, hasMore };
+    });
+  }
+
+  /** Explicit user search, separate from proactive observation and task ingestion. */
+  async search({ source, query, pageToken = null, limit = 20 } = {}, { signal = null, beforeRequest = null } = {}) {
+    if (!['gmail', 'drive'].includes(source) || typeof query !== 'string' || !query.trim() || query.length > 512 || /[\u0000-\u001f\u007f]/.test(query)) throw Object.assign(new Error('Choose a valid source and search query.'), { status: 400 });
+    if (!Number.isInteger(limit) || limit < 1 || limit > 25) throw Object.assign(new Error('Search limit must be between 1 and 25.'), { status: 400 });
+    if (pageToken != null && (typeof pageToken !== 'string' || !pageToken || pageToken.length > 2048)) throw Object.assign(new Error('Invalid search page token.'), { status: 400 });
+    const guard = () => {
+      if (!this.live || !this.validate().ok || source === 'gmail' && this.config.readGmail === false || source === 'drive' && this.config.readDrive === false)
+        throw Object.assign(new Error('This source is not enabled or authorized for search.'), { code: 'AUTHORIZATION_REQUIRED', status: 403 });
+      signal?.throwIfAborted(); beforeRequest?.();
+    };
+    const nextPage = listing => {
+      const next = listing.nextPageToken;
+      if (next != null && (typeof next !== 'string' || !next || next.length > 2048)) throw new ConnectorError('The provider returned an invalid search continuation.', { connectorId: this.id });
+      return next || null;
+    };
+    guard();
+    if (source === 'gmail') {
+      const params = new URLSearchParams({ q: query.trim(), maxResults: String(limit) });
+      if (pageToken) params.set('pageToken', pageToken);
+      const listing = await this.#request(`${GMAIL}/users/me/messages?${params}`, { signal, beforeDispatch: guard });
+      if (!Array.isArray(listing.messages || []) || (listing.messages || []).length > limit) throw new ConnectorError('Gmail returned an invalid search page.', { connectorId: this.id });
+      const items = [];
+      for (const message of listing.messages || []) {
+        if (typeof message.id !== 'string' || !message.id) throw new ConnectorError('Gmail returned an invalid search result.', { connectorId: this.id });
+        try {
+          const full = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(message.id)}?format=full`, { signal, beforeDispatch: guard });
+          if (full.id !== message.id) throw new ConnectorError('Gmail returned a different message.', { connectorId: this.id });
+          const record = this.#toEmailRecord(full).payload;
+          items.push({ ...record, body: String(record.body).slice(0, 16000) });
+        } catch (error) { if (error.status !== 404) throw error; }
+      }
+      guard();
+      return { source, items, nextPageToken: nextPage(listing) };
     }
+    const escaped = query.trim().replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+    const params = new URLSearchParams({ q: `mimeType='${DOC_MIME}' and trashed=false and name contains '${escaped}'`, pageSize: String(limit),
+      fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,modifiedTime)' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const listing = await this.#request(`${DRIVE}/files?${params}`, { signal, beforeDispatch: guard });
+    if (listing.incompleteSearch || !Array.isArray(listing.files || []) || (listing.files || []).length > limit) throw new ConnectorError('Drive returned an incomplete or invalid search page.', { connectorId: this.id, retryable: true });
+    const items = (listing.files || []).map(file => {
+      if (typeof file.id !== 'string' || !file.id || typeof file.name !== 'string' || file.mimeType !== DOC_MIME) throw new ConnectorError('Drive returned an invalid document result.', { connectorId: this.id });
+      return { id: file.id, title: file.name, modifiedAt: file.modifiedTime || null, url: `https://docs.google.com/document/d/${encodeURIComponent(file.id)}/edit` };
+    });
+    guard();
+    return { source, items, nextPageToken: nextPage(listing) };
+  }
+
+  async listHistoricalEvents({ limit = 20 } = {}) {
+    if (!this.live || this.config?.readGmail === false) return { events: [], networkCalls: 0, unavailable: true };
+    const cap = Math.max(1, Math.min(20, Number(limit) || 20));
+    const listing = await this.#request(`${GMAIL}/users/me/messages?${new URLSearchParams({ q: 'newer_than:14d -in:chats', maxResults: String(cap) })}`);
+    let networkCalls = 1;
+    const events = [];
+    for (const message of (listing.messages || []).slice(0, cap)) {
+      if (typeof message?.id !== 'string' || !message.id) throw new ConnectorError('Gmail returned an incomplete history page.', { connectorId: this.id });
+      const full = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(message.id)}?format=full`);
+      networkCalls += 1;
+      events.push(...toNormalizedEvents(this.id, 'google', [this.#toEmailRecord(full)]));
+    }
+    return { events, networkCalls, unavailable: false };
   }
 
   async #pullGmail(cursor) {
@@ -406,6 +505,7 @@ export class GoogleWorkspaceConnector extends Connector {
       // profile. Re-delivery is deduplicated by event id in the engine.
       const profile = await this.#request(`${GMAIL}/users/me/profile`);
       historyId = profile.historyId || null;
+      if (typeof historyId !== 'string' || !historyId) throw new ConnectorError('Gmail did not provide a history baseline; the cursor was not advanced.', { connectorId: this.id, retryable: true });
       messageIds = await this.#listMessageIds(query);
     }
 
@@ -432,17 +532,28 @@ export class GoogleWorkspaceConnector extends Connector {
     let pageToken = null;
     let historyId = startHistoryId;
     let pages = 0;
+    const seenTokens = new Set();
     do {
       const params = new URLSearchParams({ startHistoryId, historyTypes: 'messageAdded', maxResults: '100' });
       if (pageToken) params.set('pageToken', pageToken);
       const page = await this.#request(`${GMAIL}/users/me/history?${params}`);
+      if (page.history != null && !Array.isArray(page.history)) throw new ConnectorError('Gmail returned malformed history; the cursor was not advanced.', { connectorId: this.id });
       for (const entry of page.history || []) {
-        for (const message of entry.messages || []) {
-          if (message?.id) ids.push(message.id);
+        const added = entry.messagesAdded;
+        if (added != null && !Array.isArray(added)) throw new ConnectorError('Gmail returned malformed message additions; the cursor was not advanced.', { connectorId: this.id });
+        // Gmail recommends the typed field. Keep the general field as a
+        // compatibility fallback for older responses that do not include it.
+        const messages = added == null ? (entry.messages || []) : added.map(item => item?.message);
+        if (!Array.isArray(messages)) throw new ConnectorError('Gmail returned malformed history; the cursor was not advanced.', { connectorId: this.id });
+        for (const message of messages) {
+          if (typeof message?.id !== 'string' || !message.id) throw new ConnectorError('Gmail returned an incomplete message addition; the cursor was not advanced.', { connectorId: this.id });
+          ids.push(message.id);
         }
       }
       if (page.historyId) historyId = page.historyId;
       pageToken = page.nextPageToken || null;
+      if (pageToken && (typeof pageToken !== 'string' || seenTokens.has(pageToken))) throw new ConnectorError('Gmail history pagination did not advance; the cursor was not advanced.', { connectorId: this.id, retryable: true });
+      if (pageToken) seenTokens.add(pageToken);
       pages += 1;
       if (pages > 100) {
         throw new ConnectorError('Gmail history returned more than 100 pages; refusing to advance the cursor without consuming them.', { connectorId: this.id, retryable: true });
@@ -454,14 +565,19 @@ export class GoogleWorkspaceConnector extends Connector {
   async #listMessageIds(query) {
     const ids = [];
     let pageToken = null;
+    const seenTokens = new Set();
     do {
       const params = new URLSearchParams({ q: query, maxResults: '100' });
       if (pageToken) params.set('pageToken', pageToken);
       const listing = await this.#request(`${GMAIL}/users/me/messages?${params}`);
+      if (listing.messages != null && !Array.isArray(listing.messages)) throw new ConnectorError('Gmail returned a malformed listing; the cursor was not advanced.', { connectorId: this.id });
       for (const message of listing.messages || []) {
-        if (message?.id) ids.push(message.id);
+        if (typeof message?.id !== 'string' || !message.id) throw new ConnectorError('Gmail returned an incomplete listing; the cursor was not advanced.', { connectorId: this.id });
+        ids.push(message.id);
       }
       pageToken = listing.nextPageToken || null;
+      if (pageToken && (typeof pageToken !== 'string' || seenTokens.has(pageToken) || seenTokens.size >= 100)) throw new ConnectorError('Gmail listing pagination did not advance; the cursor was not advanced.', { connectorId: this.id, retryable: true });
+      if (pageToken) seenTokens.add(pageToken);
     } while (pageToken);
     return [...new Set(ids)];
   }
@@ -477,13 +593,41 @@ export class GoogleWorkspaceConnector extends Connector {
         threadId: message.threadId || null,
         from: headers.from || '',
         to: headers.to || '',
+        cc: headers.cc || '',
         subject: headers.subject || '(no subject)',
         body: this.#extractBody(message.payload) || message.snippet || '',
         receivedAt: headers.date ? new Date(headers.date).toISOString() : new Date().toISOString(),
         providerMessageId: headers['message-id'] || null
       },
-      meta: { labelIds: message.labelIds || [] }
+      meta: { labelIds: message.labelIds || [], ...emailPrincipalRole(this.config.accountEmail, simpleMailboxList(headers.to), simpleMailboxList(headers.cc)),
+        ...(headers['auto-submitted'] && headers['auto-submitted'].trim().toLowerCase() !== 'no' || /^(bulk|list|junk)$/i.test((headers.precedence || '').trim())
+          ? { originClass: 'AUTOMATION', originEvidence: { basis: 'provider_message_header' } } : {}) }
     };
+  }
+
+  /** Read one authorized thread's metadata before fetching any new content. */
+  async probeExpectedReply({ threadId, sourceMessageId, expectedSender, afterAt }) {
+    if (!this.live || this.config.readGmail === false || !threadId || !sourceMessageId || !expectedSender || !Number.isFinite(Date.parse(afterAt))) return { status: 'UNKNOWN' };
+    const params = new URLSearchParams({ format: 'metadata' });
+    for (const name of ['From', 'Auto-Submitted', 'Precedence']) params.append('metadataHeaders', name);
+    const thread = await this.#request(`${GMAIL}/users/me/threads/${encodeURIComponent(threadId)}?${params}`);
+    if (thread?.id !== threadId || !Array.isArray(thread.messages) || !thread.messages.some(message => message.id === sourceMessageId)) return { status: 'UNKNOWN' };
+    let incomplete = thread.messages.length > 1000;
+    for (const message of thread.messages.slice(0, 1000)) {
+      const timestamp = Number(message.internalDate), headers = Object.fromEntries((message.payload?.headers || []).map(header => [String(header.name || '').toLowerCase(), header.value]));
+      if (typeof message.id !== 'string' || !message.id || !Number.isFinite(timestamp) || timestamp <= 0 || typeof headers.from !== 'string') { incomplete = true; continue; }
+      const automated = headers['auto-submitted'] && String(headers['auto-submitted']).trim().toLowerCase() !== 'no'
+        || /^(bulk|list|junk)$/i.test(String(headers.precedence || '').trim());
+      if (message.id !== sourceMessageId && !automated && timestamp > Date.parse(afterAt) && normalizeAddress(headers.from) === expectedSender) return { status: 'FOUND', messageId: message.id };
+    }
+    return incomplete ? { status: 'UNKNOWN' } : { status: 'NOT_FOUND', complete: true };
+  }
+
+  async fetchProbedMessage({ threadId, messageId }) {
+    if (!this.live || this.config.readGmail === false || !threadId || !messageId) return null;
+    const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(messageId)}?format=full`);
+    if (message?.id !== messageId || message.threadId !== threadId) throw new ConnectorError('The probed message did not match its thread.', { connectorId: this.id });
+    return toNormalizedEvents(this.id, 'google', [this.#toEmailRecord(message)])[0];
   }
 
   #extractBody(part) {
@@ -506,8 +650,9 @@ export class GoogleWorkspaceConnector extends Connector {
       // observation needs existing evidence immediately, without waiting for
       // another polling interval. Later changes resume from this baseline.
       const listed = await this.#driveFiles(current);
-      return { events: listed.events, errors: listed.errors, cursor: { pageToken,
-        filesModifiedAfter: listed.filesModifiedAfter, filesPageToken: listed.filesPageToken } };
+      return { events: listed.events, errors: listed.errors, hasMore: Boolean(listed.filesPageToken), cursor: { pageToken,
+        filesModifiedAfter: listed.filesModifiedAfter, filesPageToken: listed.filesPageToken,
+        filesListingNewest: listed.filesListingNewest, filesListingTracking: listed.filesListingTracking } };
     }
 
     const changes = await this.#driveChanges(pageToken);
@@ -515,10 +660,13 @@ export class GoogleWorkspaceConnector extends Connector {
     return {
       events: dedupeEvents([...changes.events, ...listed.events]),
       errors: listed.errors,
+      hasMore: Boolean(changes.hasMore || listed.filesPageToken),
       cursor: {
         pageToken: changes.pageToken,
         filesModifiedAfter: listed.filesModifiedAfter,
-        filesPageToken: listed.filesPageToken
+        filesPageToken: listed.filesPageToken,
+        filesListingNewest: listed.filesListingNewest,
+        filesListingTracking: listed.filesListingTracking
       }
     };
   }
@@ -528,12 +676,14 @@ export class GoogleWorkspaceConnector extends Connector {
     let nextPageToken = pageToken;
     let newStartPageToken = null;
     let pages = 0;
+    const seenTokens = new Set([pageToken]);
 
     do {
       const page = await this.#request(
         `${DRIVE}/changes?pageToken=${encodeURIComponent(nextPageToken)}&pageSize=100` +
         '&fields=nextPageToken,newStartPageToken,changes(fileId,removed,time,file(id,name,mimeType,modifiedTime,version,trashed))'
       );
+      if (page.changes != null && !Array.isArray(page.changes)) throw new ConnectorError('Drive returned malformed changes; the cursor was not advanced.', { connectorId: this.id });
       for (const change of page.changes || []) {
         const file = change.file;
         const fileId = change.fileId || file?.id;
@@ -565,11 +715,13 @@ export class GoogleWorkspaceConnector extends Connector {
         }
       }
       nextPageToken = page.nextPageToken || null;
+      if (nextPageToken && (typeof nextPageToken !== 'string' || seenTokens.has(nextPageToken))) throw new ConnectorError('Drive changes pagination did not advance; the cursor was not advanced.', { connectorId: this.id, retryable: true });
+      if (nextPageToken) seenTokens.add(nextPageToken);
       newStartPageToken = page.newStartPageToken || newStartPageToken;
       pages += 1;
     } while (nextPageToken && pages < 10);
 
-    return { events, pageToken: newStartPageToken || nextPageToken || pageToken };
+    return { events, pageToken: nextPageToken || newStartPageToken || pageToken, hasMore: Boolean(nextPageToken) };
   }
 
   /**
@@ -615,21 +767,37 @@ export class GoogleWorkspaceConnector extends Connector {
     const query = clauses.join(' and ');
     const files = [];
     let pageToken = cursor.filesPageToken || null;
+    // Old workspaces may have a continuation token without the first page's
+    // newest timestamp. Complete that listing but leave the watermark in
+    // place, so the next scan safely rebuilds it.
+    let tracking = !pageToken || cursor.filesListingTracking === true;
+    let listingNewest = cursor.filesListingNewest || null, restarted = false;
     let pages = 0;
 
-    do {
+    while (true) {
       let url = `${DRIVE}/files?q=${encodeURIComponent(query)}&pageSize=20&orderBy=modifiedTime desc` +
-        '&fields=nextPageToken,files(id,name,mimeType,modifiedTime,version)';
+        '&fields=nextPageToken,incompleteSearch,files(id,name,mimeType,modifiedTime,version)';
       if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
-      const page = await this.#request(url);
+      let page;
+      try { page = await this.#request(url); }
+      catch (error) {
+        if (!pageToken || restarted || ![400, 410].includes(error.status)) throw error;
+        // Drive continuation tokens can expire. Start the same query from its
+        // original watermark; event IDs make already observed pages safe to replay.
+        pageToken = null; files.length = 0; pages = 0; tracking = true; listingNewest = null; restarted = true;
+        continue;
+      }
+      if (page.incompleteSearch === true) throw new ConnectorError('Drive returned an incomplete search; the cursor was not advanced.', { connectorId: this.id, retryable: true });
+      if (page.files != null && !Array.isArray(page.files)) throw new ConnectorError('Drive returned a malformed listing; the cursor was not advanced.', { connectorId: this.id });
+      if (page.nextPageToken && (typeof page.nextPageToken !== 'string' || page.nextPageToken === pageToken)) throw new ConnectorError('Drive listing pagination did not advance; the cursor was not advanced.', { connectorId: this.id, retryable: true });
       for (const file of page.files || []) {
         if (file.mimeType === DOC_MIME) files.push(file);
         if (files.length >= DOCUMENT_LIST_LIMIT) break;
       }
       pageToken = page.nextPageToken || null;
       pages += 1;
-      if (files.length >= DOCUMENT_LIST_LIMIT) break;
-    } while (pageToken && pages < 5);
+      if (files.length >= DOCUMENT_LIST_LIMIT || !pageToken || pages >= 5) break;
+    }
 
     const events = [];
     const errors = [];
@@ -649,16 +817,18 @@ export class GoogleWorkspaceConnector extends Connector {
     }
 
     const complete = errors.length === 0 && !pageToken;
-    const newest = events
+    const newest = [...events
       .map(event => event.payload.modifiedAt)
-      .filter(Boolean)
+      .filter(Boolean), ...(tracking && listingNewest ? [listingNewest] : [])]
       .sort()
       .at(-1) || null;
     return {
       events,
       errors,
-      filesModifiedAfter: complete ? (newest || cursor.filesModifiedAfter || null) : cursor.filesModifiedAfter,
-      filesPageToken: complete ? null : (pageToken || cursor.filesPageToken || null)
+      filesModifiedAfter: complete && tracking ? (newest || cursor.filesModifiedAfter || null) : cursor.filesModifiedAfter,
+      filesPageToken: complete ? null : (pageToken || cursor.filesPageToken || null),
+      filesListingNewest: complete || !tracking ? null : newest,
+      filesListingTracking: !complete && tracking
     };
   }
 
@@ -728,8 +898,11 @@ export class GoogleWorkspaceConnector extends Connector {
         });
       }
       try {
-        return await readTextBounded(response, this.maxDocumentChars, 'Document export');
+        return await withTimeout(readTextBounded(response, this.maxDocumentChars, 'Document export'), this.#requestTimeoutMs(),
+          () => new ConnectorError('Google document response body timed out.', { connectorId: this.id, retryable: true, timeout: true }),
+          () => controller.abort());
       } catch (error) {
+        if (error instanceof ConnectorError) throw error;
         throw new ConnectorError(`Could not read document ${fileId}: ${error.message}`, {
           connectorId: this.id, retryable: false
         });
@@ -747,7 +920,7 @@ export class GoogleWorkspaceConnector extends Connector {
    * the send reconcilable: if a response is lost we can search the mailbox for
    * that exact Message-ID instead of guessing whether the message went out.
    */
-  async execute({ to, subject, body, idempotencyKey, threadId = null }) {
+  async execute({ to, subject, body, idempotencyKey, threadId = null, beforeDispatch = null, signal = null }) {
     if (this.shadow) {
       throw new ConnectorError('Shadow mode is read-only. No external write was attempted.', { connectorId: this.id });
     }
@@ -756,7 +929,7 @@ export class GoogleWorkspaceConnector extends Connector {
     const recipient = parseMailbox(to);
     assertNoHeaderBreak(subject, 'The subject');
     if (!String(subject ?? '').trim()) throw new ConnectorError('The subject must not be empty.', { connectorId: this.id });
-    const messageId = `<unprompted-${String(idempotencyKey).replace(/[^a-zA-Z0-9]/g, '-')}@unprompted.local>`;
+    const messageId = gmailMessageId(idempotencyKey);
     const raw = [
       `To: ${formatMailbox(recipient)}`,
       `Subject: ${encodeHeaderValue(String(subject))}`,
@@ -772,7 +945,7 @@ export class GoogleWorkspaceConnector extends Connector {
     const result = await this.#request(`${GMAIL}/users/me/messages/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload), beforeDispatch, signal
     });
     return { receiptId: result.id, provider: 'gmail', messageId, threadId: result.threadId || threadId || null };
   }
@@ -785,11 +958,12 @@ export class GoogleWorkspaceConnector extends Connector {
    * transient failure is reported as unknown so the caller blocks instead of
    * claiming completion.
    */
-  async verifyMessage(messageId) {
+  async verifyMessage(messageId, { signal = null } = {}) {
     const id = String(messageId ?? '').trim();
     if (!id) return { status: 'unknown', receipt: null, detail: 'No provider message id was available to read back.' };
     try {
-      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(id)}?format=minimal`);
+      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(id)}?format=minimal`, { signal });
+      if (message.id !== id || !message.labelIds?.includes('SENT')) return { status: 'unknown', receipt: null, detail: 'The provider did not confirm this exact message in Sent.' };
       return {
         status: 'found',
         receipt: { id: message.id || id, threadId: message.threadId || null },
@@ -809,25 +983,30 @@ export class GoogleWorkspaceConnector extends Connector {
    * "unknown", so the caller can tell broken credentials apart from an
    * genuinely ambiguous delivery outcome.
    */
-  async verify(idempotencyKey) {
-    const messageId = `<unprompted-${String(idempotencyKey).replace(/[^a-zA-Z0-9]/g, '-')}@unprompted.local>`;
-    let listing;
+  async verify(idempotencyKey, { signal = null } = {}) {
+    const messageId = gmailMessageId(idempotencyKey);
     try {
-      listing = await this.#request(`${GMAIL}/users/me/messages?q=${encodeURIComponent(`rfc822msgid:${messageId}`)}&maxResults=1`);
+      const search = async id => this.#request(`${GMAIL}/users/me/messages?q=${encodeURIComponent(`in:sent rfc822msgid:${id}`)}&labelIds=SENT&maxResults=2`, { signal });
+      const listing = await search(messageId);
+      if (!listing.messages?.length) {
+        // Old lossy Message-IDs cannot uniquely identify a key. A known receipt
+        // can still be read directly; never guess when only the old search hits.
+        const legacy = await search(legacyMessageId(idempotencyKey));
+        return legacy.messages?.length ? { status: 'unknown', receipt: null, detail: 'A legacy Message-ID matched. Verify the original send directly; no retry is authorized.' }
+          : { status: 'not_found', receipt: null, detail: 'No matching message was found in Sent. A search miss is not proof that a prior request stopped.' };
+      }
+      if (listing.messages.length !== 1) return { status: 'unknown', receipt: null, detail: 'Multiple sent messages matched. Manual reconciliation is required.' };
+      const id = listing.messages[0].id;
+      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Message-ID`, { signal });
+      const header = message.payload?.headers?.find(item => item.name?.toLowerCase() === 'message-id')?.value?.trim();
+      if (message.id !== id || !message.labelIds?.includes('SENT') || header !== messageId) return { status: 'unknown', receipt: null, detail: 'The readback did not confirm this exact sent operation.' };
+      return { status: 'found', receipt: { id, threadId: message.threadId || null, messageId, idempotencyKey }, detail: 'Provider confirmed this exact message in Sent.' };
     } catch (error) {
       if (error.status === 401 || error.status === 403) throw error;
-      return { status: 'unknown', receipt: null, detail: `Could not verify with the provider: ${error.message}` };
-    }
-    const found = (listing.messages || [])[0];
-    if (!found) return { status: 'not_found', receipt: null, detail: 'Provider reports no message with this Message-ID.' };
-    try {
-      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(found.id)}?format=metadata`);
-      return { status: 'found', receipt: { id: found.id, threadId: message.threadId || null, messageId }, detail: 'Provider confirmed the message exists.' };
-    } catch (error) {
-      if (error.status === 401 || error.status === 403) throw error;
-      return { status: 'found', receipt: { id: found.id, threadId: null, messageId }, detail: 'Provider listed the message; thread metadata was unavailable.' };
+      return { status: 'unknown', receipt: null, detail: 'The provider could not confirm this sent operation.' };
     }
   }
+
 }
 
 export function googleConfigFromEnv(env = process.env) {
@@ -840,6 +1019,8 @@ export function googleConfigFromEnv(env = process.env) {
     readGmail: env.GOOGLE_READ_GMAIL !== 'false',
     readDrive: env.GOOGLE_READ_DRIVE !== 'false',
     sendEnabled: env.GOOGLE_SEND_ENABLED === 'true',
+    docsWriteEnabled: env.GOOGLE_DOCS_WRITE_ENABLED === 'true',
+    gmailDraftsEnabled: env.GOOGLE_DRAFTS_ENABLED === 'true',
     timeoutMs: env.GOOGLE_REQUEST_TIMEOUT_MS || undefined,
     syncBudgetMs: env.GOOGLE_SYNC_BUDGET_MS || undefined,
     maxDocumentChars: env.GOOGLE_MAX_DOCUMENT_CHARS || undefined,

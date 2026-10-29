@@ -1,9 +1,15 @@
 import { createInteractions } from './interactions.js';
+import { createWorkspace } from './workspace.js';
+import { createMcpPanel } from './mcp.js';
+import { createDurablePanel } from './durable.js';
+import { createArtifactPanel } from './artifacts.js';
+import { taskState, stateGroup, workspaceConnections } from './workspace-model.js';
 import { preserveInteraction } from './dom-state.js';
 import { copy, ui, getLocale, setLocale, applyLanguage, formatTime, formatDate } from './i18n.js';
 import { readLocal, writeLocal, workspaceKey, taskFingerprint, isSnoozed, workspaceSnapshot, changesSince, stableTaskOrder, matchesTask, visibleAttentionItems } from './ux-state.js';
 const byId = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+const safeLink = value => { try { if (!value) return null; const url = new URL(value, location.origin); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; } };
 const time = formatTime;
 const statusNames = {
   newly_discovered: 'Newly discovered', investigating: 'Investigating',
@@ -16,12 +22,68 @@ const freshnessNames = {
 };
 let current = null;
 let runtime = null;
+let artifactUI = null;
 let busy = false;
 let toastTimer = null;
 let lastToast = null;
 let stateStream = null;
 const expandedTasks = new Set();
 const nativeCopy = (zh, en) => getLocale() === 'en' ? en : zh;
+const googleSearch = { account: null, sequence: 0, next: null, source: null, query: null };
+
+function updateGoogleSearchAvailability() {
+  const panel = byId('googleSearchPanel'), form = byId('googleSearchForm');
+  const google = setupState?.google, options = google?.capabilities?.search || [];
+  const account = google?.configuredThisRun && !google.runtimeDisabled ? `${setupState.workspace?.id || ''}:${google.accountEmail || ''}` : null;
+  if (googleSearch.account !== account) {
+    googleSearch.account = account; googleSearch.sequence++; googleSearch.next = null;
+    form.reset(); byId('googleSearchResults').replaceChildren(); byId('googleSearchStatus').textContent = '';
+    form.querySelector('[type=submit]').disabled = false; byId('googleSearchMore').disabled = false; byId('googleSearchMore').hidden = true;
+  }
+  panel.hidden = !account || !options.length;
+  for (const option of form.elements.source.options) option.disabled = !options.includes(option.value === 'gmail' ? 'gmail.messages' : 'drive.google_docs');
+  if (form.elements.source.selectedOptions[0]?.disabled) form.elements.source.value = options.includes('gmail.messages') ? 'gmail' : 'drive';
+}
+
+async function searchGoogle(more = false) {
+  const form = byId('googleSearchForm'), source = more ? googleSearch.source : form.elements.source.value;
+  const query = more ? googleSearch.query : form.elements.query.value.trim();
+  if (!query || !googleSearch.account || more && !googleSearch.next) return;
+  const sequence = ++googleSearch.sequence, account = googleSearch.account;
+  const pageToken = more ? googleSearch.next : null;
+  if (!more) { googleSearch.source = source; googleSearch.query = query; googleSearch.next = null; byId('googleSearchResults').replaceChildren(); }
+  const button = form.querySelector('[type=submit]'), moreButton = byId('googleSearchMore');
+  button.disabled = true; moreButton.disabled = true;
+  byId('googleSearchStatus').textContent = nativeCopy('正在搜索…', 'Searching…');
+  try {
+    const result = await postJSON('/api/connectors/google/search', { source, query, ...(pageToken ? { pageToken } : {}) });
+    if (sequence !== googleSearch.sequence || account !== googleSearch.account) return;
+    const root = byId('googleSearchResults');
+    for (const item of result.items) {
+      if (source === 'gmail') {
+        const details = document.createElement('details'), summary = document.createElement('summary'), sender = document.createElement('small'), body = document.createElement('pre');
+        summary.textContent = item.subject || nativeCopy('无主题', 'No subject'); sender.textContent = item.from || ''; body.textContent = item.body || '';
+        details.append(summary, sender, body); root.append(details);
+      } else {
+        const link = document.createElement('a');
+        const url = new URL(item.url);
+        if (url.protocol !== 'https:' || url.hostname !== 'docs.google.com') continue;
+        link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = item.title;
+        root.append(link);
+      }
+    }
+    googleSearch.next = result.nextPageToken; moreButton.hidden = !googleSearch.next;
+    byId('googleSearchStatus').textContent = root.childElementCount ? '' : nativeCopy('没有找到结果。', 'No results found.');
+  } catch {
+    if (sequence === googleSearch.sequence) byId('googleSearchStatus').textContent = nativeCopy('搜索未完成，请检查连接后重试。', 'Search failed. Check your connection and try again.');
+  } finally {
+    if (sequence === googleSearch.sequence) { button.disabled = false; moreButton.disabled = false; }
+  }
+}
+
+byId('googleSearchForm').addEventListener('submit', event => { event.preventDefault(); void searchGoogle(); });
+byId('googleSearchForm').addEventListener('input', () => { googleSearch.sequence++; googleSearch.next = null; byId('googleSearchMore').hidden = true; byId('googleSearchForm').querySelector('[type=submit]').disabled = false; byId('googleSearchStatus').textContent = ''; });
+byId('googleSearchMore').addEventListener('click', () => { void searchGoogle(true); });
 
 function toast(message, isError = false, action = null) {
   const element = byId('toast');
@@ -263,7 +325,7 @@ function renderApproval(task) {
     </ol>
     ${renderVerification(task)}
     <div class="saved-work"><div class="mini-heading">WHAT YOU DID NOT HAVE TO DO</div><ul>${saved.map(item => ui`<li>${escapeHtml(item)}</li>`).join('')}</ul></div>
-    <div class="mail-preview"><div class="mail-headers"><div><span>TO</span><strong>${escapeHtml(draft.to)}</strong></div><div><span>SUBJECT</span><strong>${escapeHtml(draft.subject)}</strong></div></div><div class="mail-body">${escapeHtml(draft.body)}</div></div>
+    <div class="mail-preview"><div class="mail-headers"><div><span>TO</span><strong>${escapeHtml(draft.to)}</strong></div><div><span>SUBJECT</span><strong>${escapeHtml(draft.subject)}</strong></div></div><div class="mail-body">${escapeHtml(draft.body)}</div>${current?.durable ? `<button class="text-button" data-edit-draft="${escapeHtml(task.id)}">${copy('编辑草稿')}</button>` : ''}</div>
     <div class="permission-row"><span class="permission-chip">execute_external</span><span>${runtime?.shadow ? copy('Shadow mode blocks this write.') : runtime?.mode === 'simulation' ? copy('Approval records a local simulated receipt only.') : copy('Requires your approval before any external effect.')}</span></div>
     <div class="approval-evidence"><span>✓</span> Checked against ${escapeHtml(String(criteria.length))} criteria · <a class="text-link" style="margin:0" href="${escapeHtml(draft.documentUrl)}" target="_blank" rel="noopener">view version ${escapeHtml(draft.documentVersion)} ↗</a></div>
     ${withheld.length ? ui`<div class="withheld-note"><strong>Withheld from this reply</strong><ul>${withheld.map(item => ui`<li>${escapeHtml(item.text)} — ${escapeHtml(item.reason || copy('unsupported by evidence'))}</li>`).join('')}</ul></div>` : ''}
@@ -391,23 +453,83 @@ function eventDetail(event) {
   return copy('Observed without a supported task');
 }
 
-function renderEvents(events) {
-  if (!events.length) return ui`<p class="empty-trace">Waiting for the first environmental event.</p>`;
-  return [...events].reverse().slice(0, 8).map(event => ui`<div class="trace-row"><span class="trace-icon ${escapeHtml(event.disposition)}">${eventIcon(event)}</span><div class="trace-text"><strong>${escapeHtml(event.summary)}</strong><small>${escapeHtml(eventDetail(event))} · ${escapeHtml(event.source)}${event.source === 'simulated' ? ' (not a real service)' : ''}</small></div><span class="trace-time">${time(event.at)}</span></div>`).join('');
+function traceKindLabel(kind) {
+  const labels = {
+    observation: copy('来源观察'), preparation: copy('准备行动'), assessment: copy('结果判断'),
+    verification: copy('结果核验'), rejection: copy('未采纳'), discovery: copy('发现请求'),
+    delivery: copy('交付'), memory: copy('记忆'), guidance: copy('方向调整'),
+    task_direction: copy('方向调整'), memory_delete: copy('记忆已删除'), memory_restore: copy('记忆已恢复'), memory_edit: copy('记忆已更新'),
+    followup: copy('后续跟进'), wait: copy('等待条件'), approval: copy('批准行动')
+  };
+  if (labels[kind]) return labels[kind];
+  const key = `trace:${kind}`;
+  const translated = copy(key);
+  return translated === key ? kind.replaceAll('_', ' ') : translated;
 }
 
-function renderHistory(history) {
-  if (!history.length) return ui`<p class="empty-trace">Decisions and checks will appear as work advances.</p>`;
-  return history.slice(0, 8).map(item => ui`<div class="trace-row"><span class="trace-icon ${escapeHtml(item.kind)}">${item.kind === 'verification' ? '✓' : item.kind === 'uncertain' ? '!' : item.kind === 'rejection' ? '—' : '·'}</span><div class="trace-text"><strong>${escapeHtml(item.text)}</strong><small>${escapeHtml(item.kind.replaceAll('_', ' '))}</small></div><span class="trace-time">${time(item.at)}</span></div>`).join('');
+function coalesceTrace(items, text, kind) {
+  const groups = new Map();
+  for (const item of items) {
+    const date = new Date(item.at);
+    const day = Number.isNaN(date.getTime()) ? '' : date.toDateString();
+    const key = `${day}|${text(item)}|${kind(item)}`;
+    if (groups.has(key)) groups.get(key).count += 1;
+    else groups.set(key, { ...item, count: 1 });
+  }
+  return [...groups.values()];
+}
+
+function traceGroups(items, renderRow) {
+  const groups = new Map();
+  for (const item of items) {
+    const date = new Date(item.at);
+    const key = Number.isNaN(date.getTime()) ? '' : date.toDateString();
+    if (!groups.has(key)) groups.set(key, { at: item.at, rows: [] });
+    groups.get(key).rows.push(item);
+  }
+  const today = new Date().toDateString();
+  return [...groups.values()].map(group => {
+    const date = new Date(group.at);
+    const label = Number.isNaN(date.getTime()) ? copy('更早') : date.toDateString() === today ? copy('今天') : formatDate(group.at);
+    return ui`<div class="trace-day">${escapeHtml(label)}</div>${group.rows.map(renderRow).join('')}`;
+  }).join('');
+}
+
+function renderEvents(events, emptyMessage = copy('等待第一条来源变化。')) {
+  if (!events.length) return ui`<p class="empty-trace">${escapeHtml(emptyMessage)}</p>`;
+  const ordered = coalesceTrace([...events].reverse().slice(0, 30), event => event.summary, event => event.disposition);
+  return traceGroups(ordered, event => ui`<div class="trace-row"><span class="trace-sign ${escapeHtml(event.disposition)}" aria-hidden="true">${eventIcon(event)}</span><div class="trace-copy"><strong>${escapeHtml(event.summary)}${event.count > 1 ? `<span class="trace-count" title="${escapeHtml(copy('相同变化合并显示'))}">×${event.count}</span>` : ''}</strong><small>${escapeHtml(eventDetail(event))}${event.source && !['simulated', 'local'].includes(event.source) ? ` · ${escapeHtml(event.source)}` : ''}</small></div><time class="trace-time" datetime="${escapeHtml(event.at)}">${time(event.at)}</time></div>`);
+}
+
+// One chronological record: what changed in the environment and what the agent
+// did about it, interleaved, so cause and response read top to bottom.
+function renderRecord(events, history, emptyMessage) {
+  if (!events.length && !history.length) return ui`<p class="empty-trace">${escapeHtml(emptyMessage || copy('等待第一条来源变化。'))}</p>`;
+  const sourceRows = coalesceTrace([...events].reverse().slice(0, 40), event => event.summary, event => event.disposition).map(event => ({ ...event, origin: 'source' }));
+  const agentRows = coalesceTrace(history.slice(0, 40), item => item.text, item => item.kind).map(item => ({ ...item, origin: 'agent' }));
+  const rows = [...sourceRows, ...agentRows].sort((a, b) => String(b.at || '').localeCompare(String(a.at || ''))).slice(0, 60);
+  const sign = item => item.origin === 'source' ? eventIcon(item) : item.kind === 'verification' ? '✓' : item.kind === 'uncertain' ? '!' : item.kind === 'rejection' ? '—' : '·';
+  return traceGroups(rows, item => {
+    const title = item.origin === 'source' ? item.summary : copy(item.text);
+    const detail = item.origin === 'source' ? eventDetail(item) : traceKindLabel(item.kind);
+    const task = item.origin === 'agent' && item.taskId && current?.tasks?.some(task => task.id === item.taskId) ? item.taskId : null;
+    return ui`<div class="trace-row" data-origin="${item.origin}"><span class="trace-sign ${escapeHtml(item.origin === 'source' ? item.disposition : item.kind)}" aria-hidden="true">${sign(item)}</span><div class="trace-copy"><strong>${escapeHtml(title)}${item.count > 1 ? `<span class="trace-count" title="${escapeHtml(copy('相同变化合并显示'))}">×${item.count}</span>` : ''}</strong><small><span class="trace-origin">${item.origin === 'source' ? copy('来源') : 'Agent'}</span> · ${escapeHtml(detail)}${task ? ui` · <button type="button" class="text-button trace-task" data-select-task="${escapeHtml(task)}" data-select-event="record">${copy('查看任务')}</button>` : ''}</small></div><time class="trace-time" datetime="${escapeHtml(item.at)}">${time(item.at)}</time></div>`;
+  });
+}
+
+function renderHistory(history, emptyMessage = copy('决策和核对记录会随着工作推进出现在这里。')) {
+  if (!history.length) return ui`<p class="empty-trace">${escapeHtml(emptyMessage)}</p>`;
+  const ordered = coalesceTrace(history.slice(0, 30), item => item.text, item => item.kind);
+  return traceGroups(ordered, item => ui`<div class="trace-row"><span class="trace-sign ${escapeHtml(item.kind)}" aria-hidden="true">${item.kind === 'verification' ? '✓' : item.kind === 'uncertain' ? '!' : item.kind === 'rejection' ? '—' : '·'}</span><div class="trace-copy"><strong>${escapeHtml(item.text)}${item.count > 1 ? `<span class="trace-count" title="${escapeHtml(copy('相同记录合并显示'))}">×${item.count}</span>` : ''}</strong><small>${escapeHtml(traceKindLabel(item.kind))}</small></div><time class="trace-time" datetime="${escapeHtml(item.at)}">${time(item.at)}</time></div>`);
 }
 
 function renderContext(state) {
   const documents = state.documents || [];
   const runs = state.runRecords || [];
   const messages = (state.inbox || []).slice(-10).reverse();
-  const issues = (state.tasks || []).filter(task => task.kind === 'external_issue').slice(-10).reverse();
+  const issues = (state.tasks || []).filter(task => githubWorkKinds.includes(task.kind)).slice(-10).reverse();
   if (!documents.length && !runs.length && !messages.length && !issues.length) return ui`<p class="empty-trace">No context observed yet.</p>`;
-  const sourceRows = messages.map(message => ui`<div class="context-row"><span class="context-kind">${message.connectorId === 'microsoft' ? 'OUTLOOK' : 'MAIL'}</span><div><strong>${escapeHtml(message.subject)}</strong><small>${escapeHtml(message.from)} · ${time(message.receivedAt)}</small></div></div>`).join('')
+  const sourceRows = messages.map(message => ui`<div class="context-row"><span class="context-kind">${message.connectorId === 'microsoft' ? 'OUTLOOK' : message.connectorId === 'slack' ? 'SLACK' : 'MAIL'}</span><div><strong>${escapeHtml(message.subject)}</strong><small>${escapeHtml(message.from)} · ${time(message.receivedAt)}</small></div></div>`).join('')
     + issues.map(task => ui`<div class="context-row"><span class="context-kind">GITHUB</span><div><strong>${escapeHtml(task.subject)}</strong><small>${escapeHtml(task.externalSource.repository)} #${Number(task.externalSource.number)} · ${escapeHtml(task.externalSource.state)}</small></div></div>`).join('');
   const docRows = documents.map(document => ui`<div class="context-row"><span class="context-kind">DOC</span><div><strong>${escapeHtml(document.title)}</strong><small>${escapeHtml(document.id)} · v${escapeHtml(document.version)} · ${escapeHtml(document.source)}${document.source === 'simulated' ? ' (simulated)' : ''} · ${time(document.modifiedAt)}</small></div></div>`).join('');
   const runRows = runs.map(run => ui`<div class="context-row"><span class="context-kind run">RUN</span><div><strong>${escapeHtml(run.label)}</strong><small>${escapeHtml(run.id)} · completed ${escapeHtml(String(run.completedAt).slice(0, 10))}${run.subjectEntity ? ui` · ${escapeHtml(run.subjectEntity)}` : ''}</small></div></div>`).join('');
@@ -415,11 +537,12 @@ function renderContext(state) {
 }
 
 // The interface reflects recorded engine states, never an animated guess at work.
-let selectedFilter = 'active';
+let selectedFilter = 'all';
 let connected = false;
 let openTaskId = null;
 let taskDialogTrigger = null;
 let currentView = 'home';
+const viewScrollPositions = new Map();
 let searchQuery = '';
 let localWorkspace = null;
 let snoozes = {};
@@ -429,9 +552,12 @@ let composingElement = null;
 const pendingTasks = new Set();
 const actionErrors = new Map();
 let interactions = null;
-const viewNames = { home: '工作台', attention: '需要你', activity: '发生过什么', sources: '连接与上下文', preferences: '相处方式' };
+let workspaceUI = null;
+let mcpUI = null;
+let durableUI = null;
+const viewNames = { home: '工作台', attention: '需要你', memory: '记忆', sources: '连接', preferences: '设置' };
 const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action);
-const needsTaskDecision = task => task.status === 'ready_for_approval' || (task.status === 'blocked' && Boolean(task.action));
+const needsTaskDecision = task => !task.control?.paused && (task.status === 'ready_for_approval' || (task.status === 'blocked' && Boolean(task.action)));
 
 function taskTitle(task) {
   return task.subject || [task.request?.subjectEntity, task.request?.deliverable].filter(Boolean).join(' · ') || copy('待跟进的请求');
@@ -559,8 +685,8 @@ function attentionItems(state) {
 function agentPresentation(state, online) {
   if (!online) return { tone: 'offline', label: copy('状态待同步'), title: copy('连接暂时中断，正在重新同步。'), description: copy('下方保留上次收到的进展，连接恢复后会自动更新。') };
   const tasks = state.tasks || [];
-  const working = tasks.filter(task => ['newly_discovered', 'investigating', 'verifying'].includes(task.status));
-  const waiting = tasks.filter(task => task.status === 'waiting_for_information');
+  const working = tasks.filter(task => !task.control?.paused && ['newly_discovered', 'investigating', 'verifying'].includes(task.status));
+  const waiting = tasks.filter(task => !task.control?.paused && task.status === 'waiting_for_information');
   const decisions = tasks.filter(needsTaskDecision).length + attentionItems(state).length;
   if (working.length) return { tone: 'working', label: copy('处理中'), title: copy('我在推进 {count} 件事。', { count: working.length }), description: decisions ? copy('另有 {count} 个选择需要你，已放在「需要你」。', { count: decisions }) : copy('正在核对上下文和结果，你可以先忙自己的。') };
   if (decisions) return { tone: 'needs', label: copy('等待你'), title: copy('{count} 个选择需要你，其余的我来照看。', { count: decisions }), description: copy('上下文和下一步已经备好，不用从头了解。') };
@@ -601,8 +727,28 @@ function renderTaskAction(task) {
   const errorHTML = error?.code === 'REVIEW_CHANGED'
     ? ui`<div class="action-error" role="status"><p>回复已更新，这次没有发送。</p><p>请看过新内容后再发送。</p></div>`
     : error ? ui`<div class="action-error" role="alert"><p>还没确认这次操作的结果。</p><p>先同步进展，再决定下一步，避免重复操作。</p><details><summary>查看具体原因</summary><p>${escapeHtml(error.message || error)}</p></details><button class="secondary-button" data-sync-state>同步状态</button></div>` : '';
+  if (task.status === 'waiting_for_information' && task.draft?.userEdited && task.userDraftStale) {
+    const canReview = Boolean(current?.durable && task.assessment?.complete && !task.control?.paused && !task.action && !task.dirty && task.inputVersion === task.processedInputVersion);
+    return `<div class="task-action"><h4>${nativeCopy('你的草稿已保留', 'Your draft is preserved')}</h4><p>${nativeCopy('来源发生了变化。请先核对最新依据，再决定是否更新草稿。', 'The source changed. Review the current evidence before updating your draft.')}</p><p class="draft-excerpt">${escapeHtml(task.draft.body)}</p><button class="text-button" data-copy-draft="${id}">${nativeCopy('复制草稿', 'Copy draft')}</button>${canReview ? `<button class="secondary-button" data-edit-draft="${id}">${nativeCopy('核对并保存草稿', 'Review and save draft')}</button>` : ''}${errorHTML}</div>`;
+  }
   if (task.status === 'completed') return ui`<div class="task-action">${renderApproval(task)}${errorHTML}</div>`;
-  if (isClosedTask(task)) return ui`<div class="task-action"><button class="secondary-button" data-action="reopen" data-id="${id}">恢复跟进</button>${errorHTML}</div>`;
+  const presentationState = taskState(task, workspaceConnections(setupState));
+  if (presentationState === 'source_disconnected') return `<div class="task-action"><button class="secondary-button" data-go="sources">${nativeCopy('重新连接来源', 'Reconnect source')}</button>${errorHTML}</div>`;
+  if (presentationState === 'failed') {
+    const work = task.reasoningWork;
+    const retryable = work && Number(work.attempts) < Number(work.maxAttempts || 2) && !task.reasoning?.budgetExhausted;
+    return `<div class="task-action"><div class="action-row">${retryable ? `<button class="secondary-button" data-reasoning-retry="${id}">${nativeCopy('重新核对', 'Recheck task')}</button>` : ''}<button class="text-button" data-go="preferences">${nativeCopy('检查模型连接', 'Check model connection')}</button></div>${errorHTML}</div>`;
+  }
+  if (sourceFollow(task) && task.status === 'waiting_for_information') {
+    const source = task.externalSource || {};
+    const url = safeLink(source.url);
+    return `<div class="task-action"><div class="action-row">${url ? `<a class="secondary-button" href="${escapeHtml(url)}" target="_blank" rel="noopener">${nativeCopy('查看来源', 'View source')} ↗</a>` : ''}<button class="subtle-button" data-action="cancel" data-id="${id}">${nativeCopy('停止跟进', 'Stop following')}</button></div>${errorHTML}</div>`;
+  }
+  if (isClosedTask(task)) {
+    const external = sourceFollow(task);
+    const canRestore = !external || task.externalSource?.state === 'open' && task.externalSource?.assigned !== false && workspaceConnections(setupState)[task.sourceConnectorId]?.connected;
+    return ui`<div class="task-action">${task.draft?.userEdited ? `<p>${nativeCopy('你的草稿已保留。', 'Your draft is preserved.')}</p><p class="draft-excerpt">${escapeHtml(task.draft.body)}</p><button class="text-button" data-copy-draft="${id}">${nativeCopy('复制草稿', 'Copy draft')}</button>` : ''}${canRestore ? `<button class="secondary-button" data-action="reopen" data-id="${id}">${copy('恢复跟进')}</button>` : `<span class="muted">${nativeCopy('来源已关闭或断开', 'Source closed or disconnected')}</span>`}${errorHTML}</div>`;
+  }
   if (isSnoozed(task, snoozes)) return ui`<div class="snooze-note"><div><span>稍后再看 · ${time(snoozes[task.id].until)}</span><small>只暂收起这台设备上的提醒，Agent 仍会照看。</small></div><button class="text-button" data-unsnooze="${id}">现在查看</button></div>`;
   if (task.status === 'ready_for_approval' && task.draft) {
     const draft = task.draft;
@@ -613,7 +759,7 @@ function renderTaskAction(task) {
     return ui`<div class="task-action"><h4>${shadow ? copy('回复已经准备好') : copy('回复备好了，要发出去吗？')}</h4><p>${shadow ? copy('当前为只读模式，回复保留在这里。') : draft.live ? copy('将通过 Gmail 发送给下方收件人。') : copy('这次发送只写入本地模拟发件箱。')}</p>
       <div class="draft-recipient">收件人：${escapeHtml(draft.to)}</div>
       <p class="draft-excerpt">${escapeHtml(draft.body?.replace(/\n\s*\n/g, '\n'))}</p>
-      <details class="draft-details" data-preserve="draft-${id}"><summary>看一眼回复内容</summary><div class="draft-recipient">主题：${escapeHtml(draft.subject)}</div><div class="draft-body">${escapeHtml(draft.body)}</div></details>
+      ${current?.durable ? `<button class="text-button" data-edit-draft="${id}">${copy('编辑草稿')}</button>` : ''}<details class="draft-details" data-preserve="draft-${id}"><summary>看一眼回复内容</summary><div class="draft-recipient">主题：${escapeHtml(draft.subject)}</div><div class="draft-body">${escapeHtml(draft.body)}</div></details>
       ${shadow ? ui`<div class="action-row"><button class="secondary-button" data-copy-draft="${id}">${copy('复制回复草稿')}</button><button class="text-button" data-go="sources">${copy(task.draft?.providerKind === 'outlook' ? '管理 Outlook 连接' : runtime?.mode === 'live' ? '开启经你批准的 Gmail 发送' : '查看当前连接方式')} ↗</button><button class="subtle-button" data-action="reject" data-id="${id}">${copy('这次不用了')}</button></div>` : ui`<div class="action-row"><button class="primary-button" data-action="approve" data-id="${id}" data-review-token="${escapeHtml(task.reviewToken || '')}">${draft.live ? copy('发送这次回复') : copy('发送模拟回复')} <span aria-hidden="true">↗</span></button>${hasScope && !enhanced ? ui`<button class="secondary-button" data-automate="${id}" data-review-token="${escapeHtml(task.reviewToken || '')}">本次发送，今后自动</button>` : ''}<button class="subtle-button" data-snooze="${id}" title="30 分钟后再看">稍后再看</button><button class="subtle-button" data-action="reject" data-id="${id}">这次不用了</button></div>${hasScope && !enhanced ? ui`<p class="auto-explain">「今后自动」仅适用于 ${escapeHtml(scope)} 的后续回复，可在「相处方式」收回。</p>` : ''}${enhanced ? '<p class="auto-explain">存在多个可能的来源，这次需要单独判断。</p>' : ''}`}
     ${errorHTML}</div>`;
   }
@@ -623,16 +769,22 @@ function renderTaskAction(task) {
   return errorHTML;
 }
 
+const githubCardCopy = {
+  external_issue: { label: '跟进已分配的 issue', open: '这个 issue 当前分配给你。我会留意状态和负责人变化。', marker: issue => `${issue.repository} #${issue.number}`, who: issue => issue.assignee },
+  external_review: { label: '跟进需要你处理的 PR', open: '这个 pull request 需要你评审，或需要你处理别人的评审意见。', marker: issue => `${issue.repository} #${issue.number}`, who: issue => issue.author },
+  external_change: { label: '跟进仓库内容变化', open: '仓库有新的提交。这里保留提交说明和变更的文件路径。', marker: issue => `${issue.repository} · ${issue.marker}`, who: issue => issue.author },
+  external_check: { label: '跟进 GitHub Actions', open: '这条 Actions 运行有变化，需要你处理。', marker: issue => `${issue.repository} · ${issue.marker}`, who: issue => issue.author }
+};
 function renderIssueCard(task, { detailed = false } = {}) {
-  const issue = task.externalSource || {}, id = escapeHtml(task.id);
+  const issue = task.externalSource || {}, id = escapeHtml(task.id), copyFor = githubCardCopy[task.kind] || githubCardCopy.external_issue;
   const closed = task.status === 'cancelled';
-  const label = closed ? copy('已停止跟进') : copy('跟进已分配的 issue');
-  const canResume = closed && issue.assigned && issue.state === 'open' && setupState?.connections?.github?.connected;
-  return ui`<article class="task-card ${detailed ? 'work-card' : ''}" data-task-card="${id}"><div class="task-main"><div class="task-topline"><span class="task-category">GitHub · ${escapeHtml(issue.repository)} #${Number(issue.number)}</span><span class="state-badge waiting">${label}</span></div><button class="task-title-button" data-open-task="${id}"><h3>${escapeHtml(task.subject)}</h3></button><p class="task-description">${closed ? copy('来源状态或你的选择已停止本次跟进；这不代表 Agent 完成了工作。') : copy('这个 issue 当前分配给你。我会留意状态和负责人变化。')}</p><div class="task-meta"><span>${copy('负责人')} · ${escapeHtml(issue.assignee)}</span><span>${time(issue.updatedAt)}</span></div>${detailed ? `<div class="issue-source-body">${escapeHtml(issue.body || '')}</div>${issue.bodyTruncated ? `<p class="setup-note">${copy('此处保留前 8000 个字符，完整正文请在 GitHub 查看。')}</p>` : ''}` : ''}</div><div class="task-action"><div class="action-row"><a class="secondary-button" href="${escapeHtml(issue.url)}" target="_blank" rel="noopener">${copy('在 GitHub 查看')} ↗</a>${!closed ? ui`<button class="subtle-button" data-action="cancel" data-id="${id}">${copy('暂不跟进')}</button>` : canResume ? ui`<button class="text-button" data-action="reopen" data-id="${id}">${copy('恢复跟进')}</button>` : ''}</div><p class="setup-note">${copy('连接器只读，不会评论、关闭或修改 issue。')}</p>${detailed ? renderReview(task) : ''}</div></article>`;
+  const label = closed ? copy('已停止跟进') : copy(copyFor.label);
+  const canResume = closed && issue.state === 'open' && issue.assigned !== false && issue.active !== false && setupState?.connections?.github?.connected;
+  return ui`<article class="task-card ${detailed ? 'work-card' : ''}" data-task-card="${id}"><div class="task-main"><div class="task-topline"><span class="task-category">GitHub · ${escapeHtml(copyFor.marker(issue))}</span><span class="state-badge waiting">${label}</span></div><button class="task-title-button" data-open-task="${id}"><h3>${escapeHtml(task.subject)}</h3></button><p class="task-description">${closed ? copy('来源状态或你的选择已停止本次跟进；这不代表 Agent 完成了工作。') : copy(copyFor.open)}</p><div class="task-meta"><span>${copy('负责人')} · ${escapeHtml(copyFor.who(issue) || '')}</span><span>${time(issue.updatedAt)}</span></div>${detailed ? `<div class="issue-source-body">${escapeHtml(issue.body || '')}</div>${issue.bodyTruncated ? `<p class="setup-note">${copy('此处保留前 8000 个字符，完整正文请在 GitHub 查看。')}</p>` : ''}` : ''}</div><div class="task-action"><div class="action-row"><a class="secondary-button" href="${escapeHtml(issue.url)}" target="_blank" rel="noopener">${copy('在 GitHub 查看')} ↗</a>${!closed ? ui`<button class="subtle-button" data-action="cancel" data-id="${id}">${copy('暂不跟进')}</button>` : canResume ? ui`<button class="text-button" data-action="reopen" data-id="${id}">${copy('恢复跟进')}</button>` : ''}</div><p class="setup-note">${copy('连接器只读，不会评论、合并、修改文件或重跑 Actions。')}</p>${detailed ? renderReview(task) : ''}</div></article>`;
 }
 
 function renderTaskCard(task) {
-  if (task.kind === 'external_issue') return renderIssueCard(task);
+  if (githubWorkKinds.includes(task.kind)) return renderIssueCard(task);
   if (task.kind === 'observed_task') return renderObservedCard(task);
   const presentation = taskPresentation(task);
   const id = escapeHtml(task.id);
@@ -645,7 +797,7 @@ function renderTaskCard(task) {
   const change = interactions?.delta(task);
   const changeChip = change?.hasChanges ? ui`<button class="change-lens" data-proof-changes="${id}" aria-haspopup="dialog" aria-controls="evidencePeek" aria-expanded="false"><span aria-hidden="true">↳</span>${escapeHtml(interactions.deltaLabel(change))}</button>` : '';
   return ui`<article class="task-card" data-task-card="${id}"><div class="task-main"><div class="task-topline"><span class="task-category"><span aria-hidden="true">↳</span>主动发现 · 持续跟进</span><span class="state-badge ${presentation.tone}">${presentation.label}</span></div>
-    <button class="task-title-button" data-expand-task="${id}" aria-expanded="${expandedTasks.has(task.id)}"><h3>${escapeHtml(taskTitle(task))}</h3></button><p class="task-description">${escapeHtml(presentation.description)}</p>${changeChip}<div class="task-meta"><span class="meta-source">${task.sourceConnectorId === 'microsoft' ? 'Outlook' : copy('来自邮件')}</span><span class="meta-dot"></span><span>${escapeHtml(task.sender || copy('已观察的请求'))}</span><span class="meta-dot"></span><span>${time(task.updatedAt)}</span></div>
+    <button class="task-title-button" data-expand-task="${id}" aria-expanded="${expandedTasks.has(task.id)}"><h3>${escapeHtml(taskTitle(task))}</h3></button><p class="task-description">${escapeHtml(presentation.description)}</p>${changeChip}<div class="task-meta"><span class="meta-source">${task.sourceConnectorId === 'microsoft' ? 'Outlook' : task.sourceConnectorId === 'slack' ? 'Slack' : copy('来自邮件')}</span><span class="meta-dot"></span><span>${escapeHtml(task.sender || copy('已观察的请求'))}</span><span class="meta-dot"></span><span>${time(task.updatedAt)}</span></div>
     <div class="task-progress" aria-label="任务进展">${steps.map(([label, met]) => ui`<div class="${met ? 'met' : ''}"><span class="step-dot" aria-hidden="true">${met ? '✓' : '·'}</span>${label}</div>`).join('')}</div></div>
     <div class="task-bottom"><button class="task-summary proof-trigger" data-proof="${id}" aria-haspopup="dialog" aria-label="${escapeHtml(summary)} · ${copy('查看依据')}" aria-controls="evidencePeek" aria-expanded="false"><span>${escapeHtml(summary)}</span></button><div class="action-row">${task.status === 'waiting_for_information' && !task.action ? ui`<button class="text-button" data-action="cancel" data-id="${id}">${copy('暂不跟进')}</button>` : ''}<button class="text-button" data-expand-task="${id}" aria-expanded="${expandedTasks.has(task.id)}">${nativeCopy('调整','Adjust')}</button><button class="text-button" data-open-task="${id}">${nativeCopy('记录','History')}</button></div></div>${renderTaskAction(task)}${expandedTasks.has(task.id) ? `<div class="inline-task-controls">${renderTaskManagement(task)}</div>` : ''}</article>`;
 }
@@ -662,18 +814,6 @@ function renderQuietDecision(item) {
   return ui`<article class="decision-card"><div class="decision-topline"><span class="decision-kind">${labels[item.kind] || copy('一个选择')}</span><span>${item.priority === 'high' ? copy('优先看看') : copy('方便时看看')}</span></div><h3>${escapeHtml(item.headline)}</h3><p class="decision-lead">${escapeHtml(item.decision)}</p><details data-preserve="notice-${escapeHtml(item.id)}"><summary class="muted">为什么需要我？</summary><dl class="decision-fields"><div><dt>发生了什么</dt><dd>${escapeHtml(item.what)}</dd></div><div><dt>为什么值得关注</dt><dd>${escapeHtml(item.why)}</dd></div><div><dt>已经核对</dt><dd>${(item.checked || []).map(escapeHtml).join('<br>')}</dd></div>${(item.evidence || []).length ? ui`<div><dt>依据</dt><dd>${item.evidence.map(entry => ui`${escapeHtml(entry.detail || '')}${entry.source ? ui`<small class="source-ref">${escapeHtml(sourceLabel(entry.source))}</small>` : ''}`).join('<br>')}</dd></div>` : ''}${(item.uncertainty || []).length ? ui`<div><dt>仍不确定</dt><dd>${item.uncertainty.map(escapeHtml).join('<br>')}</dd></div>` : ''}</dl></details>${renderDecisionButtons(item)}</article>`;
 }
 
-function renderRecent(state) {
-  const events = [...(state.events || [])].reverse().filter(event => ['discovered_request', 'related_change'].includes(event.disposition)).slice(0, 3);
-  const completed = (state.tasks || []).filter(task => task.status === 'completed').sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
-  const rows = events.map(event => {
-    const titles = { discovered_request: copy('从邮件里发现了一件需要跟进的事'), related_change: copy('相关内容有更新，已重新核对'), unrelated_change: copy('忽略了一次与当前任务无关的更新'), stale_change: copy('忽略了旧版本，保留较新的内容') };
-    const title = event.type === 'issue.updated' ? copy('GitHub issue 有了新的状态，已记录跟进。') : titles[event.disposition] || (event.type === 'document.modified' ? copy('记下了一份可供核对的文档') : copy('观察到一条新的环境变化'));
-    return ui`<div class="recent-row"><span class="recent-icon" aria-hidden="true">${event.disposition === 'unrelated_change' ? '−' : '↳'}</span><div><strong>${title}</strong><p>${escapeHtml(event.summary)}</p></div><time>${time(event.at)}</time></div>`;
-  });
-  if (completed) rows.unshift(ui`<div class="recent-row"><span class="recent-icon" aria-hidden="true">✓</span><div><strong>${escapeHtml(taskTitle(completed))} · 已核验完成</strong><p>${completed.action?.status === 'verified_live' ? copy('已从 Gmail 确认发送结果') : copy('已核验本地模拟回执')}</p></div><time>${time(completed.action?.verifiedAt || completed.updatedAt)}</time></div>`);
-  return rows.slice(0, 3).join('') || ui`<p class="empty-trace">还没有新的变化。不需要额外操作。</p>`;
-}
-
 function renderFollowUps(state) {
   const followUps = Object.values(state.followUps || {});
   if (!followUps.length) return `<p class="empty-trace">${copy('接受建议后，责任人、下一步和完成条件会留在这里。')}</p>`;
@@ -682,50 +822,162 @@ function renderFollowUps(state) {
 
 function renderGrants(state) {
   const grants = (state.calibrations || []).filter(item => item.key === 'permission:send_automation' && item.value === 'allow' && item.source === 'user_stated' && item.confidence === 'stated' && item.scope?.entity);
-  return grants.length ? grants.map(item => ui`<div class="grant-row"><div><strong>${escapeHtml([item.scope.entity, item.scope.deliverable || copy('该项目的全部交付物')].join(' · '))}</strong><p>证据充分时自动发送后续回复 · ${escapeHtml(time(item.updatedAt || item.at))} 约定</p></div><button class="secondary-button" data-revoke="${escapeHtml(item.id)}">改为逐次确认</button></div>`).join('') : ui`<p class="empty-trace">还没有自动发送的约定。准备好的回复里，可以选择「本次发送，今后自动」。</p>`;
+  return grants.length ? grants.map(item => ui`<div class="grant-row"><div><strong>${escapeHtml([item.scope.entity, item.scope.deliverable || copy('该项目的全部交付物')].join(' · '))}</strong><p>${copy('证据充分时自动发送后续回复 · {time} 约定', { time: time(item.updatedAt || item.at) })}</p></div><button class="secondary-button" data-revoke="${escapeHtml(item.id)}">${copy('改为逐次确认')}</button></div>`).join('') : ui`<p class="empty-trace">还没有自动发送的约定。准备好的回复里，可以选择「本次发送，今后自动」。</p>`;
 }
 
 let selectedConnection = null;
+let connectionQuery = '';
+let connectionFilter = 'all';
+let activityQuery = '';
+let activityFilter = 'all';
 const connectionPopups = new Map();
-const providerNames = { google: 'Google Workspace', github: 'GitHub', microsoft: 'Microsoft Outlook' };
+const providerNames = { google: 'Google Workspace', github: 'GitHub', microsoft: 'Microsoft Outlook', slack: 'Slack', notion: 'Notion' };
+const cloudCopy = { google: '读取 Gmail 和 Google Docs，关联邮件请求与文档证据。', github: '跟进分配给你的 issue、需要你处理的 PR、仓库提交和 Actions 变化。', microsoft: '读取 Outlook 收件箱，从邮件中发现需要跟进的工作。', slack: '读取你参与的私信和群组私信，从对话里发现需要跟进的事。', notion: '读取你在授权时选中的 Notion 页面。' };
+const cloudAccess = { github: 'issue、PR、提交和 Actions', microsoft: '收件箱邮件', slack: '私信', notion: '选中的页面' };
+const githubWorkKinds = ['external_issue', 'external_review', 'external_change', 'external_check'];
+const sourceFollow = task => task?.kind === 'observed_task' || githubWorkKinds.includes(task?.kind);
+const cloudMark = { google: 'G', github: 'GH', microsoft: 'M', slack: 'S', notion: 'Nt' };
 
-function renderNativeSources() {
-  return ['local_files', 'apple_notes'].map(id => {
-    const source = setupState.localSources?.[id] || {}, notes = id === 'apple_notes';
-    const title = notes ? nativeCopy('备忘录', 'Apple Notes') : nativeCopy('本地文件夹', 'Local folders');
-    const select = `<button class="secondary-button" data-native-operation="select" data-native-source="${id}" ${source.available === false ? 'disabled' : ''}>${nativeCopy(source.connected ? '添加文件夹' : '选择文件夹', source.connected ? 'Add folder' : 'Choose folders')}</button>`;
-    const fallback = !notes && source.nativePicker === false ? `<form data-native-path-form><label class="setup-field">${nativeCopy('文件夹绝对路径', 'Absolute folder path')}<input name="path" required autocomplete="off" placeholder="/path/to/work"></label><button class="secondary-button" type="submit">${copy('连接')}</button></form>` : select;
-    return `<article class="source-connection-card" data-connection-card="${id}"><div class="source-connection-heading"><span class="source-monogram" aria-hidden="true">${notes ? 'N' : 'F'}</span><h3>${title}</h3><span class="state-badge ${source.healthy === false ? 'offline' : source.connected ? 'done' : 'waiting'}">${source.available === false ? nativeCopy('需要 macOS', 'Requires macOS') : source.connected ? copy('已连接 · 只读') : copy('尚未连接')}</span></div><p class="source-description">${notes ? nativeCopy('仅所选文件夹的文本；首次连接由 macOS 授权。', 'Text in selected folders. macOS requests access on first connection.') : nativeCopy('只读所选文件夹中的 Markdown 和文本文件。', 'Read Markdown and text in selected folders only.')}</p>${source.connected ? `<ul class="native-scope-list">${(source.scopes || []).map(item => `<li><span>${escapeHtml(item.account ? item.account + ' / ' : '')}${escapeHtml(item.label)}</span><button class="text-button" data-native-operation="remove-scope" data-native-source="${id}" data-scope-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(nativeCopy('移除', 'Remove') + ' ' + item.label)}">×</button></li>`).join('')}</ul><p class="connection-card-counts">${source.counts?.documents || 0} ${nativeCopy('份文档', 'documents')} · ${source.counts?.tasks || 0} ${nativeCopy('项待办', 'to-dos')}${source.lastSyncAt ? ' · ' + time(source.lastSyncAt) : ''}</p>` : ''}<div class="action-row">${fallback}${source.connected ? `<button class="text-button" data-native-operation="forget" data-native-source="${id}">${copy('断开连接')}</button>` : ''}</div>${source.lastError ? `<p class="setup-error" role="status">${escapeHtml(source.lastError)}</p>` : ''}</article>`;
-  }).join('');
+function connectionState(id) {
+  if (['local_files', 'apple_notes'].includes(id)) {
+    const source = setupState?.localSources?.[id] || {};
+    return source.connected ? source.healthy === false || source.lastError ? 'attention' : 'connected' : 'available';
+  }
+  const google = setupState?.google || {};
+  const source = id === 'google' ? { connected: google.configuredThisRun && !google.runtimeDisabled, healthy: google.connectionStatus === 'sync_failed' ? false : null, lastError: google.lastValidationError } : setupState?.connections?.[id] || {};
+  const phase = source.oauth?.phase || (id === 'google' ? setupState?.oauth?.phase : '');
+  return ['failed', 'expired', 'activation_failed'].includes(phase) || source.healthy === false || source.lastError ? 'attention' : source.connected ? 'connected' : 'available';
+}
+
+function connectionMatches(id) {
+  const names = { google: 'Google Workspace Gmail Docs', github: 'GitHub issues pull requests commits Actions PR 评审 提交', microsoft: 'Microsoft Outlook mail', slack: 'Slack direct messages', notion: 'Notion pages', local_files: nativeCopy('本地文件夹', 'Local folders'), apple_notes: nativeCopy('备忘录', 'Apple Notes') };
+  const source = setupState?.localSources?.[id] || setupState?.connections?.[id] || {};
+  const scopes = Array.isArray(source.scopes) ? source.scopes : [];
+  const searchable = [names[id], source.account?.label, id === 'google' ? setupState?.google?.accountEmail : '',
+    ...scopes.flatMap(scope => typeof scope === 'string' ? [scope] : [scope?.label, scope?.account])]
+    .filter(Boolean).join(' ').toLocaleLowerCase();
+  return (connectionFilter === 'all' || connectionState(id) === connectionFilter) &&
+    (!connectionQuery.trim() || searchable.includes(connectionQuery.trim().toLocaleLowerCase()));
+}
+
+function renderNativeCard(id) {
+  const source = setupState.localSources?.[id] || {}, notes = id === 'apple_notes';
+  const title = notes ? nativeCopy('备忘录', 'Apple Notes') : nativeCopy('本地文件夹', 'Local folders');
+  const state = connectionState(id);
+  const folderVerb = notes
+    ? nativeCopy(source.connected ? '添加备忘录文件夹' : '选择备忘录文件夹', source.connected ? 'Add Notes folders' : 'Choose Notes folders')
+    : nativeCopy(source.connected ? '添加文件夹' : '选择文件夹', source.connected ? 'Add folder' : 'Choose folders');
+  const select = `<button class="secondary-button" data-native-operation="select" data-native-source="${id}" ${source.available === false ? 'disabled' : ''}>${folderVerb}</button>`;
+  const fallback = !notes && source.nativePicker === false ? `<form data-native-path-form><label class="setup-field">${nativeCopy('文件夹绝对路径', 'Absolute folder path')}<input name="path" required autocomplete="off" placeholder="/path/to/work"></label><button class="secondary-button" type="submit">${nativeCopy('连接', 'Connect')}</button></form>` : select;
+  const badge = source.available === false ? nativeCopy('需要 macOS', 'Requires macOS') : source.connected ? source.readOnly === false ? copy('已连接 · 按授权行动') : copy('已连接 · 只读') : copy('尚未连接');
+  const scopes = source.connected ? `<ul class="native-scope-list">${(source.scopes || []).map(item => `<li><span>${escapeHtml(item.account ? item.account + ' / ' : '')}${escapeHtml(item.label)}</span><button class="text-button" data-native-operation="remove-scope" data-native-source="${id}" data-scope-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(nativeCopy('移除', 'Remove') + ' ' + item.label)}">×</button></li>`).join('')}</ul>` : '';
+  const counts = source.connected ? `<p class="connection-card-counts">${source.counts?.documents || 0} ${nativeCopy('份文档', 'documents')} · ${source.counts?.tasks || 0} ${nativeCopy('项待办', 'to-dos')}${source.lastSyncAt ? ' · ' + time(source.lastSyncAt) : ''}</p>` : '';
+  const detail = source.connected ? `<div class="source-connection-detail">${scopes}${counts}<div class="actions">${fallback}${source.connected ? `<button class="text-button" data-native-operation="forget" data-native-source="${id}">${copy('断开连接')}</button><button type="button" class="text-button danger-button" data-native-purge="true" data-native-source="${id}">${copy('断开并清除本机副本')}</button>` : ''}</div></div>` : '';
+  return { id, state, html: ui`<article class="source-connection-card" data-connection-card="${id}" data-state="${state}"><div class="source-connection-heading"><span class="source-monogram" aria-hidden="true">${notes ? 'N' : 'F'}</span><div class="source-connection-copy"><h3>${title}</h3><p>${notes ? nativeCopy('仅所选文件夹的文本；首次连接由 macOS 授权。', 'Text in selected folders. macOS requests access on first connection.') : nativeCopy('只读所选文件夹中的 Markdown 和文本文件。', 'Read Markdown and text in selected folders only.')}</p></div><span class="state-badge ${source.healthy === false ? 'offline' : source.connected ? 'done' : 'waiting'}">${badge}</span>${source.connected ? '' : `<div class="source-connection-actions">${fallback}</div>`}</div>${detail}${source.lastError ? `<p class="setup-error" role="status">${escapeHtml(source.lastError)}</p>` : ''}</article>` };
+}
+
+function renderCloudCard(id, { home = false } = {}) {
+  const google = setupState.google || {};
+  const source = id === 'google' ? { connected: google.configuredThisRun && !google.runtimeDisabled, configured: google.hasClient,
+    account: google.accountEmail ? { label: google.accountEmail } : null, oauth: setupState.oauth || {},
+    readOnly: !setupState.artifacts?.enabled || !setupState.artifacts.grants?.some(grant => grant.connectorId === 'google' && grant.status === 'active' && grant.available),
+    healthy: google.connectionStatus === 'sync_failed' ? false : google.connectionStatus === 'sync_ok' ? true : null,
+    lastSyncAt: google.lastSyncAt, lastError: google.lastValidationError, counts: setupState.workspace?.observed || {} } : setupState.connections?.[id] || {};
+  const oauth = source.oauth || {}, waiting = ['starting', 'authorizing', 'verifying', 'connecting'].includes(oauth.phase);
+  const failed = ['failed', 'expired', 'activation_failed'].includes(oauth.phase) || source.healthy === false;
+  const state = connectionState(id);
+  const selected = selectedConnection === id;
+  const code = source.flow === 'code';
+  const label = waiting ? copy('等待完成授权') : failed ? copy('连接需要处理') : source.connected ? copy(source.readOnly === false || id === 'google' && google.allowExternalWrites ? '已连接 · 按授权行动' : '已连接 · 只读') : copy('尚未连接');
+  const description = copy(cloudCopy[id] || cloudCopy.microsoft);
+  const stateMessages = { failed: '授权没有完成，可以重新连接。', expired: '授权码已过期，重新连接会生成新的授权码。',
+    cancelled: '本次授权已取消，已有连接与工作记录保留。', activation_failed: '授权已保存，重试应用连接即可，无需重新登录。' };
+  const notice = stateMessages[oauth.phase] ? ui`<p class="setup-note" role="status">${copy(stateMessages[oauth.phase])}</p>` : '';
+  const device = id !== 'google' && !code && waiting ? ui`<div class="device-authorization" role="status"><p>${copy('复制授权码，在官方页面粘贴并确认。完成后会自动开始观察。')}</p>${oauth.userCode ? ui`<div class="device-code-row"><code>${escapeHtml(oauth.userCode)}</code><button class="text-button" data-copy-device-code="${id}">${copy('复制授权码')}</button></div><a class="primary-button" href="${escapeHtml(oauth.authorizeUrl)}" target="_blank" rel="noopener">${copy('打开官方授权页面')} ↗</a>` : ui`<p>${copy('正在确认账号身份并应用连接。')}</p>`}<button class="text-button" data-provider-operation="cancel" data-provider="${id}">${copy('取消连接')}</button></div>` : '';
+  const browser = code && waiting ? ui`<div class="device-authorization" role="status"><p>${copy('在浏览器中登录你自己的账号并授权。完成后会自动开始观察。')}</p>${oauth.authorizeUrl ? ui`<a class="primary-button" href="${escapeHtml(oauth.authorizeUrl)}" target="_blank" rel="noopener">${copy('打开官方授权页面')} ↗</a>` : ui`<p>${copy('正在确认账号身份并应用连接。')}</p>`}<button type="button" class="text-button" data-provider-operation="cancel" data-provider="${id}">${copy('取消连接')}</button></div>` : '';
+  const showCodeCredentials = code && !source.connected && (!source.configured || ['failed', 'expired'].includes(oauth.phase));
+  const codeFields = showCodeCredentials ? ui`<label class="setup-field">${copy('应用 Client ID')}<input name="clientId" required maxlength="512" autocomplete="off" value="${escapeHtml(source.clientId || '')}" placeholder="Client ID"></label><label class="setup-field">${copy('应用 Client Secret')}<input name="clientSecret" type="password" ${source.configured ? '' : 'required'} maxlength="512" autocomplete="off" value=""></label><p class="setup-note">${copy('发行版尚未预置此应用。自托管时填写一次 Client ID 和 Client Secret，它们只保存在这台电脑上。')}</p>` : '';
+  const deviceFields = !code && !source.configured ? ui`<label class="setup-field">${copy('应用 Client ID')}<input name="clientId" required maxlength="512" autocomplete="off" value="${escapeHtml(source.clientId || '')}" placeholder="${id === 'github' ? 'GitHub App client ID' : 'Microsoft application (client) ID'}"></label><p class="setup-note">${copy('发行版尚未预置此应用。自托管时只需填写一次注册应用的公开 Client ID，不需要访问令牌或 Client Secret。')}</p>` : '';
+  const form = selected && id !== 'google' && !waiting && !source.connected ? ui`<div class="connection-card-form"><form data-connection-form="${id}" data-preserve="connection-${id}">${code ? codeFields : deviceFields}<label class="setup-toggle"><input name="observe" type="checkbox" checked><span><strong>${copy('连接后持续观察')}</strong><small>${copy('立即检查一次，之后默认每 5 分钟检查变化，可以随时暂停。')}</small></span></label><p class="connection-disclosure">${copy('此连接只读取内容，不发送或修改。工作上下文可能交给你选择的模型理解。')}</p><button class="primary-button" type="submit">${code ? nativeCopy('连接', 'Connect') : copy('获取授权码')} ${providerNames[id]}</button><p class="setup-error" data-provider-error="${id}" role="alert" ${connectionErrors.has(id) ? '' : 'hidden'}>${escapeHtml(connectionErrors.get(id) || '')}</p></form></div>` : '';
+  const access = copy(cloudAccess[id] || '邮件与文档');
+  const write = source.readOnly === false || google.allowExternalWrites && id === 'google' ? copy('按你的授权行动') : copy('不修改来源');
+  const detail = selected && !home ? `<div class="source-detail-grid"><div><h4>${copy('访问路径')}</h4><div class="connection-access-path"><div><strong>${providerNames[id]}</strong><small>${escapeHtml(source.account?.label || copy('尚未授权账号'))}</small></div><span aria-hidden="true">→</span><div><strong>Unprompted</strong><small>${copy('只读观察')}</small></div><span aria-hidden="true">→</span><div><strong>${copy('工作与任务')}</strong><small>${write}</small></div></div><div class="connection-permissions"><span>${escapeHtml(access)} · ${copy('读取')}</span><span>${write}</span></div></div><div><h4>${copy('最近观察')}</h4><p class="connection-last-observed"><i aria-hidden="true"></i>${source.lastSyncAt ? copy('最近成功观察 {time}', { time: time(source.lastSyncAt) }) : copy('尚未完成一次观察')}</p><p>${copy('观察只读取授权范围；断开后停止。')}</p></div></div>` : '';
+  const connectVerb = id !== 'google' && source.configured && !code ? copy('获取授权码') : nativeCopy('连接', 'Connect');
+  const observed = id === 'google' ? source.counts : null;
+  const countLine = source.connected && observed ? ui`<p class="connection-card-counts">${copy('已读取 {emails} 封邮件 · {documents} 份文档', { emails: Number(observed.emails || 0), documents: Number(observed.documents || 0) })}</p>` : '';
+  const actions = !waiting ? ui`<div class="source-connection-actions">${source.connected ? ui`<button class="text-button" data-select-connection="${id}" aria-expanded="${selected && !home}">${selected && !home ? copy('收起设置') : copy('管理连接')}</button>${selected && id !== 'google' ? ui`<button class="text-button" data-provider-operation="forget" data-provider="${id}">${copy('断开连接')}</button><button type="button" class="text-button danger-button" data-provider-purge="true" data-provider="${id}">${copy('断开并清除本机副本')}</button>` : ''}` : ui`<button class="secondary-button" data-select-connection="${id}">${copy(connectVerb)} ${providerNames[id]}</button>`}${oauth.phase === 'activation_failed' && id !== 'google' ? ui`<button class="text-button" data-provider-operation="activate" data-provider="${id}">${copy('应用已保存的连接')}</button>` : ''}</div>` : '';
+  const headingActions = source.connected ? '' : actions;
+  const footerActions = source.connected ? actions : '';
+  return {
+    id, state,
+    html: ui`<article class="source-connection-card${selected ? ' selected' : ''}" data-connection-card="${id}" data-state="${state}" data-selected="${selected}"><div class="source-connection-heading"><span class="source-monogram" aria-hidden="true">${cloudMark[id] || '·'}</span><div class="source-connection-copy"><h3>${providerNames[id]}</h3><p>${source.account?.label ? `${escapeHtml(source.account.label)} · ` : ''}${explanationForCloud(id, description)}</p>${countLine}</div><span class="state-badge ${failed ? 'offline' : source.connected ? 'done' : 'waiting'}">${label}</span>${headingActions}</div>${detail}${notice}${device}${browser}${form}${footerActions}</article>`
+  };
+}
+
+function explanationForCloud(id, description) {
+  if (id === 'google') return description;
+  return description;
+}
+
+// The demo observes simulated sources only. Show exactly what they produced,
+// with access stated plainly, instead of an empty catalog of real providers.
+function renderDemoSources() {
+  const state = current || {};
+  const rows = [
+    { mark: '@', name: nativeCopy('模拟邮箱', 'Simulated mail'), items: (state.inbox || []).length, unit: nativeCopy('封邮件', 'messages'), write: nativeCopy('仅写入本地模拟发件箱', 'Writes to the local simulated outbox only') },
+    { mark: '◇', name: nativeCopy('模拟文档', 'Simulated documents'), items: (state.documents || []).length, unit: nativeCopy('份文档', 'documents'), write: nativeCopy('修改关闭', 'Modify off') },
+    { mark: '↺', name: nativeCopy('模拟实验记录', 'Simulated experiment runs'), items: (state.runRecords || []).length, unit: nativeCopy('条运行记录', 'run records'), write: nativeCopy('修改关闭', 'Modify off') }
+  ];
+  const latest = at => { const items = (state.events || []).filter(event => event.type?.startsWith(at)); return items[0]?.at ? formatTime(items[0].at) : nativeCopy('尚未观察到', 'Not observed yet'); };
+  const latestFor = ['email', 'document', 'experiment'];
+  return ui`<div class="demo-sources"><header class="demo-sources-head"><h2>${nativeCopy('演示来源', 'Demo sources')}</h2><p>${nativeCopy('本地模拟，不会联系任何真实账号。', 'Local simulation. No real account is contacted.')}</p></header><ul class="demo-source-list">${rows.map((row, index) => ui`<li><span class="source-monogram" aria-hidden="true">${row.mark}</span><span class="demo-source-copy"><strong>${row.name}</strong><small>${String(row.items)} ${row.unit} · ${nativeCopy('最近', 'Latest')} ${latest(latestFor[index])}</small></span><span class="demo-source-access"><span data-access="on">${nativeCopy('读取 开', 'Read on')}</span><span data-access="off">${row.write}</span></span></li>`).join('')}</ul><section class="demo-next"><h3>${copy('开始照看你自己的工作')}</h3><p>${runtime.demo?.disposable ? copy('这是用完即清理的演示空间。退出演示，启动个人工作区后再连接账号，设置才会保留。') : nativeCopy('这是示例工作区。请在个人工作区连接你的来源。', 'This is a sample workspace. Connect your sources in your personal workspace.')}</p><code>npm start</code></section></div>`;
 }
 
 function renderConnectors({ home = false } = {}) {
   if (!runtime || !setupState) return `<p class="empty-trace">${copy('正在读取本地连接设置。')}</p>`;
-  if (runtime.demo?.disposable || runtime.demo?.ruleBased) return '';
-  const google = setupState.google || {};
-  const cards = ['google', 'github', 'microsoft'].map(id => {
-    const source = id === 'google' ? { connected: google.configuredThisRun && !google.runtimeDisabled, configured: google.hasClient,
-      account: google.accountEmail ? { label: google.accountEmail } : null, oauth: setupState.oauth || {},
-      healthy: google.connectionStatus === 'sync_failed' ? false : google.connectionStatus === 'sync_ok' ? true : null,
-      lastSyncAt: google.lastSyncAt, lastError: google.lastValidationError, counts: {} } : setupState.connections?.[id] || {};
-    const oauth = source.oauth || {}, waiting = ['starting', 'authorizing', 'verifying', 'connecting'].includes(oauth.phase);
-    const failed = ['failed', 'expired', 'activation_failed'].includes(oauth.phase) || source.healthy === false;
-    const label = waiting ? copy('等待完成授权') : failed ? copy('连接需要处理') : source.connected ? copy(id === 'google' && google.allowExternalWrites ? '已连接 · 按授权行动' : '已连接 · 只读') : copy('尚未连接');
-    const description = id === 'google' ? copy('读取 Gmail 和 Google Docs，关联邮件请求与文档证据。')
-      : id === 'github' ? copy('发现分配给你的 issue，持续跟进负责人和状态变化。')
-        : copy('读取 Outlook 收件箱，从邮件中发现需要跟进的工作。');
-    const selected = selectedConnection === id;
-    const counts = source.connected && id !== 'google' ? ui`<p class="connection-card-counts">${id === 'github' ? copy('{count} 个活跃 issue', { count: source.counts?.issues || 0 }) : copy('{count} 封邮件 · {tasks} 项工作', { count: source.counts?.messages || 0, tasks: source.counts?.tasks || 0 })}${source.lastSyncAt ? ' · ' + time(source.lastSyncAt) : ''}</p>` : '';
-    const stateMessages = { failed: '授权没有完成，可以重新连接。', expired: '授权码已过期，重新连接会生成新的授权码。',
-      cancelled: '本次授权已取消，已有连接与工作记录保留。', activation_failed: '授权已保存，重试应用连接即可，无需重新登录。' };
-    const notice = stateMessages[oauth.phase] ? ui`<p class="setup-note" role="status">${copy(stateMessages[oauth.phase])}</p>` : '';
-    const device = id !== 'google' && waiting ? ui`<div class="device-authorization" role="status"><p>${copy('复制授权码，在官方页面粘贴并确认。完成后会自动开始观察。')}</p>${oauth.userCode ? ui`<div class="device-code-row"><code>${escapeHtml(oauth.userCode)}</code><button class="text-button" data-copy-device-code="${id}">${copy('复制授权码')}</button></div><a class="primary-button" href="${escapeHtml(oauth.authorizeUrl)}" target="_blank" rel="noopener">${copy('打开官方授权页面')} ↗</a>` : ui`<p>${copy('正在确认账号身份并应用连接。')}</p>`}<button class="text-button" data-provider-operation="cancel" data-provider="${id}">${copy('取消连接')}</button></div>` : '';
-    const form = selected && id !== 'google' && !waiting ? ui`<form data-connection-form="${id}" data-preserve="connection-${id}">${source.configured ? '' : ui`<label class="setup-field">${copy('应用 Client ID')}<input name="clientId" required maxlength="512" autocomplete="off" value="${escapeHtml(source.clientId || '')}" placeholder="${id === 'github' ? 'GitHub App client ID' : 'Microsoft application (client) ID'}"></label><p class="setup-note">${copy('发行版尚未预置此应用。自托管时只需填写一次注册应用的公开 Client ID，不需要访问令牌或 Client Secret。')}</p>`}<label class="setup-toggle"><input name="observe" type="checkbox" checked><span><strong>${copy('连接后持续观察')}</strong><small>${copy('立即检查一次，之后默认每 5 分钟检查变化，可以随时暂停。')}</small></span></label><p class="connection-disclosure">${copy('此连接只读取内容，不发送或修改。工作上下文可能交给你选择的模型理解。')}</p><button class="primary-button" type="submit">${copy('复制授权码并登录')} ${providerNames[id]} ↗</button><p class="setup-error" data-provider-error="${id}" role="alert" ${connectionErrors.has(id) ? '' : 'hidden'}>${escapeHtml(connectionErrors.get(id) || '')}</p></form>` : '';
-    const actions = !waiting ? ui`<div class="action-row">${source.connected ? ui`<button class="text-button" data-select-connection="${id}">${copy('管理连接')} ↗</button>${selected && id !== 'google' ? ui`<button class="text-button" data-provider-operation="forget" data-provider="${id}">${copy('断开连接')}</button>` : ''}` : ui`<button class="${home ? 'secondary-button' : 'primary-button'}" data-select-connection="${id}">${copy(id !== 'google' && source.configured ? '复制授权码并登录' : '连接')} ${providerNames[id]} →</button>`}${oauth.phase === 'activation_failed' && id !== 'google' ? ui`<button class="text-button" data-provider-operation="activate" data-provider="${id}">${copy('应用已保存的连接')}</button>` : ''}</div>` : '';
-    return ui`<article class="source-connection-card ${selected ? 'selected' : ''}" data-connection-card="${id}"><div class="source-connection-heading"><span class="source-monogram" aria-hidden="true">${id === 'github' ? 'GH' : id === 'microsoft' ? 'M' : 'G'}</span><div><h3>${providerNames[id]}</h3>${source.account?.label ? `<p>${escapeHtml(source.account.label)}</p>` : ''}</div><span class="state-badge ${failed ? 'offline' : source.connected ? 'done' : 'waiting'}">${label}</span></div><p class="source-description">${description}</p>${counts}${notice}${device}${form}${actions}</article>`;
-  });
-  const content = `<div class="source-connection-list">${renderNativeSources()}${cards.join('')}</div>`;
-  return home && setupState.workspace?.ready ? `<details class="home-connections" data-preserve="home-connections" ${selectedConnection ? 'open' : ''}><summary>${nativeCopy('连接', 'Connections')} · ${nativeCopy('管理来源', 'Manage sources')}</summary>${content}</details>` : `<div class="connection-catalog-heading"><h2>${nativeCopy('连接', 'Connections')}</h2></div>${content}`;
+  if (runtime.demo?.disposable || runtime.demo?.ruleBased) return home ? '' : renderDemoSources();
+  const order = ['google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes'];
+  const cards = order.map(id => ['local_files', 'apple_notes'].includes(id) ? renderNativeCard(id) : renderCloudCard(id, { home }))
+    .filter(card => home || connectionMatches(card.id));
+  const allIds = order;
+  const connectedCount = allIds.filter(id => connectionState(id) === 'connected').length;
+  const attentionCount = allIds.filter(id => connectionState(id) === 'attention').length;
+  const availableCount = allIds.filter(id => connectionState(id) === 'available').length;
+
+  if (home) {
+    const content = `<div class="source-connection-list">${cards.map(card => card.html).join('')}</div>`;
+    const modelStillOnHome = byId('modelOnboarding')?.parentElement?.id === 'homeModelHost' && !byId('modelOnboarding').hidden && !modelConnectionVerified();
+    const facts = !setupState.workspace?.ready && !modelStillOnHome ? privacyFacts() : '';
+    const heading = `<div class="connection-catalog-heading"><div><h2>${copy('连接工作来源')}</h2><p>${copy('先连一个来源。读取默认开启，发送和修改要单独允许。')}</p>${facts}</div></div>`;
+    if (setupState.workspace?.ready) return `<details class="home-connections" data-preserve="home-connections"><summary>${copy('工作来源')} · ${connectedCount} ${copy('个已连接')}</summary>${content}</details>`;
+    return heading + content;
+  }
+
+  const toolbar = ui`<div class="connection-overview"><span data-tone="connected"><strong>${connectedCount}</strong>${copy('个已连接')}</span><span data-tone="attention"><strong>${attentionCount}</strong>${copy('个需处理')}</span><span data-tone="available"><strong>${availableCount}</strong>${copy('个可连接')}</span></div><div class="connection-toolbar"><label class="collection-search"><span class="sr-only">${copy('搜索连接')}</span>${workspaceSearchIcon()}<input type="search" data-connection-search value="${escapeHtml(connectionQuery)}" placeholder="${copy('搜索来源或账号')}"></label><div class="collection-filters" role="group" aria-label="${copy('筛选连接')}">${[['all','全部'],['connected','已连接'],['attention','需处理'],['available','可连接']].map(([value,label]) => ui`<button data-connection-filter="${value}" aria-pressed="${connectionFilter === value}">${copy(label)}</button>`).join('')}</div></div>`;
+
+  const empty = `<div class="source-connection-empty"><h3>${copy('没有相符的连接')}</h3><p>${copy('换个关键词，或清除状态筛选。')}</p><button class="secondary-button" data-clear-connections>${copy('清除筛选')}</button></div>`;
+  const summaries = [['attention', copy('需要处理')], ['connected', copy('已连接')], ['available', copy('可连接')]].map(([state, label]) => {
+    const matches = cards.filter(card => card.state === state);
+    if (!matches.length) return '';
+    return `<section class="connection-summary-group"><h3>${label}<span>${matches.length}</span></h3>${matches.map(card => {
+      const local = ['local_files', 'apple_notes'].includes(card.id);
+      const source = local ? setupState.localSources?.[card.id] || {} : setupState.connections?.[card.id] || {};
+      const name = providerNames[card.id] || (card.id === 'local_files' ? nativeCopy('本地文件夹', 'Local folders') : nativeCopy('备忘录', 'Apple Notes'));
+      const account = card.id === 'google' ? setupState.google?.accountEmail : source.account?.label;
+      const scope = local ? (source.scopes || []).map(item => item.label).join(' · ') : account;
+      const detail = scope || (local ? nativeCopy('所选文件夹中的内容', 'Content in selected folders') : copy(cloudAccess[card.id] || '邮件与文档'));
+      const status = card.state === 'connected' ? copy('已连接') : card.state === 'attention' ? copy('需处理') : copy('尚未连接');
+      return `<button type="button" class="connection-summary-row${selectedConnection === card.id ? ' is-selected' : ''}" data-inspect-connection="${card.id}" aria-pressed="${selectedConnection === card.id}"><span class="source-monogram" aria-hidden="true">${cloudMark[card.id] || (card.id === 'local_files' ? 'F' : 'N')}</span><span class="connection-summary-copy"><strong>${name}</strong><small>${escapeHtml(detail)}</small></span><span class="connection-summary-state" data-state="${card.state}">${status}</span><span class="connection-summary-arrow" aria-hidden="true">↗</span></button>`;
+    }).join('')}</section>`;
+  }).join('');
+  const activeCard = cards.some(card => card.id === selectedConnection);
+  const details = cards.map(card => card.html.replace('<article ', `<article ${card.id === selectedConnection ? '' : 'hidden '} `)).join('');
+  const placeholder = activeCard ? '' : `<div class="connection-inspector-empty">${workspaceSearchIcon()}<h2>${nativeCopy('选择一个连接', 'Choose a connection')}</h2><p>${nativeCopy('查看账号、访问范围与最近一次观察。', 'Inspect its account, access and latest observation.')}</p><span>${nativeCopy('读取与修改分别授权', 'Read and modify access are separate')}</span></div>`;
+  return toolbar + `<div class="connection-workbench" data-inspecting="${activeCard}"><div class="connection-source-index"><header><h2>${nativeCopy('工作来源', 'Work sources')}</h2><span>${cards.length}</span></header>${summaries || empty}</div><aside class="connection-inspector"${activeCard ? '' : ' hidden'} aria-label="${nativeCopy('访问与权限', 'Access and permissions')}"><div class="connection-inspector-label"><span>${nativeCopy('访问与权限', 'Access and permissions')}</span>${activeCard ? `<button type="button" class="icon-button" data-close-connection-inspector aria-label="${nativeCopy('收起连接详情', 'Close connection details')}">×</button>` : ''}</div>${placeholder}${details}</aside></div>`;
+}
+
+function workspaceSearchIcon() {
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
 }
 
 
@@ -751,7 +1003,7 @@ async function startSourceAuthorization(id, form = null) {
   const data = form ? new FormData(form) : null;
   try {
     const result = await postJSON(`/api/setup/connections/${id}/authorize`, {
-      clientId: data?.get('clientId') || undefined, observe: data ? data.has('observe') : true
+      clientId: data?.get('clientId') || undefined, clientSecret: data?.get('clientSecret') || undefined, observe: data ? data.has('observe') : true, drafts: data?.has('drafts') === true
     });
     connectionErrors.delete(id);
     if (result.oauth.userCode) {
@@ -770,12 +1022,14 @@ async function startSourceAuthorization(id, form = null) {
 document.addEventListener('click', async event => {
   const expand = event.target.closest('[data-expand-task]');
   if (expand) { const id = expand.dataset.expandTask; if (expandedTasks.has(id)) expandedTasks.delete(id); else expandedTasks.add(id); renderDashboard(); return; }
-  const button = event.target.closest('[data-native-operation]');
+  const button = event.target.closest('[data-native-operation], [data-native-purge]');
   if (!button || setupBusy) return;
+  const purge = button.hasAttribute('data-native-purge');
+  if (purge && !window.confirm(copy('断开并清除会删除这个来源在本机的收件、任务、快照和衍生内容。此操作不能撤销。'))) return;
   setupBusy = true; button.disabled = true; button.setAttribute('aria-busy', 'true');
   try {
-    const result = await postJSON(`/api/setup/local-sources/${button.dataset.nativeSource}/${button.dataset.nativeOperation}`, { locale: getLocale() === 'en' ? 'en' : 'zh-CN', id: button.dataset.scopeId });
-    if (!result.cancelled) { await refreshSetup({ quiet: true }); await refreshState(); }
+    const result = await postJSON(`/api/setup/local-sources/${button.dataset.nativeSource}/${purge ? 'forget' : button.dataset.nativeOperation}`, { locale: getLocale() === 'en' ? 'en' : 'zh-CN', id: button.dataset.scopeId, ...(purge ? { purgeLocal: true } : {}) });
+    if (!result.cancelled) { await refreshSetup({ quiet: true }); await refreshState(); if (purge) toast(copy('这个来源已断开，本机副本已清除。')); }
   } catch (error) { toast(copy(error.message), true); }
   finally { setupBusy = false; button.disabled = false; button.removeAttribute('aria-busy'); }
 });
@@ -789,8 +1043,23 @@ document.addEventListener('submit', async event => {
 });
 
 document.addEventListener('click', async event => {
+  const closeInspector = event.target.closest('[data-close-connection-inspector]');
+  if (closeInspector) {
+    const previous = selectedConnection;
+    selectedConnection = null; renderDashboard(); updateContent('setupContent', renderSetupPanel());
+    const row = document.querySelector(`[data-inspect-connection="${CSS.escape(previous)}"]`);
+    row?.focus({ preventScroll: true });
+    if (matchMedia('(max-width: 1000px)').matches) row?.scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  const inspect = event.target.closest('[data-inspect-connection]');
+  if (inspect) {
+    selectedConnection = inspect.dataset.inspectConnection; renderDashboard(); updateContent('setupContent', renderSetupPanel());
+    if (matchMedia('(max-width: 1000px)').matches) requestAnimationFrame(() => document.querySelector('.connection-inspector')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' }));
+    return;
+  }
   const selected = event.target.closest('[data-select-connection]');
-  const operation = event.target.closest('[data-provider-operation]');
+  const operation = event.target.closest('[data-provider-operation], [data-provider-purge]');
   const code = event.target.closest('[data-copy-device-code]');
   if (!selected && !operation && !code) return;
   if (code) {
@@ -801,22 +1070,30 @@ document.addEventListener('click', async event => {
   if (setupBusy) return;
   if (selected) {
     const id = selected.dataset.selectConnection;
+    const connected = id === 'google' ? setupState.google?.configuredThisRun && !setupState.google?.runtimeDisabled : setupState.connections?.[id]?.connected;
+    if (currentView === 'sources' && selectedConnection === id && connected) {
+      selectedConnection = null; renderDashboard(); updateContent('setupContent', renderSetupPanel()); return;
+    }
     selectedConnection = id; renderDashboard(); updateContent('setupContent', renderSetupPanel());
     if (id === 'google') {
       const target = currentView === 'sources' ? byId('googleSetupPanel') : byId('workspaceOnboarding');
       target.scrollIntoView({ behavior: 'smooth', block: 'start' }); return;
     }
-    if (setupState.connections?.[id]?.configured && !setupState.connections[id].connected) {
+    const phase = setupState.connections?.[id]?.oauth?.phase;
+    if (setupState.connections?.[id]?.configured && !setupState.connections[id].connected && !(setupState.connections[id].flow === 'code' && ['failed', 'expired'].includes(phase))) {
       setupBusy = true;
       try { await startSourceAuthorization(id); } catch (error) { toast(copy(error.message), true); }
       finally { setupBusy = false; }
     }
     return;
   }
+  const purge = operation.hasAttribute('data-provider-purge');
+  if (purge && !window.confirm(copy('断开并清除会删除这个来源在本机的收件、任务、快照和衍生内容。此操作不能撤销。'))) return;
   setupBusy = true; operation.disabled = true;
   try {
-    await postJSON(`/api/setup/connections/${operation.dataset.provider}/${operation.dataset.providerOperation}`);
+    await postJSON(`/api/setup/connections/${operation.dataset.provider}/${purge ? 'forget' : operation.dataset.providerOperation}`, purge ? { purgeLocal: true } : {});
     await refreshSetup({ quiet: true }); await refreshState();
+    if (purge) toast(copy('这个来源已断开，本机副本已清除。'));
   } catch (error) { toast(copy(error.message), true); }
   finally { setupBusy = false; operation.disabled = false; }
 });
@@ -878,7 +1155,7 @@ function renderSetupPanel({ home = false } = {}) {
       : oauth.phase === 'activation_failed' ? copy('授权已保存。点击应用连接后继续。') : '';
   const error = connectionErrors.get('google');
   const errorLine = `<p class="setup-error" data-connection-error role="alert" ${error ? '' : 'hidden'}>${escapeHtml(error || '')}</p>${oauthNote ? `<p class="setup-note" role="status">${escapeHtml(oauthNote)}</p>` : ''}`;
-  if (home && ready && !connecting) return summary + errorLine + issue + (phase === 'not_checked' ? ui`<button class="secondary-button" data-sync-now>${copy('开始首次检查')}</button>` : '') + (problem ? ui`<button class="secondary-button" ${google.issue?.action === 'reauthorize' ? 'data-google-reconnect' : 'data-sync-now'}>${copy(google.issue?.action === 'reauthorize' ? '重新连接 Google' : '重试同步')}</button>` : '') + outcome + (failedReasoning ? ui`<p class="setup-error">${copy('部分工作未完成模型读取。检查模型连接后可以重新核对。')}</p><button class="text-button" data-reasoning-retry>${copy('重新核对工作')}</button>` : '') + ui`<div class="connection-footer"><p>${monitoring.lastSuccessAt ? copy('最近成功观察') + ' · ' + time(monitoring.lastSuccessAt) : copy('首次观察正在开始。')}${monitoring.enabled ? ' · ' + copy('关闭页面后仍会观察，本地服务需要保持运行。') : ''}</p><button class="text-button" data-go="sources">${copy('管理连接与观察')} ↗</button></div>`;
+  if (home && ready && !connecting) return summary + errorLine + issue + (phase === 'not_checked' ? ui`<button class="secondary-button" data-sync-now>${copy('开始首次检查')}</button>` : '') + (problem ? ui`<button class="secondary-button" ${google.issue?.action === 'reauthorize' ? 'data-google-reconnect' : 'data-sync-now'}>${copy(google.issue?.action === 'reauthorize' ? '重新连接 Google' : '重试同步')}</button>` : '') + outcome + (failedReasoning ? ui`<p class="setup-error">${copy('部分工作未完成模型读取。检查模型连接后可以重新核对。')}</p><button class="text-button" data-reasoning-retry>${copy('重新核对工作')}</button>` : '') + ui`<div class="connection-footer"><p>${monitoring.lastSuccessAt ? copy('最近成功观察') + ' · ' + time(monitoring.lastSuccessAt) : copy('首次观察正在开始。')}${monitoring.enabled ? ' · ' + copy('关闭页面后仍会观察，本地服务需要保持运行。') : ''}</p><button class="text-button" data-go="sources">${copy('管理连接与观察')}</button></div>`;
   const scope = google.requestedScopes || { readGmail: true, readDrive: true, docsWrite: false, gmailSend: false };
   const permissionChoices = ui`<fieldset class="connection-scopes"><legend>${copy('让 Agent 读取什么？')}</legend><label><input type="checkbox" name="readGmail" ${scope.readGmail ? 'checked' : ''}><span><strong>Gmail</strong><small>${copy('首次读取最近 3 天的邮件，之后跟进新邮件。')}</small></span></label><label><input type="checkbox" name="readDrive" ${scope.readDrive ? 'checked' : ''}><span><strong>Google Docs</strong><small>${copy('首次读取最多 20 份近期文档，之后跟进变化。')}</small></span></label></fieldset>`;
   const observeChoice = ui`<label class="setup-toggle"><input name="observe" type="checkbox" ${ready ? monitoring.enabled ? 'checked' : '' : 'checked'}><span><strong>${copy('连接后持续观察')}</strong><small>${copy('立即检查一次，之后默认每 5 分钟检查变化，可以随时暂停。')}</small></span></label>`;
@@ -892,7 +1169,7 @@ function renderSetupPanel({ home = false } = {}) {
   const recovery = !ready && google.hasRefreshToken && !connecting ? ui`<button class="secondary-button" data-google-activate>${copy('应用已保存的 Google 连接')}</button>` : '';
   const details = ready ? ui`<details class="connection-advanced" data-preserve="google-diagnostics"><summary>${copy('连接详情与诊断')}</summary><dl class="setup-dates"><div><dt>${copy('最近成功观察')}</dt><dd>${monitoring.lastSuccessAt ? time(monitoring.lastSuccessAt) : copy('尚无成功记录')}</dd></div><div><dt>${copy('最近一次错误')}</dt><dd>${escapeHtml(monitoring.lastError || copy('无失败记录'))}</dd></div></dl><button type="button" class="text-button" data-google-validate>${copy('检查账号授权')}</button>${!google.credentialsConfiguredExternally ? ui`<button type="button" class="text-button" data-google-reconnect>${copy('重新连接 Google')}</button>` : ''}</details>` : '';
   return summary + busyStatus + issue + errorLine + outcome + recovery + initialForm + readScopeForm + writeForm + details
-    + (google.hasRefreshToken ? ui`<div class="connection-footer"><p>${copy('断开后停止读取和执行，已观察到的本机工作记录会保留。')}</p><button type="button" class="text-button" data-google-forget>${copy('断开 Google')}</button></div>` : '');
+    + (google.hasRefreshToken ? ui`<div class="connection-footer"><p>${copy('断开后停止读取和执行，已观察到的本机工作记录会保留。要删除本机副本，使用「断开并清除」。')}</p><span class="connection-footer-actions"><button type="button" class="text-button" data-google-forget>${copy('断开 Google')}</button><button type="button" class="text-button danger-button" data-google-purge>${copy('断开并清除本机副本')}</button></span></div>` : '');
 }
 
 async function refreshSetup({ quiet = false } = {}) {
@@ -921,6 +1198,23 @@ async function refreshSetup({ quiet = false } = {}) {
     if (setupState.oauth?.phase === 'connected' && oauthPopup && !oauthPopup.closed) { oauthPopup.close(); oauthPopup = null; }
   } catch (error) { if (!quiet) toast(error.message, true); }
 }
+
+document.addEventListener('click', event => {
+  const connection = event.target.closest('[data-connection-filter]');
+  const activity = event.target.closest('[data-activity-filter]');
+  const clearConnections = event.target.closest('[data-clear-connections]');
+  if (connection) { connectionFilter = connection.dataset.connectionFilter; renderDashboard(); }
+  if (clearConnections) { connectionFilter = 'all'; connectionQuery = ''; renderDashboard(); }
+  if (activity) {
+    activityFilter = activity.dataset.activityFilter;
+    document.querySelectorAll('[data-activity-filter]').forEach(button => button.setAttribute('aria-pressed', String(button === activity)));
+    renderDashboard();
+  }
+});
+document.addEventListener('input', event => {
+  if (event.target.hasAttribute('data-connection-search')) { connectionQuery = event.target.value; renderDashboard(); }
+  if (event.target.id === 'activitySearch') { activityQuery = event.target.value; renderDashboard(); }
+});
 
 // Preserve expanded content, focused controls and text through streaming updates.
 function updateContent(id, html) {
@@ -952,7 +1246,17 @@ function renderDemoJourney() {
   const action = verified
     ? ui`<button class="secondary-button" data-open-task="${escapeHtml(task.id)}">${copy('查看核验结果')} ↗</button>`
     : ready ? ui`<button class="primary-button" data-go="attention">${copy('查看准备好的回复')} →</button>` : '';
-  updateContent('demoJourney', ui`<div class="demo-journey-copy"><span class="demo-caption">${copy(runtime.demo?.disposable ? '本地演示 · 无需连接账号' : '示例工作区 · 使用已连接的模型')}</span><h2>${copy(title)}</h2><p>${copy(detail)}</p></div><div class="demo-journey-bottom"><ol class="demo-steps">${labels.map((label, index) => `<li class="${index < step ? 'complete' : index === step ? 'current' : ''}"${index === step ? ' aria-current="step"' : ''}><span aria-hidden="true">${index < step ? '✓' : index + 1}</span>${copy(label)}</li>`).join('')}</ol>${action}</div>${verified || stopped ? ui`<div class="demo-next-links"><button class="text-button" data-go="sources">${copy('开始自己的工作区')} ↗</button><a class="text-button" href="https://github.com/PStarH/unprompted/blob/main/docs/EXTENDING.md" target="_blank" rel="noopener">${copy('开发者：运行第一个场景')} ↗</a><button class="text-button" data-demo-replay>${copy('再体验一次')}</button></div>` : ''}`);
+  updateContent('demoJourney', ui`<div class="demo-journey-copy"><span class="demo-caption">${copy(runtime.demo?.disposable ? '本地演示 · 无需连接账号' : '示例工作区 · 使用已连接的模型')}</span><h2>${copy(title)}</h2><p>${copy(detail)}</p></div><div class="demo-journey-bottom"><ol class="demo-steps">${labels.map((label, index) => `<li class="${index < step ? 'complete' : index === step ? 'current' : ''}"${index === step ? ' aria-current="step"' : ''}><span aria-hidden="true">${index < step ? '✓' : index + 1}</span>${copy(label)}</li>`).join('')}</ol>${action}</div>${verified || stopped ? ui`<div class="demo-next-links"><button class="text-button" data-go="sources">${copy('开始自己的工作区')}</button><a class="text-button" href="https://github.com/PStarH/unprompted/blob/main/docs/EXTENDING.md" target="_blank" rel="noopener">${copy('开发者：运行第一个场景')} ↗</a><button class="text-button" data-demo-replay>${copy('再体验一次')}</button></div>` : ''}`);
+}
+
+function privacyFacts() {
+  return ui`<ul class="privacy-facts"><li>${copy('邮件、文档和任务内容会发送给你选择的模型。')}</li><li>${copy('本机数据库和密钥不加密，请只在你自己的电脑上运行。')}</li><li>${copy('断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。')}</li></ul>`;
+}
+
+function modelConnectionVerified() {
+  const config = setupState?.model || {};
+  const model = current?.reasoner || config.runtime || runtime?.reasoner || {};
+  return Boolean(model.available && !model.lastError && config.lastValidation?.status === 'verified' && config.model === model.model && config.baseUrl === model.baseUrl);
 }
 
 function renderModelPanel() {
@@ -967,26 +1271,38 @@ function renderModelPanel() {
   const form = config.externallyConfigured
     ? ui`<p class="setup-note">${copy('模型由启动环境配置。修改环境变量并重启，或移除它们后在这里连接。')}</p>`
     : ui`<form data-model-form data-preserve="model-connection"><div class="model-fields"><label>${copy('接口地址')}<input name="baseUrl" type="url" required value="${escapeHtml(config.baseUrl || '')}" placeholder="https://your-provider.example/v1" autocomplete="off"></label><label>${copy('模型 ID')}<input name="model" required maxlength="200" value="${escapeHtml(config.model || '')}" placeholder="your-model-id" autocomplete="off"></label><label>API Key <small>${copy('本地模型可留空')}</small><input name="apiKey" type="password" autocomplete="new-password" placeholder="${config.hasApiKey ? copy('已保存在本机，留空保持不变') : copy('粘贴提供方的 API Key')}" maxlength="8192"></label></div><details class="model-advanced" data-preserve="model-advanced"><summary>${copy('高级选项')}</summary><label>${copy('推理内核')}<select name="harness"><option value="classic" ${config.harness !== 'pi' ? 'selected' : ''}>Standard</option><option value="pi" ${config.harness === 'pi' ? 'selected' : ''}>Pi · read tools</option></select></label></details><p class="setup-note">${copy('Key 只保存在本机。测试使用虚构内容；连接后，任务上下文会发送给所选模型。')}</p><div class="action-row"><button class="primary-button" type="submit">${copy('验证并连接模型')}</button>${active ? ui`<button class="text-button" type="button" data-model-forget>${copy('移除本机模型连接')}</button>` : ''}</div><p class="model-error" role="alert" data-model-error hidden></p></form>`;
-  updateContent('modelOnboarding', ui`<div class="model-heading"><div><span class="connection-step">${copy('连接用于理解工作的模型')}</span><h2>${title}</h2>${active ? `<p>${escapeHtml(model.model)} · ${Number(model.calls || 0)} ${copy('次模型请求')}</p>` : ui`<p>${copy('支持兼容接口和本地模型。连接后，再选择让 Agent 读取的工作环境。')}</p>`}</div><span class="state-badge ${model.lastError ? 'offline' : verified ? 'done' : 'waiting'}">${model.lastError ? copy('模型请求需要检查') : verified ? copy('真实请求已验证') : copy('等待连接')}</span></div>${active ? `<details data-preserve="edit-model"><summary>${copy('更换模型或连接设置')}</summary>${form}</details>` : form}`);
+  updateContent('modelOnboarding', ui`<div class="model-heading"><div><span class="connection-step">${copy('连接用于理解工作的模型')}</span><h2>${title}</h2>${active ? `<p>${escapeHtml(model.model)} · ${Number(model.calls || 0)} ${copy('次模型请求')}</p>` : ui`<p>${copy('支持兼容接口和本地模型。连接后，再选择让 Agent 读取的工作环境。')}</p>`}${verified ? '' : privacyFacts()}</div><span class="state-badge ${model.lastError ? 'offline' : verified ? 'done' : 'waiting'}">${model.lastError ? copy('模型请求需要检查') : verified ? copy('真实请求已验证') : copy('等待连接')}</span></div>${active ? `<details data-preserve="edit-model"><summary>${copy('更换模型或连接设置')}</summary>${form}</details>` : form}`);
 }
 
 function renderDashboard() {
   if (!current || composingElement?.isConnected) return;
+  updateGoogleSearchAvailability();
+  if (runtime?.demo?.enabled || runtime?.demo?.ruleBased || runtime?.mode === 'simulation') byId('connectionText').textContent = copy('本地模拟');
   const state = current;
+  mcpUI?.render();
+  durableUI?.render();
+  const memoryAdvanced = document.querySelector('#viewMemory .memory-advanced');
+  if (memoryAdvanced) memoryAdvanced.hidden = !['durableMemoryContent', 'policyContent', 'experienceContent'].some(id => {
+    const host = byId(id);
+    return host && !host.hidden && host.childElementCount > 0;
+  });
+  const modelHost = byId(currentView === 'preferences' || state.reasoner?.available ? 'settingsModelHost' : 'homeModelHost');
+  if (byId('modelOnboarding').parentElement !== modelHost) modelHost.append(byId('modelOnboarding'));
   renderModelPanel();
   renderDemoJourney();
   const workspaceOnboarding = byId('workspaceOnboarding');
   const explicitDemo = runtime?.demo?.disposable || runtime?.demo?.ruleBased;
   byId('connectionCatalogHome').hidden = !runtime || explicitDemo;
-  if (!explicitDemo) updateContent('connectionCatalogHome', renderConnectors({ home: true }));
+  updateContent('connectionCatalogHome', explicitDemo ? '' : renderConnectors({ home: true }));
   workspaceOnboarding.hidden = !runtime || explicitDemo || selectedConnection !== 'google';
-  byId('googleSetupPanel').hidden = !explicitDemo && selectedConnection !== 'google';
+  // In the demo the source list already carries the next step; no second panel.
+  byId('googleSetupPanel').hidden = Boolean(explicitDemo) || selectedConnection !== 'google';
   byId('observationPanel').hidden = !setupState?.workspace?.ready;
   if (setupState?.workspace?.ready) updateContent('observationContent', renderObservation());
   if (!workspaceOnboarding.hidden) updateContent('workspaceOnboarding', renderSetupPanel({ home: true }));
   const firstSetup = !runtime?.demo?.ruleBased && !setupState?.workspace?.ready && !state.tasks.length;
   byId('viewHome').classList.toggle('setting-up', firstSetup);
-  byId('viewHome').querySelector('.page-heading h1 span').textContent = copy(firstSetup ? '让 Agent 开始照看你的工作。' : '今天的进展，一目了然。');
+  byId('viewHome').querySelector('.page-heading h1 span').textContent = copy('工作台');
   interactions?.prepare();
   for (const id of Object.keys(snoozes)) {
     const task = state.tasks.find(item => item.id === id);
@@ -998,9 +1314,10 @@ function renderDashboard() {
   const snoozedTasks = tasks.filter(task => needsTaskDecision(task) && isSnoozed(task, snoozes));
   const active = tasks.filter(task => !isClosedTask(task));
   const decisionTasks = tasks.filter(task => needsTaskDecision(task) && !isSnoozed(task, snoozes));
+  const recoveryTasks = tasks.filter(task => !needsTaskDecision(task) && !task.control?.paused && ['failed', 'source_disconnected', 'unknown'].includes(taskState(task, workspaceConnections(setupState))));
   const done = tasks.filter(isClosedTask);
   const notices = attentionItems(state);
-  const count = decisionTasks.length + notices.length;
+  const count = decisionTasks.length + recoveryTasks.filter(task => !decisionTasks.some(item => item.id === task.id)).length + notices.length;
   const status = workspacePresentation(state, connected);
   if (connected && runtime && !state.reasoner?.available && !runtime.demo?.ruleBased) Object.assign(status, {
     tone: 'waiting', label: copy('等待模型连接'), title: copy('连接模型后，才会开始理解上下文。'),
@@ -1013,54 +1330,80 @@ function renderDashboard() {
   if (connected && snoozedTasks.length && !count && status.tone === 'needs') Object.assign(status, { tone: 'waiting', label: copy('稍后处理'), title: copy('已备好，按你的安排稍后再看。'), description: copy('暂收起的任务仍在照看，相关内容变化时会重新出现。') });
   const agent = byId('agentStatus');
   agent.className = ui`agent-status ${status.tone}`;
+  const journeyVisible = !byId('demoJourney').hidden;
   const statusAction = !connected
     ? ui`<button class="secondary-button" data-sync-state>${copy('重新同步')}</button>`
     : status.tone === 'offline'
       ? ui`<button class="secondary-button" data-go="sources">${copy('检查连接与观察')}</button>`
-      : count ? ui`<button class="primary-button" data-go="attention">${count === 1 ? copy('处理这个选择') : copy('处理 {count} 个选择', { count })}<span aria-hidden="true"> →</span></button>` : '';
-  updateContent('agentStatus', ui`<span class="agent-mark" aria-hidden="true"><i></i><i></i></span><div class="status-message"><strong>${escapeHtml(status.title)}</strong><p>${escapeHtml(status.description)}</p></div>${statusAction}`);
-  byId('agentBadge').textContent = status.label;
-  byId('agentBadge').className = ui`state-badge ${status.tone === 'needs' ? 'attention' : status.tone}`;
-  byId('companionSummary').textContent = connected ? status.description : copy('连接中断，暂时无法确认最新状态。');
-  byId('companionTaskCount').textContent = ui`${active.length} 件事`;
-  byId('companionDoneCount').textContent = ui`${tasks.filter(task => task.status === 'completed').length} 件`;
-  byId('taskTotal').textContent = active.length;
-  byId('activeCount').textContent = active.length;
-  byId('attentionCount').textContent = decisionTasks.length;
+      : count && !journeyVisible ? ui`<button class="primary-button" data-go="attention">${count === 1 ? copy('处理这个选择') : copy('处理 {count} 个选择', { count })}<span aria-hidden="true"> →</span></button>` : '';
+  updateContent('agentStatus', ui`<span class="agent-mark" aria-hidden="true"></span><div class="status-message"><strong title="${escapeHtml(status.description)}">${escapeHtml(status.label)}</strong>${!connected ? `<p>${escapeHtml(status.description)}</p>` : ''}</div>${statusAction}`);
+  const modelSetupVisible = Boolean(byId('modelOnboarding').offsetParent);
+  const sourceSetupVisible = Boolean(byId('workspaceOnboarding').offsetParent);
+  const onboardingVisible = journeyVisible || modelSetupVisible || sourceSetupVisible;
+  agent.hidden = onboardingVisible && !statusAction;
+  const sidebarStatus = byId('sidebarStatus');
+  if (sidebarStatus) sidebarStatus.textContent = status.label;
+  const sidebarDot = byId('sidebarDot');
+  if (sidebarDot) sidebarDot.dataset.tone = status.tone === 'needs' ? 'needs' : ['offline', 'waiting'].includes(status.tone) ? 'offline' : 'active';
+  const sidebarMode = byId('sidebarMode');
+  if (sidebarMode) sidebarMode.textContent = byId('footerMode')?.textContent || copy('本地工作区');
+  byId('taskTotal').textContent = tasks.length;
+  byId('attentionCount').textContent = active.filter(task => stateGroup(taskState(task, workspaceConnections(setupState))) === 'attention' && !isSnoozed(task, snoozes)).length;
+  byId('workingCount').textContent = active.filter(task => taskState(task, workspaceConnections(setupState)) === 'working').length;
+  byId('waitingCount').textContent = active.filter(task => taskState(task, workspaceConnections(setupState)) === 'waiting_external').length;
   byId('doneCount').textContent = done.length;
+  // Counts double as filters; zero groups stay visible as plain text so the
+  // whole system state is legible without opening anything.
+  const countGroups = [['attention', copy('待你处理'), byId('attentionCount').textContent], ['working', copy('正在处理'), byId('workingCount').textContent], ['waiting', copy('等待回复或资料'), byId('waitingCount').textContent], ['done', copy('已结束'), done.length]];
+  updateContent('homeCounts', countGroups.map(([key, label, value]) => ui`<button type="button" class="home-count" data-count-filter="${key}" data-zero="${Number(value) === 0}" aria-pressed="${selectedFilter === key}"><strong>${String(value)}</strong><span>${label}</span></button>`).join('') + (selectedFilter !== 'all' ? ui`<button type="button" class="text-button home-count-clear" data-count-filter="all">${copy('全部')}</button>` : ''));
   byId('navDecisionCount').textContent = count;
   byId('navDecisionCount').className = ui`nav-count${count ? '' : ' zero'}`;
-  const filtered = selectedFilter === 'attention' ? decisionTasks : selectedFilter === 'done' ? done : active;
+  byId('navDecisionCount').hidden = !count;
+  const filtered = selectedFilter === 'attention' ? active.filter(task => stateGroup(taskState(task, workspaceConnections(setupState))) === 'attention' && !isSnoozed(task, snoozes)) : selectedFilter === 'done' ? done : selectedFilter === 'working' ? active.filter(task => taskState(task, workspaceConnections(setupState)) === 'working') : selectedFilter === 'waiting' ? active.filter(task => taskState(task, workspaceConnections(setupState)) === 'waiting_external') : selectedFilter === 'active' ? active : tasks;
   const shown = filtered.filter(task => matchesTask(task, searchQuery));
   const empty = !runtime?.demo?.ruleBased && !setupState?.workspace?.ready ? [copy('连接后，你的真实工作会出现在这里。'), copy('无需手动创建任务；Agent 会从授权环境中发现值得跟进的事。')] : selectedFilter === 'attention' ? [copy('这些任务暂时不需要你'), copy('需要判断时，我会把上下文一起带来。')] : selectedFilter === 'done' ? [copy('完成的事会留在这里'), copy('每次行动核验结果后，才会标记完成。')] : [copy('现在没有待推进的事'), copy('我会留意工作空间里的变化。你不需要为了让我工作而找事。')];
-  updateTaskList('taskContent', shown, searchQuery ? emptyState(copy('没有找到相符的任务'), copy('试试项目名或联系人，也可以清空搜索。')) : emptyState(...empty));
+  workspaceUI?.render({ tasks: shown, allTasks: tasks, emptyHTML: searchQuery ? emptyState(copy('没有找到相符的任务'), copy('试试项目名或联系人，也可以清空搜索。')) : emptyState(...empty) });
   byId('clearSearch').hidden = !searchQuery;
-  byId('taskSearch').hidden = tasks.length < 4 && !searchQuery && document.activeElement !== byId('taskSearch');
+  byId('taskSearch').hidden = false;
   updateTaskList('attentionTaskContent', decisionTasks, '');
   updateContent('sharedDependencyContent', renderCommonDependencies(state));
-  updateContent('attentionNotices', notices.map(renderQuietDecision).join(''));
-  updateContent('attentionEmpty', !decisionTasks.length && !notices.length ? emptyState(copy('现在没有需要你的事'), copy('该跟进的我会继续跟进。你可以放心离开这里。')) : '');
+  updateContent('attentionNotices', notices.map(notice => `<details class="home-notice" data-preserve="notice-${escapeHtml(notice.id)}"><summary>${escapeHtml(notice.headline || notice.title || nativeCopy('建议待确认', 'Suggestion to review'))}</summary>${renderQuietDecision(notice)}</details>`).join(''));
+  updateContent('attentionRecoveryContent', recoveryTasks.map(task => workspaceUI.recoveryCard(task)).join(''));
+  updateContent('attentionEmpty', !decisionTasks.length && !notices.length && !recoveryTasks.length ? emptyState(copy('现在没有需要你的事'), copy('该跟进的我会继续跟进。你可以放心离开这里。')) : '');
   updateContent('parkedContent', renderParked(state.opportunities));
   interactions?.renderQueue(decisionTasks, notices);
-  updateContent('recentContent', renderRecent(state));
-  const newestEvent = state.events.at(-1);
-  byId('lastUpdated').textContent = newestEvent ? ui`最近更新 ${time(newestEvent.at)}` : copy('等待第一条动态');
-  updateContent('attentionPeek', !state.reasoner?.available && !runtime?.demo?.ruleBased ? ui`<div class="peek-calm"><span aria-hidden="true">↳</span><div><strong>${copy('等待模型连接')}</strong><p>${copy('连接模型后，我会在授权的范围内跟进。')}</p></div></div>` : ui`<div class="peek-calm"><span aria-hidden="true">↳</span><div><strong>你不用守着这里。</strong><p>只要本地服务在运行，关闭此页面也会继续跟进。</p><button class="text-button" data-go="preferences">调整相处方式 ↗</button></div></div>`);
   const changes = changesSince(state, visitBaseline);
   const hasChanges = changes && (changes.discovered || changes.completed || changes.ready);
-  updateContent('returnDigest', hasChanges ? ui`<div><strong>自上次离开以来</strong><p>${changes.completed ? ui`<span><b>${changes.completed}</b> 已完成</span>` : ''}${changes.ready ? ui`<span><b>${changes.ready}</b> 准备就绪</span>` : ''}${changes.discovered ? ui`<span><b>${changes.discovered}</b> 新增任务</span>` : ''}</p></div><button class="text-button" data-dismiss-digest>知道了</button>` : '');
+  updateContent('returnDigest', hasChanges ? ui`<div><strong>${copy('自上次离开以来')}</strong><p>${changes.completed ? ui`<span><b>${changes.completed}</b> ${copy('已完成')}</span>` : ''}${changes.ready ? ui`<span><b>${changes.ready}</b> ${copy('准备就绪')}</span>` : ''}${changes.discovered ? ui`<span><b>${changes.discovered}</b> ${copy('新增任务')}</span>` : ''}</p></div><button class="text-button" data-dismiss-digest>${copy('知道了')}</button>` : '');
   byId('returnDigest').hidden = !hasChanges;
-  updateContent('snoozedSummary', snoozedTasks.length ? ui`<span>已设置稍后处理 · ${snoozedTasks.length}</span><button class="text-button" data-show-snoozed>现在查看</button>` : '');
+  updateContent('snoozedSummary', snoozedTasks.length ? ui`<span>${copy('已设置稍后处理')} · ${snoozedTasks.length}</span><button class="text-button" data-show-snoozed>${copy('现在查看')}</button>` : '');
   byId('snoozedSummary').hidden = !snoozedTasks.length;
   if (!document.hidden) writeLocal(ui`${localWorkspace}:visit`, workspaceSnapshot(state));
-  updateContent('eventContent', renderEvents(state.events));
-  updateContent('historyContent', renderHistory(state.history));
+  const activityNeedle = activityQuery.trim().toLocaleLowerCase();
+  const matchesActivity = value => !activityNeedle || JSON.stringify(value).toLocaleLowerCase().includes(activityNeedle);
+  const activityEvents = activityFilter === 'history' ? [] : (state.events || []).filter(matchesActivity);
+  const activityHistory = activityFilter === 'events' ? [] : (state.history || []).filter(matchesActivity);
+  const noActivityMatch = activityQuery.trim() || activityFilter !== 'all' ? activityQuery.trim() ? copy('没有相符的动态。换个关键词或清除筛选。') : copy('当前筛选下暂无记录。') : undefined;
+  updateContent('eventContent', renderRecord(activityEvents, activityHistory, noActivityMatch));
+  updateContent('historyContent', '');
+  byId('eventCount').textContent = activityEvents.length ? String(activityEvents.length) : '';
+  byId('historyCount').textContent = activityHistory.length ? String(activityHistory.length) : '';
+  byId('eventCount').textContent = String(activityEvents.length + activityHistory.length || '');
+  byId('historyContent').closest('.activity-stream').hidden = true;
+  const environmentNote = byId('activityEnvironmentNote');
+  const demoEnvironment = Boolean(runtime?.demo?.enabled);
+  environmentNote.hidden = !demoEnvironment;
+  if (demoEnvironment) environmentNote.textContent = copy('本地模拟 · 这里的来源变化与发送均为模拟，不会联系真实账号。');
   updateContent('followUpContent', renderFollowUps(state));
+  // An empty record is one line, not three placeholder sections.
+  const recordEmpty = !(state.events || []).length && !(state.history || []).length;
+  byId('homeRecord').dataset.empty = String(recordEmpty);
+  byId('followUpContent').closest('.activity-stream').hidden = !Object.keys(state.followUps || {}).length;
   updateContent('contextContent', renderContext(state));
   updateContent('metricsContent', renderMetrics(state.metrics));
   updateContent('grantContent', renderGrants(state));
   updateContent('connectorContent', renderConnectors());
-  updateContent('missList', (state.misses || []).slice().reverse().map(item => ui`<article class="miss-row"><strong>${escapeHtml(item.note)}</strong><small>${time(item.at)}${item.sourceHint ? ui` · ${escapeHtml(item.sourceHint)}` : ''}</small></article>`).join(''));
+  artifactUI?.render();
   if (openTaskId && byId('taskDialog').open) renderTaskDialog();
   syncPendingControls();
 }
@@ -1071,13 +1414,8 @@ function renderRuntime(report, { refresh = true } = {}) {
   const live = report.mode === 'live';
   const sourceNames = (report.connectors || []).filter(source => source.live).map(source => providerNames[source.id] || source.id);
   const disconnected = report.googleRuntimeDisabled === true && !sourceNames.length;
-  const needsModel = !live && !report.demo?.ruleBased && !report.reasoner?.available;
   const setup = report.mode === 'setup';
-  byId('modeTitle').textContent = disconnected ? copy('Google 已断开') : needsModel ? copy('等待模型连接') : setup ? copy('等待工作环境') : live ? copy('已连接真实工作环境') : copy('正在体验本地演示');
-  byId('modeDetail').textContent = disconnected ? copy('已停止读取与执行。重新连接后继续，已有工作记录保留。') : setup ? copy('连接自己的模型和常用工具，开始处理真实工作。') : live ? (report.shadow ? copy('当前只读，自动观察与准备，不会对外发送。') : copy('根据当前配置和已约定的范围行动，结果会核验。')) : copy('使用模拟邮件与文档，不会发给真实联系人。');
-  byId('workspaceMeta').textContent = disconnected ? copy('Google 已断开；真实工作区记录保留') : live ? sourceNames.join(' · ') : setup ? copy('等待连接真实工作环境') : copy('本地模拟空间');
-  byId('footerMode').textContent = disconnected ? 'LIVE · DISCONNECTED' : live ? (report.shadow ? 'LIVE · READ ONLY' : 'LIVE WORKSPACE') : setup ? 'LOCAL · SETUP' : 'LOCAL SIMULATION';
-  byId('restartDemo').hidden = live || report.simulationRunning === false;
+  byId('footerMode').textContent = disconnected ? nativeCopy('来源已断开', 'Source disconnected') : live ? (report.shadow ? nativeCopy('只读工作区', 'Read-only workspace') : nativeCopy('真实工作区', 'Live workspace')) : setup ? nativeCopy('等待连接', 'Awaiting connection') : nativeCopy('本地模拟', 'Local simulation');
   if (refresh) void refreshSetup({ quiet: true });
 }
 
@@ -1108,19 +1446,34 @@ function render(state, { allowWorkspaceChange = false } = {}) {
 }
 
 function setView(name, navigate = true) {
+  // Activity is part of Work: the record sits below the tasks it explains.
+  if (name === 'activity') {
+    setView('home', navigate);
+    if (location.hash === '#activity') history.replaceState(null, '', '#home');
+    byId('homeRecord')?.scrollIntoView({ block: 'start', behavior: 'instant' });
+    return;
+  }
+  if (name === 'attention') {
+    name = 'home';
+    selectedFilter = 'attention';
+    workspaceUI?.select(null);
+    if (location.hash === '#attention') history.replaceState(null, '', '#home');
+  } else if (name === 'home') selectedFilter = 'all';
   if (!Object.hasOwn(viewNames, name)) name = 'home';
+  if (name !== currentView) viewScrollPositions.set(currentView, window.scrollY);
   for (const [key, label] of Object.entries(viewNames)) {
     byId(ui`view${key[0].toUpperCase()}${key.slice(1)}`).hidden = key !== name;
     const link = document.querySelector(ui`[data-view="${key}"]`);
-    link.classList.toggle('active', key === name);
-    if (key === name) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+    link?.classList.toggle('active', key === name);
+    if (key === name) link?.setAttribute('aria-current', 'page'); else link?.removeAttribute('aria-current');
   }
   byId('pageCrumb').textContent = copy(viewNames[name]);
   currentView = name;
+  if (current) renderDashboard();
   if (navigate) {
     const heading = byId(`view${name[0].toUpperCase()}${name.slice(1)}`).querySelector('h1');
     if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    window.scrollTo({ top: viewScrollPositions.get(name) || 0, behavior: 'instant' });
   }
   if (navigate && location.hash !== ui`#${name}`) location.hash = name;
 }
@@ -1137,15 +1490,21 @@ function setFilter(filter) {
   renderDashboard();
 }
 
+byId('taskStatusFilter').addEventListener('change', event => setFilter(event.target.value));
+byId('homeCounts').addEventListener('click', event => {
+  const button = event.target.closest('[data-count-filter]');
+  if (!button) return;
+  const next = button.dataset.countFilter === selectedFilter ? 'all' : button.dataset.countFilter;
+  byId('taskStatusFilter').value = next;
+  setFilter(next);
+});
+
 function renderTaskDialog() {
   const task = current?.tasks.find(item => item.id === openTaskId);
   if (!task) { byId('taskDialog').close(); openTaskId = null; return; }
   byId('taskDialogTitle').textContent = taskTitle(task);
-  if (task.kind === 'external_issue') {
-    updateContent('taskDialogContent', renderIssueCard(task, { detailed: true })); return;
-  }
-  if (task.kind === 'observed_task') { updateContent('taskDialogContent', renderObservedCard(task, { detailed: true })); return; }
-  updateContent('taskDialogContent', ui`<p class="dialog-note">这里保留请求、来源、核对依据与完整记录。首页只呈现当前最有用的下一步。</p>${renderTaskAction(task)}${renderTaskManagement(task)}<details class="dialog-section" data-preserve="full-evidence-${escapeHtml(task.id)}"><summary>完整来源、证据与行动记录</summary><div lang="${getLocale()}">${renderWork(task)}<section class="dialog-section" id="approval"><h3>行动与核验</h3>${renderApproval(task)}</section></div></details>${task.status === 'waiting_for_information' ? ui`<div class="dialog-section"><button class="secondary-button danger-button" data-action="cancel" data-id="${escapeHtml(task.id)}">不再跟进这件事</button></div>` : ''}`);
+  updateContent('taskDialogContent', workspaceUI.inspector(task, { record: true }));
+
 }
 
 function openTask(id) {
@@ -1287,7 +1646,7 @@ document.addEventListener('click', async event => {
 
 async function beginGoogleAuthorization(form, { importClient = false } = {}) {
   const data = new FormData(form);
-  const scopes = { readGmail: data.has('readGmail'), readDrive: data.has('readDrive'), docsWrite: data.has('docsWrite'), gmailSend: data.has('gmailSend') };
+  const scopes = { readGmail: data.has('readGmail'), readDrive: data.has('readDrive'), docsWrite: data.has('docsWrite'), gmailSend: data.has('gmailSend'), gmailDrafts: data.has('gmailDrafts') };
   if (!scopes.readGmail && !scopes.readDrive) throw new Error(copy('至少选择一个读取来源。'));
   const fileInput = form.querySelector('input[type="file"]');
   const file = fileInput?.files?.[0];
@@ -1394,7 +1753,7 @@ document.addEventListener('click', async event => {
     } else if (action.hasAttribute('data-google-activate')) {
       await postJSON('/api/setup/google/activate', { observe: true });
     } else if (action.hasAttribute('data-reasoning-retry')) {
-      await postJSON('/api/reasoning/retry');
+      await postJSON('/api/reasoning/retry', action.dataset.reasoningRetry ? { taskId: action.dataset.reasoningRetry } : {});
     } else {
       const form = document.createElement('form');
       for (const [name, enabled] of Object.entries({ ...setupState.google.requestedScopes, observe: setupState.monitoring.enabled })) {
@@ -1410,11 +1769,13 @@ document.addEventListener('click', async event => {
 document.addEventListener('click', async event => {
   const syncButton = event.target.closest('[data-sync-now]');
   const validateButton = event.target.closest('[data-google-validate]');
-  const forgetButton = event.target.closest('[data-google-forget]');
+  const forgetButton = event.target.closest('[data-google-forget], [data-google-purge]');
   const restartButton = event.target.closest('[data-setup-restart]');
   const undoFeedback = event.target.closest('[data-undo-feedback]');
   const applyPatch = event.target.closest('[data-patch-apply]');
   if (!syncButton && !validateButton && !forgetButton && !restartButton && !undoFeedback && !applyPatch) return;
+  const purgeGoogle = forgetButton?.hasAttribute('data-google-purge');
+  if (purgeGoogle && !window.confirm(copy('断开并清除会删除这个来源在本机的收件、任务、快照和衍生内容。此操作不能撤销。'))) return;
   if (forgetButton ? forgetBusy : setupBusy) return;
   if (forgetButton) forgetBusy = true;
   else setupBusy = true;
@@ -1430,11 +1791,11 @@ document.addEventListener('click', async event => {
       await refreshSetup({ quiet: true });
       toast(result.status || copy('Google token 验证完成。'));
     } else if (forgetButton) {
-      const result = await post('/api/setup/google/forget');
+      const result = await post('/api/setup/google/forget', purgeGoogle ? { purgeLocal: true } : {});
       const runtimeResponse = await fetch('/api/runtime');
       if (runtimeResponse.ok) renderRuntime(await runtimeResponse.json());
       await refreshSetup({ quiet: true });
-      toast(copy('Google 已断开，读取和执行均已停止。可以随时重新连接。'));
+      toast(copy(purgeGoogle ? 'Google 已断开，这个来源的本机副本已清除。' : 'Google 已断开，读取和执行均已停止。可以随时重新连接。'));
     } else if (restartButton) {
       await post('/api/setup/restart');
       toast(copy('Unprompted 正在重启，授权完成后会自动重新连接。'));
@@ -1568,37 +1929,15 @@ document.addEventListener('click', async event => {
   finally { busy = false; button.disabled = false; }
 });
 
-byId('missForm').addEventListener('submit', async event => {
-  event.preventDefault();
-  if (busy) return;
-  const form = event.currentTarget;
-  const note = new FormData(form).get('note');
-  const sourceHint = new FormData(form).get('sourceHint');
-  busy = true;
-  try {
-    const response = await fetch('/api/misses', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ note, sourceHint })
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'Could not record the miss');
-    form.reset();
-    toast(copy('反馈已记录，不会直接创建任务。'));
-    render(result.state);
-  } catch (error) { toast(error.message, true); }
-  finally { busy = false; }
-});
-
-byId('restartDemo').addEventListener('click', async () => {
+async function restartDemo() {
   if (busy) return;
   busy = true;
   try { render(await post('/api/demo/restart')); toast(copy('演示已重新开始，新的变化会自动出现。')); }
   catch (error) { toast(error.message, true); }
   finally { busy = false; }
-});
+}
 byId('demoJourney').addEventListener('click', event => {
-  if (event.target.closest('[data-demo-replay]')) byId('restartDemo').click();
+  if (event.target.closest('[data-demo-replay]')) void restartDemo();
 });
 
 // Navigation, task details and optional scoped autonomy stay within this workspace.
@@ -1660,12 +1999,20 @@ byId('taskDialog').addEventListener('close', () => {
   openTaskId = null;
   const trigger = taskDialogTrigger;
   taskDialogTrigger = null;
-  const fallback = [...document.querySelectorAll('[data-open-task]')].find(button => button.dataset.openTask === trigger?.id && button.checkVisibility());
+  renderDashboard();
+  // A re-render may replace the opener; return focus to the same kind of control.
+  const kinds = ['openTask', 'taskRecord', 'selectTask'];
+  const triggerKind = kinds.find(kind => trigger?.element?.dataset?.[kind]);
+  const candidates = [...document.querySelectorAll('[data-open-task], [data-task-record], [data-select-task]')].filter(button => kinds.some(kind => button.dataset[kind] === trigger?.id) && button.checkVisibility());
+  const fallback = candidates.find(button => triggerKind && button.dataset[triggerKind] === trigger?.id) || candidates[0];
   const target = trigger?.element?.isConnected && trigger.element.checkVisibility() ? trigger.element : fallback;
   (target || byId('mainContent')).focus({ preventScroll: true });
 });
 byId('openShortcuts').addEventListener('click', () => byId('shortcutDialog').showModal());
-window.addEventListener('hashchange', () => setView(location.hash.slice(1), false));
+window.addEventListener('hashchange', () => {
+  const next = location.hash.slice(1);
+  if (next !== currentView) setView(next, false);
+});
 document.addEventListener('keydown', event => {
   if (event.target.closest('input, textarea, select, [contenteditable="true"]') || event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]')) return;
   const tab = event.target.closest('[role="tab"]');
@@ -1689,6 +2036,20 @@ interactions = createInteractions({
   context: () => ({ state: current, workspace: localWorkspace, visitBaseline }),
   renderTask: renderTaskCard, renderNotice: renderQuietDecision, update: updateContent,
   refresh: renderDashboard, escape: escapeHtml, title: taskTitle, sourceLabel, time
+});
+mcpUI = createMcpPanel({ update: updateContent, post: postJSON,
+  context: () => ({ mcp: setupState?.mcp, demo: runtime?.demo?.disposable || runtime?.demo?.ruleBased }),
+  refresh: () => refreshSetup({ quiet: true }), notify: toast });
+durableUI = createDurablePanel({ context: () => ({ state: current }), update: updateContent, post: postJSON, applyState: render,
+  refresh: refreshState, notify: toast, openTask });
+artifactUI = createArtifactPanel({ context: () => ({ setup: setupState }), post: postJSON, refresh: () => refreshSetup({ quiet: true }),
+  applyState: render, notify: toast, language: getLocale, authorizeGoogle: form => beginGoogleAuthorization(form), authorizeSource: startSourceAuthorization });
+workspaceUI = createWorkspace({
+  context: () => ({ state: current, workspace: localWorkspace, setup: setupState, connections: workspaceConnections(setupState), filter: selectedFilter }),
+  update: updateContent, post: postJSON, applyState: render, notify: toast,
+  renderAction: renderTaskAction, renderManagement: renderTaskManagement,
+  renderDetails: task => githubWorkKinds.includes(task.kind) ? renderIssueCard(task, { detailed: true }) : task.kind === 'observed_task' ? renderObservedCard(task, { detailed: true }) : renderWork(task),
+  go: setView, refresh: renderDashboard
 });
 applyLanguage();
 byId('languageSelect').value = getLocale();
@@ -1760,7 +2121,7 @@ function applyLocale() {
   applyLanguage();
   byId('languageSelect').value = getLocale();
   byId('todayDate').textContent = formatDate();
-  byId('connectionText').textContent = copy(connected ? '实时连接' : '重新连接中');
+  byId('connectionText').textContent = copy(connected ? (runtime?.demo?.enabled ? '本地模拟' : '实时连接') : '重新连接中');
   setView(currentView, false);
   if (runtime) renderRuntime(runtime);
   if (setupState) updateContent('setupContent', renderSetupPanel());
@@ -1812,7 +2173,7 @@ function connectStateStream(force = false) {
   stream.onopen = () => {
     connected = true;
     byId('connectionDot').className = 'connection-dot connected';
-    byId('connectionText').textContent = copy('实时连接');
+    byId('connectionText').textContent = copy(runtime?.demo?.enabled ? '本地模拟' : '实时连接');
     renderDashboard();
     // Recover a failed initial runtime fetch without requiring a page reload.
     if (!runtime?.demo) fetch('/api/runtime').then(response => {
@@ -1825,7 +2186,7 @@ function connectStateStream(force = false) {
       const state = JSON.parse(message.data);
       connected = true;
       byId('connectionDot').className = 'connection-dot connected';
-      byId('connectionText').textContent = copy('实时连接');
+      byId('connectionText').textContent = copy(runtime?.demo?.enabled ? '本地模拟' : '实时连接');
       render(state, { allowWorkspaceChange: true });
     } catch (error) { console.error('Invalid state event', error); toast(copy('收到的状态无法读取，正在等待下一次更新。'), true); }
   };

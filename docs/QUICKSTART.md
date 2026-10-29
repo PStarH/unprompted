@@ -13,8 +13,8 @@
   macOS.
 - Cloud OAuth needs a registered provider app. Distributions can supply it; a
   self-hosted setup may require one-time registration. Local folders need no
-  connector registration. No `npm install` or build is required for the
-  standard harness.
+  connector registration. Run `npm ci --include=optional` once for the pinned
+  SQLite runtime and optional harness integrations. No frontend build is required.
 
 Check Node with `node --version`.
 
@@ -23,6 +23,7 @@ Check Node with `node --version`.
 ```sh
 git clone https://github.com/PStarH/unprompted.git
 cd unprompted
+npm ci --include=optional
 npm start
 ```
 

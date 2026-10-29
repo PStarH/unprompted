@@ -46,6 +46,7 @@ function userActivityDates(history, now) {
   const kinds = new Set([
     'approval', 'rejection', 'retry', 'reconciliation', 'cancellation', 'feedback',
     'feedback_correction', 'feedback_undo', 'dependency_decision', 'wait_requested',
+    'task_direction', 'task_direction_undo', 'task_paused', 'task_resumed', 'memory_edit', 'memory_delete', 'memory_restore',
     'opportunity_accepted', 'patch_authorized'
   ]);
   const current = Date.parse(now);
@@ -87,8 +88,8 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
   const closed = tasks.filter(isUserClosed);
 
   const historyCount = kind => history.filter(item => item.kind === kind).length;
-  const taskCorrections = Object.values(state.taskFeedbackRules || {}).filter(entry => entry.source === 'user').length;
-  const correctionUndos = Object.values(state.taskFeedbackRules || {}).filter(entry => entry.source === 'user' && entry.active === false).length;
+  const taskCorrections = Object.values(state.taskFeedbackRules || {}).filter(entry => entry.source === 'user').length + Object.keys(state.taskDirections || {}).length;
+  const correctionUndos = Object.values(state.taskFeedbackRules || {}).filter(entry => entry.source === 'user' && entry.active === false).length + Object.values(state.taskDirections || {}).filter(entry => entry.active === false).length;
   const takeovers = {
     rejectedDrafts: historyCount('rejection'),
     retries: historyCount('retry'),

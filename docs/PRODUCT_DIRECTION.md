@@ -12,10 +12,11 @@ prepares the next step. A fresh prompt is not required for every task.
 - Source-backed preparation, explicit authority and verified external outcomes.
 - Honest empty results and failures, with a practical way to recover.
 
-Email, documents, local text folders, Apple Notes and assigned GitHub issues are
-current starting points. They do not limit the product to one provider or to a
-single office workflow. A new connector should explain the real situation it
-helps, the signal it observes, and what would justify a useful next step.
+Email, documents, local text folders, Apple Notes, assigned GitHub issues,
+pull request reviews, repository commits and Actions runs are current sources.
+They do not limit the product to one provider or to a single office workflow.
+A new connector should explain the real situation it helps, the signal it
+observes, and what would justify a useful next step.
 
 ## Product boundaries
 

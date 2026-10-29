@@ -40,28 +40,28 @@ try {
       await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'ready', null, { timeout: 25_000 });
       await page.screenshot({ path: `${output}/ready-${label}.png`, fullPage: true, animations: 'disabled' });
       await page.locator('#demoJourney [data-go="attention"]').click();
-      assert.equal(await page.locator('#viewAttention').isVisible(), true);
-      await page.locator('#decisionDeckCurrent [data-action="approve"]').click();
+      assert.equal(await page.locator('#viewHome').isVisible(), true);
+      await page.locator('#taskContent [data-select-task]').first().click();
+      await page.locator('.ws-detail-drawer [data-action="approve"]').click();
       await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'verified');
       const complete = await (await page.request.get(fixture.base + '/api/state')).json();
       assert.equal(complete.tasks[0].status, 'completed');
       assert.equal(complete.tasks[0].action.status, 'verified_simulated');
       assert.equal(complete.outbox.length, 1);
       assert.deepEqual(posts, [`/api/tasks/${encodeURIComponent(complete.tasks[0].id)}/approve`]);
-      await page.locator('[data-view="home"]').click();
+      const closeInspector = page.locator('.ws-detail-drawer [data-close-inspector]');
+      if (await closeInspector.count()) await closeInspector.click();
+      assert.equal(await page.locator('.ws-detail-drawer').count(), 0);
       await page.locator('#demoJourney [data-open-task]').click();
-      assert.match(await page.locator('#taskDialogContent > .task-action .receipt').innerText(), /sim-1/);
+      assert.match(await page.locator('#taskDialogContent .task-action .receipt').innerText(), /sim-1/);
       await page.keyboard.press('Escape');
       await page.locator('#demoJourney [data-go="sources"]').click();
-      if (desktop) {
-        await page.locator('#setupContent input[type="file"]').waitFor();
-        const setup = await (await page.request.get(fixture.base + '/api/setup')).json();
-        assert.equal(setup.google.allowExternalWrites, false);
-        assert.equal(setup.google.hasRefreshToken, false);
-      } else {
-        assert.match(await page.locator('#setupContent').innerText(), /npm start/);
-        assert.equal(await page.locator('#setupContent input[type="file"]').count(), 0, 'A disposable demo must not invite account setup that will be discarded.');
-      }
+      assert.match(await page.locator('#connectorContent').innerText(), /npm start/);
+      assert.equal(await page.locator('#connectorContent .demo-source-list li').count(), 3);
+      if (!desktop) assert.equal(await page.locator('#setupContent input[type="file"]').count(), 0, 'A disposable demonstration must not invite account setup that will be discarded.');
+      const setup = await (await page.request.get(fixture.base + '/api/setup')).json();
+      assert.equal(setup.google.allowExternalWrites, false);
+      assert.equal(setup.google.hasRefreshToken, false);
       await page.locator('[data-view="home"]').click();
       for (const width of [390, 768, 1280, 1440]) {
         await page.setViewportSize({ width, height: 900 });
@@ -73,7 +73,8 @@ try {
       assert.equal((await (await page.request.get(fixture.base + '/api/state')).json()).outbox.length, 1, 'Reload must not replay or resend.');
       await page.locator('#demoJourney [data-demo-replay]').click();
       await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'ready', null, { timeout: 25_000 });
-      await page.locator('#taskContent [data-action="reject"]').click();
+      await page.locator('#taskContent [data-select-task]').first().click();
+      await page.locator('.ws-detail-drawer [data-action="reject"]').click();
       await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'stopped');
       assert.equal((await (await page.request.get(fixture.base + '/api/state')).json()).outbox.length, 0);
       assert.deepEqual(errors, []); assert.deepEqual(remote, []);

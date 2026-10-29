@@ -1,4 +1,4 @@
-/* Executed only by macOS osascript. No shell, writes, unlocked-note access or database access. */
+/* Executed only by macOS osascript for selected folders and note creation. */
 ObjC.import('Foundation');
 
 function inputJSON() {
@@ -44,6 +44,17 @@ function run(argv) {
       var selected = current.chooseFromList(labels, { withTitle: 'Unprompted', withPrompt: args.locale === 'zh-CN' ? '选择只读观察的备忘录文件夹（可多选）' : 'Choose Notes folders to observe read-only', multipleSelectionsAllowed: true, emptySelectionAllowed: false });
       if (!selected) return JSON.stringify({ ok: false, code: 'CANCELLED' });
       return JSON.stringify({ ok: true, folders: selected.map(function (label) { return choices[labels.indexOf(String(label))]; }) });
+    }
+    if (operation === 'create-note') {
+      if (!args.folder || typeof args.title !== 'string' || !args.title.trim() || args.title.length > 500 || /[\r\n]/.test(args.title)
+        || typeof args.body !== 'string' || !args.body.trim() || args.body.length > 64000 || !/^unprompted-artifact:[a-f0-9]{64}$/.test(args.marker)) throw new Error('INVALID_CONTENT');
+      var writeAccount = notes.accounts.byId(args.folder.accountId), writeFolders = foldersIn(writeAccount), writeFolder = null;
+      for (var wi = 0; wi < writeFolders.length; wi++) if (String(writeFolders[wi].id()) === args.folder.folderId) { writeFolder = writeFolders[wi]; break; }
+      if (!writeFolder) throw new Error('FOLDER_UNAVAILABLE');
+      function htmlText(value) { return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/\r\n?|\n/g, '<br>'); }
+      var createdNote = notes.Note({ body: '<div>' + htmlText(args.title) + '</div><div>' + htmlText(args.body) + '</div><div>' + args.marker + '</div>' });
+      writeFolder.notes.push(createdNote);
+      return JSON.stringify({ ok: true, id: String(createdNote.id()) });
     }
     if (operation !== 'read-notes') return JSON.stringify({ ok: false, code: 'UNKNOWN_OPERATION' });
     var records = [], errors = [], complete = true, count = 0, used = 0, seenNotes = {};

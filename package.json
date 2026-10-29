@@ -1,6 +1,6 @@
 {
   "name": "unprompted-prototype",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "A proactive work partner: it notices work that was never assigned, gathers evidence, prepares an action, asks before acting, and verifies the result.",
   "license": "Apache-2.0",
@@ -16,7 +16,13 @@
     "test:first-run": "node test/browser/first-run.mjs",
     "test:model-onboarding": "node test/browser/model-onboarding.mjs",
     "test:google-onboarding": "node test/browser/google-onboarding.mjs",
+    "test:google-search": "node test/browser/google-search.mjs",
     "test:connections": "node test/browser/connected-sources.mjs",
+    "test:connectors": "node --test test/connector-harness.test.js test/artifact-actions.test.js test/connectors.test.js test/connectors-multi.test.js test/connectors-slack-notion.test.js test/native-sources.test.js test/device-oauth.test.js test/code-oauth.test.js test/connector-http.test.js test/connections-api.test.js test/connector-search-api.test.js test/google-durable-workflow.test.js test/gmail-verification-safety.test.js test/sync.test.js test/monitoring.test.js",
+    "test:mcp": "node test/browser/mcp-connections.mjs",
+    "test:workspace": "node test/browser/workspace-modes.mjs",
+    "test:appearance": "node --test test/appearance-model.test.js && node test/browser/appearance.mjs",
+    "test:overview": "node --test test/demo-memories.test.js && node test/browser/quiet-overview.mjs",
     "eval": "node eval/run.js",
     "eval:value": "node eval/value.js",
     "study:value": "node scripts/value-study.mjs",
@@ -28,13 +34,21 @@
     "smoke:macos-app": "node scripts/smoke-macos-app.mjs",
     "eval:resilience": "node eval/resilience.js",
     "eval:lifecycle": "node eval/lifecycle.js",
-    "eval:pi": "node eval/pi.js"
+    "eval:pi": "node eval/pi.js",
+    "test:durable": "node --test test/durable-execution.test.js test/durable-context.test.js test/durable-learning.test.js test/durable-privacy.test.js test/durable-runtime.test.js test/durable-api.test.js test/durable-pairs.test.js test/durable-situations.test.js test/durable-state-delta.test.js test/durable-probe.test.js test/activation-v15-replay.test.js test/activation-v15-review.test.js test/principal-role.test.js",
+    "test:durable-ui": "node test/browser/durable-workspace.mjs",
+    "test:integration": "node --test test/full-chain-recovery.test.js",
+    "test:safety": "node --test test/reliability-safety.test.js test/gmail-verification-safety.test.js test/durable-execution.test.js test/mcp.test.js test/pi-runtime.test.js test/task-services.test.js"
   },
   "engines": {
     "node": ">=20"
   },
   "optionalDependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0"
+    "@earendil-works/pi-ai": "1.4.0",
+    "@modelcontextprotocol/client": "2.4.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
   }
 }

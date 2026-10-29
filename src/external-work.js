@@ -1,3 +1,66 @@
+export const GITHUB_WORK_KINDS = Object.freeze(['external_issue', 'external_review', 'external_change', 'external_check']);
+export const isSourceFollowTask = task => task?.kind === 'observed_task' || GITHUB_WORK_KINDS.includes(task?.kind);
+
+const GITHUB_WORK = {
+  'pull_request.updated': { kind: 'external_review', prefix: 'review', deliverable: 'pull_request',
+    summary: work => `GitHub pull request · ${work.repository} #${work.number} · ${work.title}`,
+    open: 'Following a pull request that asks the connected account to review it or to address review comments.',
+    closed: 'The pull request is closed, merged, or no longer asks this account to act. No agent action was executed.',
+    found: work => `Discovered a GitHub pull request: ${work.repository} #${work.number}.`,
+    changed: work => `Updated a GitHub pull request: ${work.repository} #${work.number}.`,
+    withdrew: 'The GitHub source withdrew this pull request. No completion or external action was claimed.' },
+  'content.changed': { kind: 'external_change', prefix: 'change', deliverable: 'repository_change',
+    summary: work => `GitHub commit · ${work.repository} · ${work.marker} · ${work.title}`,
+    open: 'Following a commit that changed repository content.',
+    closed: 'This repository change is no longer available. No agent action was executed.',
+    found: work => `Discovered a repository change: ${work.repository} ${work.marker}.`,
+    changed: work => `Updated a repository change: ${work.repository} ${work.marker}.`,
+    withdrew: 'The GitHub source withdrew this repository change. No completion or external action was claimed.' },
+  'workflow.updated': { kind: 'external_check', prefix: 'check', deliverable: 'workflow_run',
+    summary: work => `GitHub Actions · ${work.repository} · ${work.marker} · ${work.title}`,
+    open: 'Following a GitHub Actions run that changed and needs attention.',
+    closed: 'This Actions run is no longer available. No agent action was executed.',
+    found: work => `Discovered a GitHub Actions run: ${work.repository} ${work.marker}.`,
+    changed: work => `Updated a GitHub Actions run: ${work.repository} ${work.marker}.`,
+    withdrew: 'The GitHub source withdrew this Actions run. No completion or external action was claimed.' }
+};
+
+/** Track provider facts as native work; external closure is never agent success. */
+export function ingestGitHubWork(store, event) {
+  const spec = GITHUB_WORK[event.type];
+  const work = event.payload, id = `${spec.prefix}:${work.id}`;
+  let created = false;
+  store.mutate(state => {
+    state.events.push(event);
+    const existing = state.tasks[id];
+    event.summary = spec.summary(work);
+    const active = work.active === true && work.state === 'open';
+    event.relations = existing || active ? [id] : [];
+    if (existing && existing.externalSource.state !== 'unavailable' && work.state !== 'unavailable'
+      && Date.parse(existing.externalSource.updatedAt) > Date.parse(work.updatedAt)) { event.disposition = 'stale_change'; return; }
+    if (!existing && !active) { event.disposition = 'observed'; return; }
+    created = !existing;
+    const closed = !active;
+    const dismissed = existing?.userDismissed === true;
+    const at = new Date().toISOString();
+    const request = { id, intent: 'follow_up', subjectEntity: work.repository, deliverable: spec.deliverable,
+      requiredContent: [], deadline: null, interpretedBy: 'provider_assignment',
+      source: { kind: spec.deliverable, id: work.id, url: work.url, connectorId: 'github', from: work.author, to: work.accountId } };
+    state.tasks[id] = { ...(existing || {}), id, kind: spec.kind, sourceConnectorId: 'github',
+      subject: work.title, sender: work.author || 'GitHub', request,
+      status: closed || dismissed ? 'cancelled' : 'waiting_for_information',
+      externalSource: { ...work }, owner: { id: work.accountId || 'user', label: work.accountId || 'You', source: 'provider_assignment' },
+      createdAt: existing?.createdAt || at, updatedAt: at, documentId: null, draft: null, action: null,
+      evidence: { criteria: [], claims: [], unknowns: [], source: { kind: spec.deliverable, id: work.id, url: work.url, timestamp: work.updatedAt } },
+      assessment: null, actionVersion: 0, reasoningWork: null,
+      reason: closed ? spec.closed : dismissed ? existing.reason : spec.open };
+    event.disposition = created ? 'discovered_request' : closed ? 'request_withdrawn' : 'related_change';
+    state.history.push({ id: `h-${state.history.length + 1}`, at, kind: created ? 'discovery' : 'source_update',
+      text: closed ? spec.withdrew : created ? spec.found(work) : spec.changed(work), taskId: id, eventId: event.id });
+  });
+  return { taskId: id, discovered: created };
+}
+
 /** Track provider facts as native work; external closure is never agent success. */
 export function ingestAssignedIssue(store, event) {
   const issue = event.payload, id = `issue:${issue.id}`;

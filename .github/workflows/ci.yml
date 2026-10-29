@@ -36,7 +36,9 @@ jobs:
 
       # Pi and its model layer are optional, pinned runtime dependencies.
       - name: Install from lockfile
-        run: npm ci --include=optional --ignore-scripts --no-audit --no-fund
+        run: |
+          npm ci --include=optional --ignore-scripts --no-audit --no-fund
+          npm rebuild better-sqlite3
 
       - name: Syntax check
         run: npm run check:syntax
@@ -83,7 +85,12 @@ jobs:
         with:
           node-version: 22
 
-      # Keep browser tooling separate. The app itself is tested without npm ci.
+      - name: Install application dependencies
+        run: |
+          npm ci --include=optional --ignore-scripts --no-audit --no-fund
+          npm rebuild better-sqlite3
+
+      # Keep browser tooling separate from the application lockfile.
       - name: Install browser test tooling
         run: |
           npm install --prefix "$RUNNER_TEMP/unprompted-browser" --no-package-lock --ignore-scripts --no-audit --no-fund playwright@1.58.2
@@ -106,6 +113,11 @@ jobs:
           UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
         run: npm run test:browser
 
+      - name: Run shared workspace views and task steering
+        env:
+          UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
+        run: npm run test:workspace
+
       - name: Run real-workspace onboarding contract
         env:
           UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
@@ -115,6 +127,16 @@ jobs:
         env:
           UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
         run: npm run test:connections
+
+      - name: Run durable workspace interaction contract
+        env:
+          UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
+        run: npm run test:durable-ui
+
+      - name: Run external MCP connection contract
+        env:
+          UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
+        run: npm run test:mcp
 
   tooling:
     name: Contributor tooling · ${{ matrix.os }}

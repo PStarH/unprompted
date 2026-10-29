@@ -84,6 +84,7 @@ try {
     }
   }
   await page.selectOption('#languageSelect', 'en');
+  await page.locator('[data-view="preferences"]').click();
   await page.locator('#modelOnboarding > details > summary').click();
   await page.locator('[data-model-forget]').click();
   await page.waitForFunction(() => document.querySelector('#modelOnboarding')?.textContent.includes('Connect your model to start the agent'));

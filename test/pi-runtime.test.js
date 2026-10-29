@@ -8,9 +8,14 @@ import { once } from 'node:events';
 import { PiReasoner, ReasoningBudget, createReasoner } from '../src/reasoning.js';
 import { piSupported, PI_LIMITS } from '../src/pi-runtime.js';
 import { interpretRequest } from '../src/requests.js';
+import { SqliteStore } from '../src/durable/store.js';
+import { DurableDatabase } from '../src/durable/database.js';
+import { DurableRuntime } from '../src/durable/runtime.js';
 import { JsonStore } from '../src/store.js';
 import { WorkEngine } from '../src/engine.js';
 import { SCENARIOS } from '../eval/scenarios.js';
+import { McpManager, McpConfigStore } from '../src/mcp.js';
+import { fileURLToPath } from 'node:url';
 
 const piTest = piSupported() ? test : test.skip;
 const fixture = SCENARIOS.find(item => item.id === 'model-proposes-valid-probe');
@@ -38,6 +43,25 @@ async function scripted(respond) {
 const reasonerFor = async (respond, options = {}) => new PiReasoner({
   baseUrl: 'https://scripted.invalid/v1', model: 'scripted', ...options,
   runtimeOptions: { streamFn: await scripted(respond) }
+});
+
+piTest('Pi calls a real MCP stdio tool and feeds its result back into the model', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-pi-mcp-'));
+  const manager = new McpManager({ configStore: new McpConfigStore(directory) });
+  t.after(async () => { await manager.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  await manager.import({ mcpServers: { local: { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/mcp-server.mjs', import.meta.url)), '--stdio'] } } }, { allowDeclaredRead: true });
+  const records = [], externalTools = manager.tools({ isCurrent: () => true, onCall: result => records.push(result) });
+  const lookup = externalTools.find(tool => tool.label.endsWith('lookup'));
+  const reasoner = await reasonerFor(context => {
+    const result = context.messages.find(message => message.role === 'toolResult');
+    if (!result) return [call(lookup.name, { query: 'Draco' })];
+    assert.match(JSON.stringify(result.content), /Found context: Draco/);
+    return { probes: [] };
+  });
+  assert.deepEqual(await reasoner.proposeProbes({ ...input, externalTools }, 'pi-mcp'), []);
+  assert.equal(records.length, 1);
+  assert.equal(reasoner.runSummary('pi-mcp').tools[0].name, lookup.name);
+  assert.equal(reasoner.calls, 2);
 });
 
 test('Pi selection is explicit and the classic no-install path remains the default', () => {
@@ -228,4 +252,23 @@ piTest('Pi uses the configured chat-completions endpoint through its actual stre
     assert.ok(requests.every(request => request.url === '/v1/chat/completions' && request.auth === 'Bearer local-test-key'));
     assert.match(requests[1].payload.messages.find(message => message.role === 'tool').content, /vendor/i);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
+piTest('native Pi document reads share the durable task guard and execution ledger', async t => {
+  const reasoner = await reasonerFor(context => {
+    const results = context.messages.filter(message => message.role === 'toolResult');
+    if (!results.length) return [call('search_documents', { query: 'Draco' })];
+    if (results.length === 1) return [call('read_document', { id: doc.id }, 'owned-read')];
+    return { probes: fixture.reasoner.probes };
+  });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-pi-owned-'));
+  const store = new SqliteStore(path.join(directory, 'state.json'), { database: new DurableDatabase(':memory:') });
+  const engine = new WorkEngine(store, { reasoner }), runtime = new DurableRuntime(engine, { tickMs: 100000 });
+  t.after(async () => { await runtime.close(); await engine.whenSettled(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  for (const event of fixture.events) engine.ingest(structuredClone(event));
+  await engine.whenSettled();
+  const reads = runtime.ledger.list().filter(row => row.provider === 'document_store');
+  assert.deepEqual(reads.map(row => row.tool).sort(), ['read_document', 'search_documents']);
+  assert.ok(reads.every(row => row.status === 'verified' && row.is_write === 0));
+  assert.equal(store.state.outbox.length, 0);
 });

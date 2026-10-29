@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { startFixtureServer } from '../browser/fixture-server.mjs';
 
 export async function startConnectedFixture() {
-  const controls = { githubAuthorized: false, microsoftAuthorized: false, githubClosed: false, microsoftAccount: 'ms-a' };
+  const controls = { githubAuthorized: false, microsoftAuthorized: false, githubClosed: false, microsoftAccount: 'ms-a', microsoftDrafts: false };
   const calls = [], at = '2026-10-26T09:00:00.000Z';
   const service = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://fixture.local');
@@ -16,16 +16,21 @@ export async function startConnectedFixture() {
       res.writeHead(200, { 'content-type': 'text/html' }); res.end('<p>Scripted authorization complete. Return to the app.</p>'); return;
     }
     if (url.pathname === '/google/github.com/login/device/code') return json({ device_code: 'PRIVATE_GITHUB_DEVICE', user_code: 'CODE-1234', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5 });
-    if (url.pathname === '/google/login.microsoftonline.com/common/oauth2/v2.0/devicecode') return json({ device_code: 'PRIVATE_MS_DEVICE', user_code: 'CODE1234', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 5 });
+    if (url.pathname === '/google/login.microsoftonline.com/common/oauth2/v2.0/devicecode') {
+      controls.microsoftDrafts = String(new URLSearchParams(raw).get('scope')).split(/\s+/).includes('Mail.ReadWrite');
+      return json({ device_code: 'PRIVATE_MS_DEVICE', user_code: 'CODE1234', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 5 });
+    }
     if (url.pathname === '/google/github.com/login/oauth/access_token') return json(controls.githubAuthorized
       ? { access_token: 'PRIVATE_GITHUB_ACCESS' } : { error: 'authorization_pending' });
     if (url.pathname === '/google/login.microsoftonline.com/common/oauth2/v2.0/token') return json(controls.microsoftAuthorized
-      ? { access_token: `PRIVATE_MS_ACCESS_${controls.microsoftAccount}`, refresh_token: 'PRIVATE_MS_REFRESH', expires_in: 3600, scope: 'User.Read Mail.Read offline_access' } : { error: 'authorization_pending' }, controls.microsoftAuthorized ? 200 : 400);
+      ? { access_token: `PRIVATE_MS_ACCESS_${controls.microsoftAccount}`, refresh_token: 'PRIVATE_MS_REFRESH', expires_in: 3600, scope: `User.Read Mail.Read offline_access${controls.microsoftDrafts ? ' Mail.ReadWrite' : ''}` } : { error: 'authorization_pending' }, controls.microsoftAuthorized ? 200 : 400);
     if (url.pathname === '/google/api.github.com/user') return json({ id: 123, login: 'reader' });
     const issue = { id: 15, number: 7, title: 'Investigate webhook retry behavior', body: 'This issue is assigned to reader. Inspect the retry policy.',
       user: { login: 'teammate' }, assignees: [{ id: 123, login: 'reader' }], state: controls.githubClosed ? 'closed' : 'open',
       updated_at: controls.githubClosed ? '2026-10-26T10:00:00.000Z' : at, repository: { full_name: 'team/project' } };
     if (url.pathname === '/google/api.github.com/issues' || url.pathname === '/google/api.github.com/repos/team/project/issues/7') return json(url.pathname.endsWith('/7') ? issue : [issue]);
+    if (url.pathname === '/google/api.github.com/search/issues') return json({ items: [] });
+    if (url.pathname === '/google/api.github.com/user/repos') return json([]);
     const account = req.headers.authorization?.endsWith('ms-b') ? 'ms-b' : 'ms-a';
     if (url.pathname === '/google/graph.microsoft.com/v1.0/me') return json({ id: account, mail: `${account}@example.test`, displayName: account });
     if (url.pathname === '/google/graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta') return json({

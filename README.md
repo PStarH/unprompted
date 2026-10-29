@@ -8,9 +8,9 @@ Unprompted follows changes in the work and personal environments you authorize,
 connects them to existing work, checks the evidence, and prepares the next useful action. You
 join in when a decision needs you. Work starts without another prompt.
 
-The current priority is learning whether users value an unrequested discovery
-enough to keep Unprompted in their workflow. Email/document flows are engineering
-samples for a general personal partner. [Product direction and current priority](docs/PRODUCT_DIRECTION.md)
+This is a local first version for one person, on one machine, in one process.
+Email and documents are the first sources; the product stays a general work partner.
+[Product direction](docs/PRODUCT_DIRECTION.md)
 
 [简体中文](README.zh-CN.md) · [Quick start](#start-your-agent) · [Docs](docs/README.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/PStarH/unprompted/issues/new/choose)
 
@@ -21,12 +21,13 @@ samples for a general personal partner. [Product direction and current priority]
 ## Start your agent
 
 You need **Node.js 20+** and your model provider's API endpoint, model ID and
-API key. Local compatible models can work without a key. No dependency install
-or build step is needed for the standard harness.
+API key. Local compatible models can work without a key. Install the locked
+dependencies once; no frontend build step is needed.
 
 ```sh
 git clone https://github.com/PStarH/unprompted.git
 cd unprompted
+npm ci --include=optional
 npm start
 ```
 
@@ -39,10 +40,17 @@ the connection; no restart is required. Keys are not returned by the API.
 Next, choose a source on the same page. **Local folders** work without a cloud
 account: select a folder containing Markdown or text. **Apple Notes** is
 macOS-only and asks for Automation permission; real-account acceptance is still
-pending. Google, GitHub and Outlook use your provider account. GitHub and Outlook
-use device authorization, so you confirm a short code on the provider’s page
-instead of copying tokens. Sources can be paused or disconnected independently.
+pending. Google, GitHub, Outlook, Slack and Notion use your provider account.
+GitHub and Outlook use device authorization, so you confirm a short code on the
+provider’s page. Slack and Notion open that provider’s consent page. Sources can
+be paused or disconnected independently.
 [Source permissions and limits →](docs/CONNECTORS.md)
+
+External MCP tools are available in **Connections → MCP** after
+`npm ci --include=optional` and a restart. Connect a remote URL or paste a
+`mcpServers` config for HTTP, stdio or legacy SSE. Both harnesses can use
+authorized read tools while investigating existing tasks.
+[MCP setup and scope →](docs/CONNECTORS.md#external-mcp-tools)
 
 For Google, a distribution with a registered Desktop OAuth client opens Google
 consent directly. A self-hosted checkout without that client guides you through
@@ -50,7 +58,7 @@ the one-time Google Cloud setup and accepts its downloaded JSON. No refresh-toke
 copying or service restart is required.
 
 Authorization starts the first read immediately. Actual email and document
-content become model context; assigned GitHub issues retain their native source,
+content become model context; GitHub issues, pull requests, commits and Actions runs retain their native source,
 assignee and state. The page reports actual emails read, documents read
 and work discovered. An empty result is shown as an empty result. **Normal
 startup never plays a sample or invents tasks.**
@@ -63,6 +71,22 @@ The interface supports English and Chinese. A busy default port is replaced
 automatically; `npm start -- --port 4180` chooses a specific port.
 [Download a source ZIP](https://github.com/PStarH/unprompted/archive/refs/heads/main.zip)
 if you prefer not to use Git.
+
+## Durable execution and bounded learning
+
+[v0.3 implementation baseline](docs/PRD.md) adds persisted jobs, fresh task
+checkpoints, external-write intents and resource claims. Interrupted writes are
+reconciled before retry. Memory, explicit rules and learned Experiences remain
+separate; learned guidance never grants a tool permission. Automatic promotion
+starts off. Manage memories and rules in **Memory**, and quiet hours in **Settings**.
+**Forget** removes dependent local data and cancels dependent work; the result
+reports unresolved provider operations and retention limits.
+
+The default local retrieval combines FTS5 and in-process lexical vectors; a local
+semantic encoder can be supplied through the framework API. This is not a claim
+of neural semantic retrieval. Existing JSON workspaces migrate on first open,
+with a private backup retained until Forget or explicit removal.
+[Storage and recovery details](docs/ARCHITECTURE.md#storage-and-process-model).
 
 ## What makes it proactive?
 
@@ -84,25 +108,27 @@ An email arrives → a commitment is discovered → evidence changes
 
 ## What works today
 
-Unprompted is an **early, local-first prototype**. The event engine, evidence
-checks, approval boundary, persistence, interface, and simulated end-to-end
-workflow are implemented. The primary experience connects your own model. The explicit rule-based example
-is separate from model-backed operation.
+Unprompted is a **local first version** for one person, one machine, and one process. Connect your model, then one source. Local folders need no cloud account and start reading immediately. Sending and document edits stay off until you opt in. An empty result stays empty. If the model fails, that work stays unready.
+
+There is no signed download. Use Node.js 20 or newer, `npm ci --include=optional`, and `npm start`, then open the local address. Google, GitHub, Outlook, Slack, and Notion need an OAuth client you register, or a build that already includes one. This repository does not ship a public client ID. The macOS app builder produces an unsigned local package, not a notarized release. Read-only use on a live account is for you to confirm; it is not claimed as production-validated here.
 
 | Area | Current scope |
 | --- | --- |
-| Context | Email requests, native assigned issues, document updates and run records |
-| Local sources | Selected Markdown/text folders (explicit to-dos) and a read-only macOS Notes bridge; real Notes account acceptance is pending |
-| GitHub | Device OAuth, assigned-issue discovery, update/reassignment tracking; read-only |
-| Microsoft Outlook | Device OAuth, inbox delta sync and model-backed request discovery; read-only |
-| Google Workspace | Optional Gmail / Drive / Docs connector; read-only setup is documented |
+| Context | Email requests, GitHub issues, pull requests, commits, Actions runs, document updates and run records |
+| Local sources | Selected Markdown/text folders (explicit to-dos) and macOS Notes; note creation requires a separate folder grant, and real-account acceptance is pending |
+| GitHub | Device OAuth; assigned issues, review requests, repository commits and Actions runs; read-only |
+| Microsoft Outlook | Device OAuth, inbox delta sync and model-backed request discovery; draft creation requires separate authorization |
+| Slack | Browser OAuth with PKCE, direct and group direct messages; read-only |
+| Notion | Browser OAuth, pages selected during consent; child-page creation requires a separate parent-page grant |
+| Google Workspace | Optional Gmail / Drive / Docs connector; draft creation, sending and document edits require separate authorization |
+| MCP tools | External HTTP/stdio/SSE services, per-tool read grants, task investigation and call history |
 | Live sending | Implemented, explicitly gated, and covered by scripted tests; not claimed as validated in production |
 | Task management | Trusted commitment revisions/withdrawals, persisted waits, reversible corrections and shared dependencies |
 | Document changes | Source-backed, version-checked patches with separate authorization and readback |
 | Local app | Browser OAuth setup, continuous observation controls and an unsigned macOS app builder |
-| Storage | One user, one local JSON store, one server process |
+| Storage | One user, one process, SQLite WAL + FTS5. Local files, tokens, and model keys are not encrypted |
 
-Calendar, Slack, Notion, general desktop control, unrestricted autonomous rewriting, and a
+Built-in Calendar, general desktop control, unrestricted autonomous rewriting, and a
 hosted multi-user service are not implemented. Real-world usefulness and error
 rates still need user feedback. [Architecture and limitations →](docs/ARCHITECTURE.md)
 
@@ -120,8 +146,11 @@ restarting the service. Each Google account has its own local workspace:
 - [API reference](docs/API.md)
 
 The server binds to `127.0.0.1` and has no authentication. Run it on your own
-machine. Task context is sent to your selected model provider. The explicitly
-invoked rule-only example makes no model calls.
+machine. Email, documents, and task content are sent to the model you choose.
+The local database and keys are not encrypted. Disconnecting stops new reads and
+keeps the saved copy. **Disconnect and clear** deletes that source’s local inbox,
+tasks, snapshots, and derived records. The explicitly invoked rule-only example
+makes no model calls.
 
 ## Build it with us
 

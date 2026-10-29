@@ -151,7 +151,7 @@ export function markRead(notifications, ids = null, at = new Date().toISOString(
 /** Open (unresolved) notifications, newest and most important first. */
 export function openNotifications(notifications) {
   return notifications
-    .filter(item => !item.resolvedAt)
+    .filter(item => !item.resolvedAt && !['pending', 'digest'].includes(item.deliveryState))
     .slice()
     .sort((a, b) => (PRIORITY_RANK[b.priority] - PRIORITY_RANK[a.priority]) || String(b.at).localeCompare(String(a.at)));
 }

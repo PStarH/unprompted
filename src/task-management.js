@@ -89,6 +89,7 @@ export function aggregateTaskDependencies(state, now = new Date().toISOString())
 }
 
 function ownerFor(task, state) {
+  if (task.control?.paused) return { id: 'user', label: 'You', source: 'paused_by_user' };
   const explicit = task.management?.owner || task.followUp?.owner || task.owner;
   if (explicit?.id && explicit?.label) return { id: explicit.id, label: explicit.label, source: explicit.source || 'user_stated' };
   const wait = task.wait || (state.taskWaits || {})[task.id];
@@ -105,6 +106,7 @@ function ownerFor(task, state) {
 }
 
 function nextActionFor(task, dependencies, owner, state) {
+  if (task.control?.paused) return { kind: 'paused', label: 'Resume this task', owner: 'user', reason: 'Paused explicitly by the user.' };
   if (task.status === 'completed' || task.followUp?.status === 'completed') {
     return { kind: 'done', label: 'Review the verified result', owner: owner.id, reason: 'The recorded outcome is complete.' };
   }
@@ -113,6 +115,12 @@ function nextActionFor(task, dependencies, owner, state) {
   }
   if (task.kind === 'external_issue') return { kind: 'review_source', label: 'Review the assigned GitHub issue',
     owner: owner.id, url: task.externalSource?.url, reason: 'The source assigns this open issue to the connected account; no agent completion is claimed.' };
+  if (task.kind === 'external_review') return { kind: 'review_source', label: 'Review the pull request',
+    owner: owner.id, url: task.externalSource?.url, reason: 'The pull request asks the connected account to review it or to address review comments; no agent completion is claimed.' };
+  if (task.kind === 'external_change') return { kind: 'review_source', label: 'Review the repository change',
+    owner: owner.id, url: task.externalSource?.url, reason: 'A commit changed repository content; no agent completion is claimed.' };
+  if (task.kind === 'external_check') return { kind: 'review_source', label: 'Review the GitHub Actions run',
+    owner: owner.id, url: task.externalSource?.url, reason: 'A GitHub Actions run changed and needs attention; no agent completion is claimed.' };
   if (task.kind === 'observed_task') return { kind: 'review_source', label: 'Review the local source to-do',
     owner: owner.id, url: task.externalSource?.url, reason: 'This is an explicit to-do from a selected local source; no external execution or agent completion is claimed.' };
   const wait = task.wait || (state.taskWaits || {})[task.id];
@@ -187,6 +195,7 @@ function priorityFor(task, now, state) {
   }
   const reasons = [];
   let score = 30;
+  if (Number.isFinite(task.activation?.priority) && task.activation.priority > score) { score = task.activation.priority; reasons.push('Explicit user activation policy priority.'); }
   const deadline = task.request?.deadline;
   const deadlineAt = deadline?.iso ? dateMs(`${deadline.iso}T23:59:59.999Z`) : null;
   if (deadlineAt != null && !deadline?.ambiguous) {

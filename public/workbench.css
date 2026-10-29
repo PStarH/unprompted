@@ -1,0 +1,166 @@
+/* Work surface: one quiet status strip, non-empty state groups, and the record
+   of what happened directly below. Loaded after redesign.css. */
+#viewHome .home-heading { min-height: 0; margin: 0; }
+
+/* Status strip: what the agent is doing + counts that filter in place. */
+#viewHome .agent-status { margin: 0 0 12px; }
+#viewHome .ws-workspace-toolbar { align-items: center; gap: 16px; padding: 0 0 14px; margin: 0 0 4px; border-bottom: 1px solid var(--line); }
+#viewHome .ws-workspace-toolbar .task-filter-label { display: none; }
+.home-counts { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-right: auto; }
+.home-count { display: inline-flex; align-items: baseline; gap: 7px; min-height: 36px; padding: 6px 12px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; }
+.home-count strong { color: var(--ink); font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; }
+.home-count[data-count-filter="attention"]:not([data-zero="true"]) strong { color: var(--amber); }
+.home-count[data-zero="true"] strong { color: var(--muted); font-weight: 450; }
+.home-count:hover { background: var(--hover); }
+.home-count[aria-pressed="true"] { border-color: var(--line-strong); background: var(--surface); color: var(--ink); }
+.home-count-clear { margin-left: 4px; font-size: 12px; }
+
+/* Field: only populated groups; columns size to content. */
+#viewHome .ws-field { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 28px; border: 0; }
+#viewHome .ws-field .ws-task-group, html[data-style="compact"] #viewHome .ws-field .ws-task-group { min-height: 0; padding: 18px 0 8px; border: 0; }
+#viewHome .ws-task-group h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--muted); font-size: 12px; font-weight: 550; }
+#viewHome .ws-task-group h3 span { color: var(--muted); font-weight: 450; font-variant-numeric: tabular-nums; }
+#viewHome .ws-task-group[data-group="attention"] h3 { color: var(--amber); }
+
+/* Task row: title, what changed / next, execution path, source and time. */
+#taskContent[data-mode="field"] .ws-task-row { margin: 0 0 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+#taskContent[data-mode="field"] .ws-task-row.selected { border-color: var(--green); box-shadow: inset 3px 0 0 var(--green); }
+#taskContent[data-mode="field"] .ws-task-row[data-state="needs_user"] { border-left: 3px solid var(--amber); }
+#taskContent[data-mode="field"] .ws-task-row[data-state="failed"], #taskContent[data-mode="field"] .ws-task-row[data-state="source_disconnected"] { border-left: 3px solid var(--error); }
+#taskContent[data-mode="field"] .ws-row-main { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 12px; }
+#taskContent[data-mode="field"] .ws-task-select { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 0; border: 0; background: none; color: inherit; text-align: left; }
+#taskContent[data-mode="field"] .ws-row-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+#taskContent[data-mode="field"] .ws-row-copy strong { font-size: 14px; font-weight: 580; line-height: 1.4; overflow-wrap: anywhere; }
+#taskContent[data-mode="field"] .ws-row-copy > span { color: var(--muted); font-size: 12.5px; }
+#taskContent[data-mode="field"] .ws-status-mark { flex: 0 0 7px; width: 7px; height: 7px; margin-top: 7px; border-radius: 50%; background: var(--accent); }
+#taskContent[data-mode="field"] .ws-status-mark[data-state="needs_user"] { background: var(--amber); }
+#taskContent[data-mode="field"] .ws-status-mark[data-state="failed"], #taskContent[data-mode="field"] .ws-status-mark[data-state="source_disconnected"] { background: var(--error); }
+#taskContent[data-mode="field"] .ws-status-mark[data-state="verified"] { background: var(--green); }
+#taskContent[data-mode="field"] .ws-status-mark[data-state="paused_by_user"], #taskContent[data-mode="field"] .ws-status-mark[data-state="closed"] { background: var(--line-strong); }
+
+/* Inline execution path: three steps, readable without color alone. */
+#taskContent[data-mode="field"] .ws-path.compact { display: flex; gap: 0; margin: 0 0 0 17px; padding: 0; list-style: none; }
+#taskContent[data-mode="field"] .ws-path.compact li { display: flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; color: var(--muted); font-size: 11px; white-space: nowrap; }
+#taskContent[data-mode="field"] .ws-path.compact li + li::before { content: ""; flex: 0 0 14px; height: 1px; margin-right: 2px; background: var(--line-strong); }
+#taskContent[data-mode="field"] .ws-path.compact li > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+#taskContent[data-mode="field"] .ws-path.compact .ws-step-mark { display: grid; place-items: center; flex: 0 0 16px; width: 16px; height: 16px; border: 1px solid var(--line-strong); border-radius: 50%; font-size: 9px; }
+#taskContent[data-mode="field"] .ws-path.compact [data-step-state="done"] .ws-step-mark { border-color: var(--green); background: var(--green); color: var(--action-ink); }
+#taskContent[data-mode="field"] .ws-path.compact [data-step-state="current"] { color: var(--ink); font-weight: 550; }
+#taskContent[data-mode="field"] .ws-path.compact [data-step-state="current"] .ws-step-mark { border-color: var(--ink); }
+#taskContent[data-mode="field"] .ws-row-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-left: 17px; color: var(--muted); font-size: 11px; }
+#taskContent[data-mode="field"] .ws-row-meta time { margin-left: auto; font-variant-numeric: tabular-nums; }
+#taskContent[data-mode="field"] .ws-row-state { color: var(--ink); font-weight: 550; }
+#taskContent[data-mode="field"] .ws-row-state[data-state="needs_user"] { color: var(--amber); }
+#taskContent[data-mode="field"] .ws-row-state[data-state="failed"], #taskContent[data-mode="field"] .ws-row-state[data-state="source_disconnected"] { color: var(--error); }
+#taskContent[data-mode="field"] .ws-source-chip { padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; }
+
+/* Record: source changes and the agent's follow-through, below the work it explains. */
+.home-record { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--line); }
+.home-record-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; margin: 0 0 14px; }
+.home-record-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.home-record-head .view-note { margin: 0; color: var(--muted); font-size: 12px; }
+.home-record .activity-toolbar { margin: 0 0 16px; }
+.home-record .activity-layout { gap: 28px; }
+.home-record .activity-stream > header h2 { font-size: 13px; }
+.home-record .metrics-details { margin-top: 20px; }
+
+/* Top bar settings link replaces the separate rail destination. */
+.top-actions .settings-link { display: inline-grid; place-items: center; color: var(--muted); text-decoration: none; }
+.top-actions .settings-link.active, .top-actions .settings-link[aria-current="page"] { color: var(--ink); background: var(--selected); }
+
+@media (max-width: 760px) {
+  #viewHome .ws-workspace-toolbar { flex-direction: column; align-items: stretch; }
+  .home-counts { margin-right: 0; }
+  .home-count { padding: 6px 10px; }
+  #viewHome .ws-field { grid-template-columns: minmax(0, 1fr); }
+  #taskContent[data-mode="field"] .ws-path.compact li > span:last-child { display: none; }
+  #taskContent[data-mode="field"] .ws-path.compact [data-step-state="current"] > span:last-child { display: inline; }
+}
+@media (prefers-reduced-motion: reduce) { #viewHome * { transition: none !important; } }
+
+/* Calm empty states: a line of text, not a dashed hero box. */
+#viewHome #taskContent .empty-state { min-height: 0; align-items: flex-start; gap: 4px; padding: 28px 0; border: 0; background: none; text-align: left; }
+#viewHome #taskContent .empty-state .empty-symbol { display: none; }
+#viewHome #taskContent .empty-state h3 { color: var(--ink); font-size: 14px; letter-spacing: 0; }
+#viewHome #taskContent .empty-state p { font-size: 12.5px; }
+.home-record[data-empty="true"] .activity-toolbar, .home-record[data-empty="true"] .activity-stream[data-stream="history"], .home-record[data-empty="true"] .metrics-details { display: none; }
+.home-record[data-empty="true"] .activity-layout { display: block; }
+.home-record[data-empty="true"] .activity-stream > header { display: none; }
+
+/* Neutralize the older stacked step and right-aligned meta rules for Work rows. */
+#taskContent[data-mode="field"] .ws-row-main { align-items: stretch; }
+#taskContent[data-mode="field"] .ws-path.compact { align-self: flex-start; width: auto; max-width: 100%; }
+#taskContent[data-mode="field"] .ws-path.compact li { flex: 0 1 auto; flex-direction: row; align-items: center; padding: 0 10px 0 0; border: 0; background: none; }
+#taskContent[data-mode="field"] .ws-path.compact li::after { content: none; }
+#taskContent[data-mode="field"] .ws-row-meta { justify-content: flex-start; max-width: none; padding-right: 0; }
+
+/* Drawer: requirement checklist and this task's own timeline. */
+.ws-checklist, .ws-timeline { margin: 18px 0 0; padding: 16px 0 0; border-top: 1px solid var(--line); }
+.ws-checklist h3, .ws-timeline h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 12px; font-weight: 600; }
+.ws-checklist h3 span, .ws-timeline h3 span { color: var(--muted); font-weight: 450; font-variant-numeric: tabular-nums; }
+.ws-checklist ul, .ws-timeline ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ws-checklist li { display: flex; align-items: flex-start; gap: 10px; font-size: 12.5px; }
+.ws-check-mark { display: grid; place-items: center; flex: 0 0 18px; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; border: 1px solid var(--line-strong); color: var(--muted); font-size: 11px; }
+.ws-checklist [data-check="met"] .ws-check-mark { border-color: var(--green); background: var(--green); color: var(--action-ink); }
+.ws-checklist [data-check="missing"] .ws-check-mark { border-color: var(--amber); color: var(--amber); }
+.ws-check-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ws-check-copy strong { font-weight: 550; }
+.ws-check-copy q, .ws-check-copy small { color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.ws-check-copy q { quotes: "“" "”"; }
+.ws-timeline li { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.ws-timeline li time { font-variant-numeric: tabular-nums; }
+.ws-timeline li span { color: var(--ink); overflow-wrap: anywhere; }
+.ws-timeline li[data-kind="assessment"] span { color: var(--muted); }
+
+/* Page headings elsewhere: title only, no restating subtitle. */
+#viewSources .page-heading p, #viewMemory .page-heading p { display: none; }
+
+/* Demo sources: what is observed, how much, and access stated as text. */
+.demo-sources { display: grid; gap: 18px; max-width: 880px; }
+.demo-sources-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.demo-sources-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.demo-sources-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.demo-source-list { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.demo-source-list li { display: flex; align-items: center; gap: 14px; padding: 14px 16px; }
+.demo-source-list li + li { border-top: 1px solid var(--line); }
+.demo-source-list .source-monogram { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 9px; background: var(--canvas); font-size: 14px; }
+.demo-source-copy { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.demo-source-copy strong { font-size: 13.5px; font-weight: 580; }
+.demo-source-copy small { color: var(--muted); font-size: 12px; }
+.demo-source-access { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.demo-source-access span { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 550; }
+.demo-source-access [data-access="on"] { background: var(--selected); color: var(--ink); }
+.demo-source-access [data-access="off"] { border: 1px solid var(--line); color: var(--muted); }
+.demo-sources .demo-next { padding: 16px; border: 1px dashed var(--line-strong); border-radius: var(--radius); }
+.demo-sources .demo-next h3 { margin: 0 0 4px; font-size: 13px; }
+.demo-sources .demo-next p { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; }
+@media (max-width: 560px) { .demo-source-list li { flex-wrap: wrap; } .demo-source-access { justify-content: flex-start; width: 100%; padding-left: 46px; } }
+
+/* Memory space: each scope shows its first memories in place. */
+#viewMemory .memory-cluster { align-items: stretch; text-align: left; }
+.memory-cluster-preview { display: grid; gap: 6px; width: 100%; margin: 4px 0 2px; }
+.memory-cluster-preview > span { display: -webkit-box; overflow: hidden; color: var(--ink); font-size: 12.5px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.memory-cluster-preview > span::before { content: "· "; color: var(--muted); }
+.memory-cluster-preview small { color: var(--muted); font-size: 11.5px; }
+
+/* Record: one interleaved timeline; source vs agent told apart by label, not only color. */
+.home-record .activity-layout { display: block; }
+.home-record .trace-row[data-origin="agent"] .trace-sign { color: var(--green); }
+.home-record .trace-origin { color: var(--ink); font-weight: 550; }
+.home-record .trace-task { min-height: 0; padding: 0; font-size: inherit; }
+.home-record .trace-row { padding: 10px 0; gap: 10px; }
+.home-record .trace-copy strong { font-size: 12.5px; line-height: 1.55; }
+.home-record .trace-copy small { margin-top: 2px; }
+.home-record .trace-day { margin-top: 12px; }
+.home-record .activity-stream > header { padding-bottom: 6px; }
+
+/* Changes view already is a timeline; don't repeat it with the record below. */
+#viewHome:has(#taskContent[data-mode="pulse"]) .home-record { display: none; }
+
+/* Finished demo: one line with its next steps; the all-checked steps add nothing. */
+#demoJourney[data-phase="verified"], #demoJourney[data-phase="stopped"] { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; padding: 12px 18px; }
+#demoJourney[data-phase="verified"] .demo-steps, #demoJourney[data-phase="stopped"] .demo-steps { display: none; }
+#demoJourney[data-phase="verified"] .demo-caption, #demoJourney[data-phase="stopped"] .demo-caption { display: none; }
+#demoJourney[data-phase="verified"] .demo-journey-copy, #demoJourney[data-phase="stopped"] .demo-journey-copy { flex: 1 1 auto; }
+#demoJourney[data-phase="verified"] .demo-journey-bottom, #demoJourney[data-phase="stopped"] .demo-journey-bottom { margin: 0; }
+#demoJourney[data-phase="verified"] .demo-next-links, #demoJourney[data-phase="stopped"] .demo-next-links { display: flex; flex-wrap: wrap; gap: 4px 16px; width: auto; margin: 0; padding: 0; border: 0; }

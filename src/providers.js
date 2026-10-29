@@ -43,11 +43,13 @@ export class SimulatedMailProvider {
   constructor(store) {
     this.store = store;
     this.kind = 'simulated';
+    this.dispatchGuard = true;
     this.live = false;
     this.lookupOverride = null;
   }
 
-  send({ idempotencyKey, to, subject, body, documentUrl }, failureMode = null) {
+  send({ idempotencyKey, to, subject, body, documentUrl }, failureMode = null, { beforeDispatch = null } = {}) {
+    beforeDispatch?.();
     const existing = this.store.state.outbox.find(message => message.idempotencyKey === idempotencyKey);
     if (existing) return existing;
     if (failureMode === 'timeout_before_accept') {
@@ -96,17 +98,18 @@ export class GoogleMailAdapter {
     if (!connector) throw new Error('GoogleMailAdapter requires a connector');
     this.connector = connector;
     this.kind = 'gmail';
+    this.dispatchGuard = true;
     this.live = true;
   }
 
-  get canSend() { return this.connector.sendEnabled === true && this.connector.shadow === false && this.connector.live === true; }
+  get canSend() { return this.connector.sendEnabled === true && this.connector.config?.readGmail !== false && this.connector.shadow === false && this.connector.live === true; }
 
-  async send({ idempotencyKey, to, subject, body, threadId = null }) {
+  async send({ idempotencyKey, to, subject, body, threadId = null }, _failureMode = null, { beforeDispatch = null, signal = null } = {}) {
     if (this.connector.shadow) {
       throw new Error('Shadow mode is read-only. Gmail send was not attempted.');
     }
     try {
-      const result = await this.connector.execute({ to, subject, body, idempotencyKey, threadId });
+      const result = await this.connector.execute({ to, subject, body, idempotencyKey, threadId, beforeDispatch, signal });
       if (!result?.receiptId) {
         throw new Error('Gmail accepted the request but returned no message id; the send cannot be verified.');
       }
@@ -131,9 +134,9 @@ export class GoogleMailAdapter {
    * A definitive 404 or a transient failure both block completion: the email is
    * never reported as verified on the strength of the send response alone.
    */
-  async verifyReceipt(receipt) {
+  async verifyReceipt(receipt, { signal = null } = {}) {
     if (!receipt?.id) return { status: 'unknown', receipt: null, detail: 'Gmail returned no message id, so the message cannot be read back.' };
-    const result = await this.connector.verifyMessage(receipt.id);
+    const result = await this.connector.verifyMessage(receipt.id, { signal });
     if (result.status === 'found') {
       return { status: 'found', receipt: { ...result.receipt, idempotencyKey: receipt.idempotencyKey }, detail: result.detail };
     }
@@ -148,7 +151,7 @@ export class GoogleMailAdapter {
   async lookup(idempotencyKey, options = {}) {
     if (options.receiptId) {
       try {
-        const direct = await this.connector.verifyMessage(options.receiptId);
+        const direct = await this.connector.verifyMessage(options.receiptId, { signal: options.signal });
         if (direct.status === 'found') {
           return { status: 'found', receipt: { ...direct.receipt, idempotencyKey }, detail: direct.detail };
         }
@@ -157,7 +160,7 @@ export class GoogleMailAdapter {
         // Fall through to the Message-ID search; both paths are read-only.
       }
     }
-    const result = await this.connector.verify(idempotencyKey);
+    const result = await this.connector.verify(idempotencyKey, { signal: options.signal });
     if (result.status === 'found') return { status: 'found', receipt: result.receipt, detail: result.detail };
     return { status: result.status, receipt: null, detail: result.detail };
   }

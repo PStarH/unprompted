@@ -44,18 +44,19 @@ Saved connections use primary interpretation. Requests recognized by rules
 still invoke the model; original verifiable requirements stay in force. A
 failed model reading cannot become a rule-only ready action. Choose a source on
 the same page to supply your actual working context. See [Connectors](CONNECTORS.md)
-for GitHub and Microsoft Outlook authorization, permissions and extension points.
+for GitHub, Outlook, Slack and Notion authorization, permissions and extension points.
 
 ## Choose your first source
 
-The home page offers local folders, Apple Notes on macOS, Google, GitHub and
-Microsoft Outlook. One source is enough to start. GitHub and Outlook use
-official device OAuth and need a registered public Client ID supplied by the
-distribution or self-hosted operator. Users copy the short code and authorize
-on the official provider page; the app verifies identity and activates the
-connection. No access-token copying, client secret or public callback server is
-needed. See the [connector guide](CONNECTORS.md) for exact scope and publisher
-requirements.
+The home page offers local folders, Apple Notes on macOS, Google, GitHub,
+Microsoft Outlook, Slack and Notion. One source is enough to start. GitHub and
+Outlook use official device OAuth and a registered public Client ID. Slack and
+Notion open the provider’s own consent page and return to
+`http://localhost:53682/oauth/slack` or `http://localhost:53682/oauth/notion`.
+The distribution or self-hosted operator supplies the registered application
+identity. Users authorize their own accounts. The app verifies identity and
+activates the connection. No access-token copying is required. See the
+[connector guide](CONNECTORS.md) for exact scopes and publisher requirements.
 
 Each connector keeps independent cursors and status. Observation can be paused
 globally. Disconnecting a source retains the others and local historical records.

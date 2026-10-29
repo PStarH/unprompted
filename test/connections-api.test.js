@@ -8,6 +8,33 @@ import { waitFor } from './fixtures/google-workspace.mjs';
 const get = (base, path) => fetch(base + path).then(response => response.json());
 const post = (base, path, data = {}) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data) });
 
+test('artifact grants require provider write consent and an explicit destination, enable only creation, and revoke immediately', { timeout: 25000 }, async t => {
+  const fixture = await startConnectedFixture(); t.after(fixture.close);
+  const { base } = fixture;
+  const input = { connectorId: 'microsoft', targetId: 'drafts', confirmed: true };
+  assert.equal((await post(base, '/api/artifact-grants', input)).status, 403);
+  fixture.controls.microsoftAuthorized = true;
+  assert.equal((await post(base, '/api/setup/connections/microsoft/authorize')).status, 200);
+  await waitFor(() => get(base, '/api/setup'), value => value.connections.microsoft.connected && !value.monitoring.running, 12000);
+  assert.equal((await post(base, '/api/artifact-grants', input)).status, 403);
+  assert.equal((await post(base, '/api/setup/connections/microsoft/authorize', { drafts: true })).status, 200);
+  await waitFor(() => get(base, '/api/setup'), value => value.connections.microsoft.oauth.phase === 'connected' && value.artifacts.targets.some(target => target.connectorId === 'microsoft' && target.available), 12000);
+  assert.equal((await post(base, '/api/artifact-grants', { ...input, confirmed: false })).status, 403);
+  const response = await post(base, '/api/artifact-grants', input);
+  assert.equal(response.status, 200, await response.clone().text());
+  const granted = await response.json();
+  assert.equal(granted.grant.accountId, 'ms-a');
+  assert.equal(granted.setup.artifacts.enabled, true);
+  assert.equal(granted.setup.connections.microsoft.readOnly, false);
+  assert.equal(granted.setup.google.allowExternalWrites, false);
+  assert.equal((await get(base, '/api/artifact-grants')).grants[0].id, granted.grant.id);
+  assert.equal((await post(base, `/api/artifact-grants/${granted.grant.id}/revoke`)).status, 200);
+  const after = await get(base, '/api/setup');
+  assert.equal(after.connections.microsoft.readOnly, true);
+  assert.equal(after.artifacts.grants[0].status, 'revoked');
+  assert.equal(fixture.calls.some(call => /\/send$/.test(call.path)), false);
+});
+
 test('a real selected local folder works without cloud credentials and revoking it removes current evidence', { timeout: 20_000 }, async t => {
   const fixture = await startConnectedFixture(); t.after(fixture.close);
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-local-api-'))); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -55,4 +82,33 @@ test('official device flows activate GitHub and Outlook together, preserve read-
   assert.equal(after.connections.github.configured, true); assert.equal(after.connections.microsoft.connected, true);
   assert.equal(after.monitoring.enabled, true, 'disconnecting GitHub keeps Outlook observation running');
   assert.equal((await get(base, '/api/state')).tasks.find(task => task.kind === 'external_issue').status, 'cancelled');
+});
+
+test('a local source update is delivered through the workspace event stream', { timeout: 20000 }, async t => {
+  const fixture = await startConnectedFixture(); t.after(fixture.close);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-stream-source-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const selected = fs.realpathSync(directory), file = path.join(selected, 'notes.md');
+  fs.writeFileSync(file, 'A note without a task.');
+  assert.equal((await post(fixture.base, '/api/setup/local-sources/local_files/select', { path: selected, observe: false })).status, 200);
+  await waitFor(() => get(fixture.base, '/api/setup'), value => !value.monitoring.running && value.monitoring.lastOutcome, 8000);
+  const response = await fetch(fixture.base + '/api/stream');
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  try {
+    await reader.read();
+    fs.writeFileSync(file, '- [ ] Follow up with the supplier');
+    assert.equal((await post(fixture.base, '/api/connectors/sync')).status, 200);
+    let buffer = '', found = false;
+    for (let i = 0; i < 15 && !found; i++) {
+      const chunk = await Promise.race([reader.read(), new Promise((_, reject) => setTimeout(() => reject(new Error('No source update in the stream.')), 3000))]);
+      buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: true });
+      const frames = buffer.split('\n\n'); buffer = frames.pop();
+      for (const frame of frames) {
+        const data = frame.split('\n').find(line => line.startsWith('data: '));
+        if (data && JSON.parse(data.slice(6)).tasks?.some(task => task.subject === 'Follow up with the supplier')) found = true;
+      }
+    }
+    assert.equal(found, true);
+  } finally { await reader.cancel(); }
 });

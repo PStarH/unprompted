@@ -56,6 +56,12 @@ export class LocalFilesConnector extends Connector {
       account: { id: scopeId, label: 'Selected local folders' } });
   }
   validate() { return { ok: this.live, missing: this.live ? [] : ['Selected local folder'], detail: 'Read Markdown and UTF-8 text in explicitly selected folders.' }; }
+  capabilities() { return { ...super.capabilities(), read: this.live ? ['local.selected_text'] : [], incremental: this.live ? ['local.snapshot'] : [], observation: this.live ? 'poll' : 'none' }; }
+  async listHistoricalEvents({ limit = 20 } = {}) {
+    if (!this.live) return { events: [], networkCalls: 0, unavailable: true };
+    const page = await this.pull({ cursor: null });
+    return { events: (page.events || []).slice(0, Math.max(1, Math.min(20, Number(limit) || 20))), networkCalls: 0, unavailable: false };
+  }
   async pull({ cursor = null } = {}) {
     if (!this.live) throw new ConnectorError('No local folder is connected.', { connectorId: this.id });
     const documents = [], unavailable = [], errors = [], seen = new Set();

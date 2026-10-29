@@ -8,7 +8,8 @@ import { WorkEngine } from '../src/engine.js';
 import { GoogleWorkspaceConnector, googleConfigFromEnv, GoogleAuth } from '../src/connectors/google.js';
 import { GoogleMailAdapter, UncertainDeliveryError } from '../src/providers.js';
 import { buildRuntime } from '../src/connectors/index.js';
-import { ConnectorError } from '../src/connectors/connector.js';
+import { ConnectorError, CursorStore } from '../src/connectors/connector.js';
+import { ConnectorSync } from '../src/connectors/sync.js';
 import { normalizeEvent, EventValidationError, validateEventPayload } from '../src/connectors/events.js';
 
 const tempFiles = [];
@@ -842,8 +843,8 @@ test('an accepted live send is verified against the provider after it is sent', 
       calls.push(url);
       if (isTokenEndpoint(url)) return jsonResponse({ access_token: 'at', expires_in: 3600 });
       if (url.includes('/messages?q=')) return jsonResponse({ messages: [] }); // nothing sent before
-      if (url.includes('/messages/send')) return jsonResponse({ id: 'gmail-msg-1', threadId: 't-1' });
-      if (url.includes('/messages/gmail-msg-1')) return jsonResponse({ id: 'gmail-msg-1', threadId: 't-1' });
+      if (url.includes('/messages/send')) return jsonResponse({ id: 'gmail-msg-1', threadId: 't-1', labelIds: ['SENT'] });
+      if (url.includes('/messages/gmail-msg-1')) return jsonResponse({ id: 'gmail-msg-1', threadId: 't-1', labelIds: ['SENT'] });
       throw new Error(`Unscripted ${url}`);
     }
   });
@@ -874,11 +875,11 @@ test('an accepted send that cannot be re-read is blocked, then reconciles to ver
     fetchImpl: async url => {
       if (isTokenEndpoint(url)) return jsonResponse({ access_token: 'at', expires_in: 3600 });
       if (url.includes('/messages?q=')) return jsonResponse({ messages: [] });
-      if (url.includes('/messages/send')) return jsonResponse({ id: 'gmail-msg-2', threadId: 't-2' });
+      if (url.includes('/messages/send')) return jsonResponse({ id: 'gmail-msg-2', threadId: 't-2', labelIds: ['SENT'] });
       if (url.includes('/messages/gmail-msg-2')) {
         messageReads += 1;
         if (messageReads === 1) return jsonResponse({ error: 'backend down' }, 500);
-        return jsonResponse({ id: 'gmail-msg-2', threadId: 't-2' });
+        return jsonResponse({ id: 'gmail-msg-2', threadId: 't-2', labelIds: ['SENT'] });
       }
       throw new Error(`Unscripted ${url}`);
     }
@@ -964,4 +965,203 @@ test('connector errors carry retryability so callers can distinguish transient f
   assert.equal(retryable.retryable, true);
   assert.equal(fatal.retryable, false);
   assert.equal(retryable.status, 503);
+});
+
+test('Gmail imports messagesAdded records before advancing history, without duplicating mixed history fields', async () => {
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['gmail/v1/users/me/history', jsonResponse({ historyId: 'h2', history: [{ messagesAdded: [{ message: { id: 'added' } }], messages: [{ id: 'added' }] }, { messagesAdded: [{ message: { id: 'other' } }] }] })],
+    ['gmail/v1/users/me/messages/added', jsonResponse(mailMessage('added'))],
+    ['gmail/v1/users/me/messages/other', jsonResponse(mailMessage('other'))]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false }, fetchImpl });
+  const result = await connector.pull({ cursor: { gmail: { historyId: 'h1' } } });
+  assert.deepEqual(result.events.map(event => event.payload.id), ['added', 'other']);
+  assert.equal(result.cursor.gmail.historyId, 'h2');
+});
+
+test('Drive retains the newest listing timestamp across bounded pages and does not replay older pages forever', async () => {
+  const mimeType = 'application/vnd.google-apps.document';
+  const docs = (prefix, at) => Array.from({ length: 20 }, (_, i) => ({ id: `${prefix}-${i}`, name: `${prefix} ${i}`, mimeType, modifiedTime: at, version: '1' }));
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['drive/v3/changes?', jsonResponse({ newStartPageToken: 'p2', changes: [] })],
+    ['drive/v3/files?', url => url.includes('pageToken=next')
+      ? jsonResponse({ files: docs('old', '2026-10-15T09:00:00Z') })
+      : jsonResponse({ nextPageToken: 'next', files: docs('new', '2026-10-16T09:00:00Z') })],
+    [/\/export\?/, textResponse('Evidence')]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false }, fetchImpl });
+  const first = await connector.pull({ cursor: { drive: { pageToken: 'p1' } } });
+  assert.equal(first.events.length, 20);
+  assert.equal(first.cursor.drive.filesPageToken, 'next');
+  assert.equal(first.hasMore, true);
+  const second = await connector.pull({ cursor: first.cursor });
+  assert.equal(second.events.length, 20);
+  assert.equal(second.cursor.drive.filesPageToken, null);
+  assert.equal(second.hasMore, false);
+  assert.equal(second.cursor.drive.filesModifiedAfter, '2026-10-16T09:00:00.000Z');
+});
+
+test('one observation immediately ingests several pages of existing Google Docs', async () => {
+  const mimeType = 'application/vnd.google-apps.document';
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['drive/v3/changes/startPageToken', jsonResponse({ startPageToken: 'p1' })],
+    ['drive/v3/changes?', jsonResponse({ newStartPageToken: 'p2', changes: [] })],
+    ['drive/v3/files?', url => {
+      const page = Number(new URL(url).searchParams.get('pageToken') || 0);
+      return jsonResponse({ files: Array.from({ length: 20 }, (_, i) => ({ id: `doc-${page}-${i}`, name: `Proposal ${page}-${i}`, mimeType, modifiedTime: `2026-10-${16 - page}T09:00:00Z`, version: '1' })), ...(page < 2 ? { nextPageToken: String(page + 1) } : {}) });
+    }],
+    [/\/export\?/, textResponse('Actual source evidence')]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false }, fetchImpl });
+  const store = storeIn(), engine = new WorkEngine(store), cursors = new CursorStore(store);
+  const result = (await new ConnectorSync({ connectors: [connector], cursors, engine }).run()).results[0];
+  assert.equal(result.pages, 3); assert.equal(result.ingested, 60); assert.equal(result.hasMore, false);
+  assert.equal(Object.keys(store.state.documents).length, 60);
+  assert.equal(cursors.get('google').drive.filesModifiedAfter, '2026-10-16T09:00:00.000Z');
+});
+
+test('Drive incomplete searches never commit a cursor that could hide missing documents', async () => {
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['drive/v3/changes?', jsonResponse({ newStartPageToken: 'p2', changes: [] })],
+    ['drive/v3/files?', jsonResponse({ files: [], incompleteSearch: true })]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false }, fetchImpl });
+  const prior = { drive: { pageToken: 'p1' } }, result = await connector.pull({ cursor: prior });
+  assert.equal(result.partial, true);
+  assert.equal(result.cursor.drive.pageToken, 'p1');
+});
+
+test('an expired Drive listing continuation safely restarts the listing without skipping its earlier watermark', async () => {
+  const doc = { id: 'fresh', name: 'Fresh proposal', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-10-17T09:00:00Z', version: '1' };
+  const { fetchImpl, calls } = scriptedFetch([tokenRoute,
+    ['drive/v3/changes?', jsonResponse({ newStartPageToken: 'p2', changes: [] })],
+    ['drive/v3/files?', url => url.includes('pageToken=expired') ? jsonResponse({ error: 'invalid page token' }, 400) : jsonResponse({ files: [doc] })],
+    ['drive/v3/files/fresh/export', textResponse('Evidence')]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false }, fetchImpl });
+  const result = await connector.pull({ cursor: { drive: { pageToken: 'p1', filesPageToken: 'expired', filesModifiedAfter: '2026-10-10T09:00:00Z', filesListingNewest: '2026-10-16T09:00:00Z', filesListingTracking: true } } });
+  assert.equal(result.partial, false);
+  assert.equal(result.events[0].payload.id, 'fresh');
+  assert.equal(result.cursor.drive.filesModifiedAfter, '2026-10-17T09:00:00.000Z');
+  assert.equal(calls.filter(call => call.url.includes('drive/v3/files?')).length, 2);
+});
+
+test('a Gmail response body that never settles times out and cannot advance its history cursor', async () => {
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['gmail/v1/users/me/history', { ok: true, status: 200, json: () => new Promise(() => {}) }]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false, timeoutMs: 20, maxRetries: 0 }, fetchImpl });
+  const result = await connector.pull({ cursor: { gmail: { historyId: 'h1' } } });
+  assert.equal(result.partial, true);
+  assert.equal(result.errors[0].retryable, true);
+  assert.equal(result.cursor.gmail.historyId, 'h1');
+});
+
+test('Google capability descriptions reflect the configured scopes, shadow state, and real dispatch paths', () => {
+  const readOnly = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: true, readDrive: false, shadow: true, sendEnabled: true, docsWriteEnabled: true } });
+  assert.deepEqual(readOnly.describe().capabilities.read, ['gmail.messages']);
+  assert.deepEqual(readOnly.describe().capabilities.write, []);
+  assert.equal(readOnly.describe().capabilities.observation, 'poll');
+  assert.equal(readOnly.describe().capabilities.providerPush, false);
+  const enabled = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: true, readDrive: true, shadow: false, sendEnabled: true, docsWriteEnabled: true } });
+  assert.deepEqual(enabled.describe().capabilities.write, ['gmail.approved_reply', 'docs.approved_patch']);
+  assert.deepEqual(enabled.describe().capabilities.verify, ['gmail.sent_readback', 'docs.revision_readback']);
+  const disconnected = new GoogleWorkspaceConnector({ config: {} });
+  assert.deepEqual(disconnected.describe().capabilities.read, []);
+  assert.deepEqual(disconnected.describe().capabilities.write, []);
+});
+
+test('Google account search reads bounded Gmail and Drive pages with their authorized scope', async () => {
+  const { fetchImpl, calls } = scriptedFetch([tokenRoute,
+    ['gmail/v1/users/me/messages?', jsonResponse({ messages: [{ id: 'm-1' }], nextPageToken: 'gmail-next' })],
+    ['gmail/v1/users/me/messages/m-1', jsonResponse(mailMessage('m-1', 'Cedar'))],
+    ['drive/v3/files?', jsonResponse({ files: [{ id: 'doc-1', name: 'Cedar proposal', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-10-16T09:00:00Z' }], nextPageToken: 'drive-next' })]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: true, readDrive: true }, fetchImpl });
+  const gmail = await connector.search({ source: 'gmail', query: 'subject:Cedar', limit: 5, pageToken: 'g-prev' });
+  assert.equal(gmail.items[0].subject, 'Cedar'); assert.equal(gmail.items[0].body, 'Hello body');
+  assert.equal(gmail.nextPageToken, 'gmail-next');
+  const docs = await connector.search({ source: 'drive', query: "Cedar's plan", limit: 5, pageToken: 'd-prev' });
+  assert.equal(docs.items[0].id, 'doc-1'); assert.equal(docs.nextPageToken, 'drive-next');
+  const driveUrl = new URL(calls.find(call => call.url.includes('/drive/v3/files?')).url);
+  assert.ok(driveUrl.searchParams.get('q').includes("Cedar\\'s plan"));
+  assert.equal(driveUrl.searchParams.get('pageToken'), 'd-prev');
+  assert.deepEqual(connector.describe().capabilities.search, ['gmail.messages', 'drive.google_docs']);
+});
+
+test('Google search refuses disconnected or ungranted sources and does not contact the provider', async () => {
+  const { fetchImpl, calls } = scriptedFetch([tokenRoute]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false, readDrive: true }, fetchImpl });
+  await assert.rejects(connector.search({ source: 'gmail', query: 'Cedar' }), /not enabled|not authorized/i);
+  await assert.rejects(connector.search({ source: 'drive', query: 'Cedar', limit: 500 }), /limit/i);
+  connector.live = false;
+  await assert.rejects(connector.search({ source: 'drive', query: 'Cedar' }), /not enabled|not authorized/i);
+  assert.equal(calls.length, 0);
+});
+
+test('revoking Google access during search authentication stops the provider request', async () => {
+  let release, entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const auth = { configured: () => true, headers: async () => { entered(); await gate; return { authorization: 'Bearer PRIVATE' }; } };
+  let calls = 0;
+  const connector = new GoogleWorkspaceConnector({ auth, config: { readGmail: true }, fetchImpl: async () => { calls++; return jsonResponse({ messages: [] }); } });
+  const pending = connector.search({ source: 'gmail', query: 'Cedar' });
+  await waiting; connector.live = false; release();
+  await assert.rejects(pending, /not enabled|not authorized/i);
+  assert.equal(calls, 0);
+});
+
+test('Gmail cannot authorize a send without the read scope required for verification', () => {
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false, shadow: false, sendEnabled: true } });
+  const provider = new GoogleMailAdapter(connector);
+  assert.equal(provider.canSend, false);
+  assert.deepEqual(connector.capabilities().write, []);
+});
+
+test('a concurrent Google search does not inherit another sync pass time budget', async () => {
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['gmail/v1/users/me/history', () => new Promise(() => {})],
+    ['gmail/v1/users/me/messages?', async () => { await new Promise(resolve => setTimeout(resolve, 45)); return jsonResponse({ messages: [] }); }]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false, syncBudgetMs: 20, timeoutMs: 100, maxRetries: 0 }, fetchImpl });
+  const sync = connector.pull({ cursor: { gmail: { historyId: 'h1' } } });
+  const search = connector.search({ source: 'gmail', query: 'Cedar' });
+  assert.deepEqual((await search).items, []);
+  assert.equal((await sync).partial, true);
+});
+
+test('malformed Gmail history and repeated page tokens cannot advance a cursor', async () => {
+  for (const history of [
+    jsonResponse({ historyId: 'h2', history: [{ messagesAdded: [{ message: {} }] }] }),
+    jsonResponse({ historyId: 'h2', history: [{ messagesAdded: [] }], nextPageToken: 'repeat' })
+  ]) {
+    const { fetchImpl } = scriptedFetch([tokenRoute, ['gmail/v1/users/me/history', history]]);
+    const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false, maxRetries: 0 }, fetchImpl });
+    const result = await connector.pull({ cursor: { gmail: { historyId: 'h1' } } });
+    assert.equal(result.partial, true); assert.equal(result.cursor.gmail.historyId, 'h1');
+    assert.equal(result.events.length, 0);
+  }
+});
+
+test('a Gmail bootstrap without a history baseline does not report a successful durable observation', async () => {
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['gmail/v1/users/me/profile', jsonResponse({ emailAddress: 'reader@example.test' })],
+    ['gmail/v1/users/me/messages?', jsonResponse({ messages: [] })]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false }, fetchImpl });
+  const result = await connector.pull();
+  assert.equal(result.partial, true);
+  assert.equal(result.cursor.gmail, undefined);
+});
+
+test('an incomplete Gmail bootstrap listing cannot silently discard a message and commit the baseline', async () => {
+  const { fetchImpl } = scriptedFetch([tokenRoute,
+    ['gmail/v1/users/me/profile', jsonResponse({ historyId: 'h1' })],
+    ['gmail/v1/users/me/messages?', jsonResponse({ messages: [{}, { id: 'm1' }] })],
+    ['gmail/v1/users/me/messages/m1', jsonResponse(mailMessage('m1'))]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false }, fetchImpl });
+  const result = await connector.pull();
+  assert.equal(result.partial, true); assert.equal(result.cursor.gmail, undefined); assert.equal(result.events.length, 0);
 });

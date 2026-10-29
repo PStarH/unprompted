@@ -438,3 +438,7 @@ export class JsonStore {
     return this.#transaction(callback, true);
   }
 }
+
+// The SQLite migration observes the same process lock as the legacy store,
+// so an older running process cannot keep writing its JSON during migration.
+export const stateFileLock = Object.freeze({ acquire: acquireLock, release: releaseLock });

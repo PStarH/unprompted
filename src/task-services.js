@@ -381,6 +381,7 @@ export class TaskServices {
           changed = true;
           continue;
         }
+        if (task.control?.paused) continue;
         const risk = wait.interruptOnRisk ? riskFor(task, state, now, wait) : null;
         if (risk) {
           wait.status = 'interrupted';
@@ -414,7 +415,9 @@ export class TaskServices {
    * pinned for application-time checks.
    */
   async prepareDocumentPatch(taskId, { changes = null, provider: providerName = null } = {}) {
+    const durable = this.engine?.durableRuntime, durableFence = durable?.capture(taskId);
     const task = requireTask(this.store.state, taskId);
+    if (task.control?.paused) throw new Error('This task is paused. Resume it before preparing a document patch.');
     if (task.status === 'completed' || task.status === 'cancelled' || task.userDismissed) throw new Error('A closed or withdrawn request cannot receive a document patch.');
     const document = task.documentId ? this.store.state.documents?.[task.documentId] : null;
     if (!document || document.available === false || typeof document.content !== 'string') {
@@ -446,6 +449,7 @@ export class TaskServices {
       try { base = await provider.prepareBase(document); }
       catch (error) { blockers.push(error.message); }
     }
+    if (durable && !durable.isCurrent(taskId, durableFence)) throw Object.assign(new Error('The task context or privacy generation changed during patch preparation.'), { code: 'RUN_INVALIDATED' });
     const at = this.clock();
     const patchId = `patch:${taskId}:${this.store.state.revision + 1}:${hash(`${taskId}:${at}:${JSON.stringify(validation.changes)}`)}`;
     const patch = {
@@ -510,6 +514,7 @@ export class TaskServices {
       return 'The document patch authorization is missing or no longer matches this base version.';
     }
     const task = state.tasks?.[taskId];
+    if (task?.control?.paused) return 'The task was paused before the document write.';
     if (!task || task.status === 'cancelled' || task.status === 'completed' || task.userDismissed) {
       return 'The request was closed or withdrawn after patch preparation.';
     }
@@ -525,6 +530,9 @@ export class TaskServices {
   async applyDocumentPatch(taskId, { patchId, authorization = null } = {}) {
     const patch = this.store.state.documentPatches?.[patchId];
     const task = requireTask(this.store.state, taskId);
+    const durable = this.engine?.durableRuntime;
+    const durableFence = durable?.capture(taskId);
+    if (task.control?.paused) throw new Error('This task is paused. Resume it before applying a document patch.');
     if (!patch || patch.taskId !== taskId) throw new Error('Unknown document patch for this task.');
     if (patch.status === 'applied') return { patch, task, result: patch.result };
     const shadowReviewed = patch.status === 'shadow_read_only' && patch.result?.applied === false;
@@ -565,6 +573,7 @@ export class TaskServices {
       } else {
         expected = (await this.localDocumentProvider.prepareBase(currentDocument)).content;
       }
+      if (durable && !durable.isCurrent(taskId, durableFence)) throw Object.assign(new Error('The shadow review was invalidated during its read.'), { code: 'RUN_INVALIDATED' });
       const output = applyTextChanges(expected, patch.changes);
       const result = {
         status: 'shadow_read_only',
@@ -605,7 +614,15 @@ export class TaskServices {
       current.applyStartedAt = this.clock();
       insertHistory(state, 'patch_applying', 'Starting one version-bound document patch attempt.', taskId, current.applyStartedAt);
     });
+    const patchAuthorization = { taskId, patchId, baseDocumentVersion: patch.baseDocument.version };
+    const writeSpec = {
+      provider, tool: 'apply_patch', actionFamily: 'document.patch', resourceId: currentDocument.externalId || currentDocument.id,
+      key: `patch:${patch.id}:${patch.baseDocument.version}`,
+      effect: { type: 'document_patch', documentId: currentDocument.id, baseVersion: patch.baseDocument.version, changesDigest: crypto.createHash('sha256').update(JSON.stringify(patch.changes)).digest('hex'), expectedContentDigest: crypto.createHash('sha256').update(applyTextChanges(currentDocument.content, patch.changes).replace(/\r\n?/g, '\n')).digest('hex') },
+      payload: patch.changes, conditionalVersion: patch.baseDocument.revisionId || String(patch.baseDocument.version)
+    };
     const beforeWrite = () => {
+      if (durable && !durable.isCurrent(taskId, durableFence)) throw Object.assign(new Error('The task context or privacy generation changed before the document write.'), { stale: true });
       const reason = this.#patchStaleReason(taskId, patchId, { expectedStatus: 'applying', attemptId: writeAttemptId });
       const currentPatch = this.store.state.documentPatches?.[patchId];
       const writeProvider = currentPatch?.provider === 'google' ? this.documentProvider : null;
@@ -618,16 +635,24 @@ export class TaskServices {
         error.stale = true;
         throw error;
       }
+      if (!durable) this.engine?.toolGateway?.authorize({ taskId, ...writeSpec, patchAuthorization });
     };
     let applied;
     try {
-      applied = await provider.apply({
+      const input = {
         document: currentDocument,
         changes: patch.changes,
         requiredRevisionId: patch.baseDocument.revisionId,
         beforeWrite
-      });
+      };
+      applied = durable ? await durable.external({ ...task, patchAuthorization }, {
+        ...writeSpec, deferDispatch: true,
+        send: (signal, guard) => provider.apply({ ...input, signal, beforeWrite: () => { guard(); beforeWrite(); } }),
+        verify: result => result?.readbackVerified || result?.simulated ? { status: 'found', receipt: { id: result.revisionId || patch.id, provider: patch.provider, status: 'verified' } } : { status: 'unknown' }
+      }) : await provider.apply(input);
     } catch (error) {
+      if (durable && !durable.isCurrent(taskId, durableFence, { allowDirty: true })) throw Object.assign(new Error('The task was invalidated while the document operation was in flight. Its result requires reconciliation.'), { writeOutcomeUnknown: true });
+      if (error.ambiguous) error.writeOutcomeUnknown = true;
       if (error.stale) {
         this.store.mutate(state => {
           state.documentPatches[patchId].status = 'stale';
@@ -661,6 +686,7 @@ export class TaskServices {
       throw error;
     }
 
+    if (durable && !durable.isCurrent(taskId, durableFence, { allowDirty: true })) throw Object.assign(new Error('The document result was invalidated before local ingestion; reconcile its durable execution.'), { code: 'RUN_INVALIDATED', writeOutcomeUnknown: true });
     const providerEventId = `patch:${hash(`${patch.id}:${applied.revisionId || currentDocument.version + 1}`)}`;
     const source = patch.provider === 'google' ? 'google' : 'simulated';
     this.ingest({

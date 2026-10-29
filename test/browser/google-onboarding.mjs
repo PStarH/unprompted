@@ -59,11 +59,13 @@ try {
   assert.deepEqual(await initial.locator('.connection-stats dd').allTextContents(), ['1', '1', '1']);
   assert.ok(await page.locator('#taskContent [data-task-card]').count());
   assert.equal(await page.locator('#taskContent [data-action="approve"]').count(), 0, 'read-only does not offer a send button');
+  await page.locator('#taskContent [data-select-task]').first().click();
   await page.locator('#taskContent [data-copy-draft]').click();
   const draft = (await (await page.request.get(fixture.base + '/api/state')).json()).tasks[0].draft;
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), draft.body);
   assert.ok(await page.locator('#taskContent [data-action="reject"]').count(), 'read-only users can decline a prepared reply');
   record('retry-reads-existing-documents-and-shows-source-backed-work');
+  await page.locator('#taskContent [data-close-inspector]').click();
   await initial.locator('[data-go="sources"]').click();
   const settings = page.locator('#setupContent');
   await settings.locator('[data-preserve="google-write-access"] > summary').click();
@@ -81,7 +83,7 @@ try {
   await page.locator('#observationContent [data-monitor-form]').waitFor();
   assert.equal(await page.locator('#observationContent [name="enabled"]').isChecked(), false);
   record('pause-survives-reload-and-retains-the-last-check');
-  await page.locator('#connectorContent [data-select-connection="google"]').click();
+  await page.locator('#connectorContent [data-inspect-connection="google"]').click();
   await settings.locator('[data-preserve="google-diagnostics"] > summary').click();
   const cancelledPopup = page.waitForEvent('popup');
   await settings.locator('[data-google-reconnect]').click();
