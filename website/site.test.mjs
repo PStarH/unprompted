@@ -13,6 +13,10 @@ test('every page and asset link resolves under a GitHub Pages project prefix', (
     const html = readFileSync(resolve(root, page), 'utf8');
     for (const [, value] of html.matchAll(/(?:href|src)="([^"]+)"/g)) {
       const url = new URL(value, origin + page);
+      if (url.protocol === 'mailto:') {
+        assert.ok(url.pathname.includes('@'), `Invalid email link: ${value}`);
+        continue;
+      }
       if (url.origin !== new URL(origin).origin) {
         assert.equal(url.protocol, 'https:', `External link must use HTTPS: ${value}`);
         continue;
