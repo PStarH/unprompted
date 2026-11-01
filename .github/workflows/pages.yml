@@ -1,0 +1,67 @@
+name: Deploy website to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['website/**', 'docs-site/**', '.github/workflows/pages.yml']
+  pull_request:
+    paths: ['website/**', 'docs-site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and check documentation
+        run: |
+          node docs-site/build.mjs
+          node docs-site/check-links.mjs
+      - name: Check static site
+        run: |
+          node --check website/main.js
+          node --check website/story.js
+          node --check website/experience.js
+          node --check website/components.js
+          node --check website/copy.js
+          node --check website/i18n.js
+          node --test website/site.test.mjs
+      - name: Refresh public GitHub star count
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node website/update-repo-stats.mjs
+      - name: Prepare site artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/pages"
+          rsync -a --exclude='README.md' --exclude='site.test.mjs' --exclude='update-repo-stats.mjs' website/ "$RUNNER_TEMP/pages/"
+      - name: Upload website only
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

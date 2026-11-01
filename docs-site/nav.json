@@ -1,0 +1,150 @@
+{
+  "en": {
+    "htmlLang": "en",
+    "groups": [
+      {
+        "title": "Start here",
+        "links": [
+          { "slug": "", "title": "Overview" },
+          { "slug": "quickstart", "title": "Install and first run" },
+          { "slug": "models", "title": "Models" },
+          { "slug": "connectors", "title": "Connectors" },
+          { "slug": "google", "title": "Google Workspace" }
+        ]
+      },
+      {
+        "title": "Use Unprompted",
+        "links": [
+          { "slug": "workspace", "title": "Workspace" },
+          { "slug": "shortcuts", "title": "Keyboard shortcuts" },
+          { "slug": "workflows", "title": "How work moves" },
+          { "slug": "follow-up", "title": "Automatic follow-up" },
+          { "slug": "permissions", "title": "Permissions and privacy" }
+        ]
+      },
+      {
+        "title": "Help",
+        "links": [
+          { "slug": "troubleshooting", "title": "Troubleshooting" },
+          { "slug": "faq", "title": "FAQ" },
+          { "slug": "contributing", "title": "Contributing" }
+        ]
+      },
+      {
+        "title": "Reference",
+        "links": [
+          { "slug": "configuration", "title": "Configuration" },
+          { "slug": "api", "title": "Local API" },
+          { "slug": "architecture", "title": "Architecture" },
+          { "slug": "development", "title": "Development and testing" },
+          { "slug": "glossary", "title": "Glossary" },
+          { "slug": "changelog", "title": "Changelog" },
+          { "slug": "security", "title": "Security" }
+        ]
+      }
+    ],
+    "labels": {
+      "docs": "Docs",
+      "site": "Website",
+      "search": "Search",
+      "searchPlaceholder": "Search documentation",
+      "searchHint": "Search titles and page text",
+      "shortcut": "⌘K",
+      "noResults": "No matches",
+      "searchStart": "Type to search the documentation.",
+      "onThisPage": "On this page",
+      "menu": "Open menu",
+      "close": "Close",
+      "skip": "Skip to content",
+      "language": "Language",
+      "copy": "Copy",
+      "copied": "Copied",
+      "previous": "Previous",
+      "next": "Next",
+      "copyPage": "Copy page",
+      "feedback": "Report a problem with this page",
+      "breadcrumb": "Breadcrumb",
+      "headingLink": "Link to this section",
+      "updated": "Documentation preview",
+      "versionLabel": "Version",
+      "navSummary": "Documentation menu",
+      "notFoundTitle": "Page not found",
+      "notFoundBody": "That page is not in this documentation. Search, or return to the overview.",
+      "backHome": "Back to overview"
+    }
+  },
+  "zh": {
+    "htmlLang": "zh-CN",
+    "groups": [
+      {
+        "title": "开始使用",
+        "links": [
+          { "slug": "", "title": "概览" },
+          { "slug": "quickstart", "title": "安装与首次运行" },
+          { "slug": "models", "title": "模型" },
+          { "slug": "connectors", "title": "连接器" },
+          { "slug": "google", "title": "Google Workspace" }
+        ]
+      },
+      {
+        "title": "使用指南",
+        "links": [
+          { "slug": "workspace", "title": "工作区" },
+          { "slug": "shortcuts", "title": "键盘快捷键" },
+          { "slug": "workflows", "title": "工作如何推进" },
+          { "slug": "follow-up", "title": "自动跟进" },
+          { "slug": "permissions", "title": "权限与隐私" }
+        ]
+      },
+      {
+        "title": "帮助",
+        "links": [
+          { "slug": "troubleshooting", "title": "故障排查" },
+          { "slug": "faq", "title": "常见问题" },
+          { "slug": "contributing", "title": "参与贡献" }
+        ]
+      },
+      {
+        "title": "参考",
+        "links": [
+          { "slug": "configuration", "title": "配置" },
+          { "slug": "api", "title": "本地 API" },
+          { "slug": "architecture", "title": "架构" },
+          { "slug": "development", "title": "开发与测试" },
+          { "slug": "glossary", "title": "术语" },
+          { "slug": "changelog", "title": "更新记录" },
+          { "slug": "security", "title": "安全" }
+        ]
+      }
+    ],
+    "labels": {
+      "docs": "文档",
+      "site": "官网",
+      "search": "搜索",
+      "searchPlaceholder": "搜索文档",
+      "searchHint": "搜索标题和正文",
+      "shortcut": "⌘K",
+      "noResults": "没有匹配",
+      "searchStart": "输入关键词搜索文档。",
+      "onThisPage": "本页目录",
+      "menu": "打开菜单",
+      "close": "关闭",
+      "skip": "跳到正文",
+      "language": "语言",
+      "copy": "复制",
+      "copied": "已复制",
+      "previous": "上一篇",
+      "next": "下一篇",
+      "copyPage": "复制本页",
+      "feedback": "反馈本页问题",
+      "breadcrumb": "当前位置",
+      "headingLink": "本节链接",
+      "updated": "文档预览",
+      "versionLabel": "版本",
+      "navSummary": "文档目录",
+      "notFoundTitle": "找不到这一页",
+      "notFoundBody": "文档里没有这个页面。可以搜索，或返回概览。",
+      "backHome": "返回概览"
+    }
+  }
+}

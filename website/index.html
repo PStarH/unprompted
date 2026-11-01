@@ -1,0 +1,144 @@
+<!DOCTYPE html><html lang="en"><head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f7f2">
+  <meta name="description" content="Unprompted finds work in your inbox and tools, prepares replies and documents, and follows through in the background. You step in when a decision needs you.">
+  <meta property="og:title" content="Unprompted · Work without the prompt.">
+  <meta property="og:description" content="Unprompted finds work in your inbox and tools, prepares replies and documents, and follows through in the background. You step in when a decision needs you.">
+  <meta property="og:type" content="website">
+  <title>Unprompted · Work without the prompt.</title>
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/unprompted-spider.webp" as="image" type="image/webp">
+  <link rel="stylesheet" href="styles.css">
+  <script src="assets/vendor/gsap.min.js" defer=""></script>
+  <script src="assets/vendor/ScrollTrigger.min.js" defer=""></script>
+  <script src="assets/vendor/ScrollToPlugin.min.js" defer=""></script>
+  <script src="assets/vendor/lenis.min.js" defer=""></script>
+  <script src="components.js" defer=""></script>
+  <script src="copy.js" defer=""></script><script src="main.js" defer=""></script><script src="i18n.js" defer=""></script>
+  <script src="experience.js" defer=""></script>
+  <script src="story.js" defer=""></script>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-copy="skip">Skip to content</a>
+  <header class="header">
+    <a class="wordmark" href="./" aria-label="Unprompted home"><img src="assets/logo.svg" alt="" width="27" height="27">unprompted</a>
+    <div class="site-language" role="group" aria-label="Language"><button type="button" data-language="en" aria-pressed="true">EN</button><button type="button" data-language="zh" aria-pressed="false">中文</button></div>
+    <button class="menu-toggle" aria-expanded="false" aria-controls="navigation" aria-label="Open navigation"><span class="menu-label">Menu</span><span aria-hidden="true">+</span></button>
+    <nav id="navigation" aria-label="Main navigation">
+      <a href="docs/" data-copy="nav.docs">Docs ↗</a>
+      <a href="#start" data-copy="cta.start">Get started ↗</a>
+
+    </nav>
+    <a class="github-button" href="https://github.com/PStarH/unprompted" aria-label="Unprompted on GitHub"><img src="assets/icons/github.svg" width="19" height="19" alt=""><span class="github-label">GitHub</span><span class="github-star-count"><span aria-hidden="true">★</span> <strong id="github-stars">0</strong></span></a>
+  </header>
+
+  <main id="main" class="page-frame">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow" data-copy="hero.eyebrow"><span class="status-dot" aria-hidden="true"></span>AI that works in the background</p>
+        <h1 id="hero-title" data-copy="hero.title">Work without<br>the prompt<span class="green">.</span></h1>
+        <p class="hero-description" data-copy="hero.description">Unprompted finds work in your inbox and tools, prepares replies and documents, and follows through in the background. You step in when a decision needs you.</p>
+        <div class="hero-actions"><a class="button" href="#start" data-copy="cta.start">Get started ↗</a><a class="text-link" href="#how-it-works" data-copy="hero.see">See how it works ↓</a></div>
+      </div>
+      <div class="hero-world" aria-hidden="true">
+        <svg class="hero-web" aria-hidden="true"><g class="hero-threads"></g></svg>
+        <div class="floating-note note-mail"><span class="note-icon">↳</span><div data-copy="hero.mail">New request<small>From your inbox</small></div></div>
+        <div class="floating-note note-doc"><span class="note-icon">✓</span><div data-copy="hero.context">Relevant context<small>From your documents</small></div></div>
+        <span class="hero-anchor" data-waypoint="hero"></span>
+
+      </div>
+      <div class="hero-bottom"><span data-copy="hero.bottom">You decide. It follows through.</span><span data-copy="hero.local">Local first · Open source</span></div>
+    </section>
+
+
+
+    <section class="connections section" id="connections" aria-labelledby="connections-title">
+      <div class="section-heading"><h2 id="connections-title" data-copy="connections.title">Your tools, working together.</h2><p data-copy="connections.description">Requests from email and messages meet the documents needed to act on them.</p></div>
+      <div class="connector-field">
+        <svg class="connector-web" aria-hidden="true"><g class="connector-foundation"></g><g class="cross-threads"></g><g class="connector-knots"></g></svg>
+        <p class="weave-caption" data-copy="connections.weave">Context from the sources you choose.</p>
+        <div class="connector-grid" role="group" aria-label="Explore connections">
+          <button class="connector" data-connector="gmail" aria-pressed="true"><img src="assets/icons/gmail.svg" alt="" width="31" height="31"><span>Gmail</span></button>
+          <button class="connector" data-connector="drive" aria-pressed="false"><img src="assets/icons/drive.svg" alt="" width="31" height="31"><span>Google Drive</span></button>
+          <button class="connector" data-connector="github" aria-pressed="false"><img src="assets/icons/github.svg" alt="" width="31" height="31"><span>GitHub</span></button>
+          <button class="connector" data-connector="slack" aria-pressed="false"><img src="assets/icons/slack.svg" alt="" width="31" height="31"><span>Slack</span></button>
+          <button class="connector" data-connector="notion" aria-pressed="false"><img src="assets/icons/notion.svg" alt="" width="31" height="31"><span>Notion</span></button>
+          <button class="connector" data-connector="outlook" aria-pressed="false"><img src="assets/icons/outlook.svg" alt="" width="31" height="31"><span>Outlook</span></button>
+        </div>
+        <span class="connection-anchor" data-waypoint="connections"></span>
+      </div>
+      <div class="connection-detail"><p id="connector-description" aria-live="polite">Email requests, with the surrounding conversation.</p><a class="text-link" href="docs/connectors/" data-copy="connections.all">All connectors &amp; MCP ↗</a></div>
+    </section>
+
+    <section class="loom section" id="behind-the-result" aria-labelledby="loom-title">
+      <div class="section-heading"><h2 id="loom-title" data-copy="loom.title">The groundwork,<br>taken care of.</h2><p data-copy="loom.description">It gathers relevant context, checks requirements and prepares the next step.</p></div>
+      <figure class="loom-figure"><div class="loom-stage"><img src="assets/illustrations/context-loom.webp" alt="An isometric physical loom: an envelope, document and files send sage threads through a dark processing frame, emerging as one finished document." width="1672" height="941" loading="lazy" decoding="async"></div><figcaption class="diagram-caption"><div><h3 data-copy="loom.read">Gather context</h3></div><div><h3 data-copy="loom.prepare">Prepare the next step</h3></div><div><h3 data-copy="loom.review">Deliver results</h3></div></figcaption></figure>
+    </section>
+
+    <section class="workflow section" id="how-it-works" aria-labelledby="workflow-title">
+      <div class="section-heading"><h2 id="workflow-title" data-copy="workflow.title">Results first.</h2><p data-copy="workflow.description">Prepared replies, briefs and documents. Supporting sources when you need them.</p></div>
+      <div class="workflow-layout">
+        <div class="workflow-steps" role="tablist" aria-label="How Unprompted works" aria-orientation="vertical">
+          <button class="workflow-step" id="step-notice" role="tab" aria-selected="true" aria-controls="workflow-panel" tabindex="0" data-step="notice"><span class="step-number">01</span><span><strong data-copy="step.reply">A prepared reply</strong></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+          <button class="workflow-step" id="step-prepare" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-step="prepare"><span class="step-number">02</span><span><strong data-copy="step.brief">A ready brief</strong></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+          <button class="workflow-step" id="step-verify" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-step="verify"><span class="step-number">03</span><span><strong data-copy="step.verify">A checked document</strong></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+        </div>
+        <figure class="product-figure" id="workflow-panel" role="tabpanel" aria-labelledby="step-notice" tabindex="0">
+          <div class="product-caption"><span class="status-dot" aria-hidden="true"></span><span id="product-title">Reply prepared</span></div>
+          <div class="component-stage"><div class="result-frame is-active" data-result-frame="notice" aria-hidden="false"><div class="native-preview" data-component="reply"><article class="preview-output" lang="en"><header><h3>Release-plan reply</h3><details class="preview-evidence"><summary>Sources</summary><p>Release checklist · API test notes · Original request</p></details></header><dl class="preview-mail-meta"><dt>To</dt><dd>Jordan · jordan@example.com</dd><dt>Subject</dt><dd>Re: Friday release</dd></dl><label class="preview-editor-label"><span class="preview-sr-only">Release-plan reply</span><textarea class="preview-editor" aria-label="Release-plan reply" data-lenis-prevent>Hi Jordan,
+
+The release checklist and API tests are checked. Friday remains the target, pending confirmation of the rate-limit fix.
+
+Please confirm the remaining dependency by Thursday at 16:00.</textarea></label><footer class="preview-output-footer"><span data-preview-receipt>Draft · not sent</span><button type="button" class="preview-primary" data-preview-action="approve">Approve reply ↗</button></footer><p class="preview-feedback" role="status"></p></article></div></div><div class="result-frame" data-result-frame="prepare" aria-hidden="true"><div class="native-preview" data-component="brief"><article class="preview-output" lang="en"><header><h3>Product review brief</h3><details class="preview-evidence"><summary>Sources</summary><p>Release checklist · API test notes · Original request</p></details></header><div class="preview-document" data-lenis-prevent><p>Agenda and open questions for the next review.</p><div class="preview-brief-items"><section><h4>1. Import experience</h4><p>Make progress and errors clear so people don’t repeat an operation.</p></section><section><h4>2. Release dependencies</h4><p>Confirm the API fix and configuration before committing to a date.</p></section><section><h4>3. Customer feedback</h4><p>Review the four feedback themes and agree on owners.</p></section></div><p class="preview-document-end">Open questions: team capacity and when release dependencies will be confirmed.</p></div><footer class="preview-output-footer"><span>Plain-text brief</span><button type="button" data-preview-action="download">Download brief ↓</button></footer><p class="preview-feedback" role="status"></p></article></div></div><div class="result-frame" data-result-frame="verify" aria-hidden="true"><div class="native-preview" data-component="document"><article class="preview-output" lang="en"><header><h3>Customer feedback, organized</h3><details class="preview-evidence"><summary>Sources</summary><p>Release checklist · API test notes · Original request</p></details></header><div class="preview-document" data-lenis-prevent><p>Twelve example feedback entries, grouped into four themes with proposed next steps.</p><dl class="preview-themes"><div><dt>Import experience</dt><dd>Show progress and explain errors.</dd></div><div><dt>Search context</dt><dd>Include the matching passage.</dd></div><div><dt>Member permissions</dt><dd>Make the access scope visible.</dd></div><div><dt>Repeated notifications</dt><dd>Combine updates about the same event.</dd></div></dl><details class="preview-verification"><summary>See the evidence</summary><p>The saved document matches the approved changes. All twelve feedback entries are accounted for.</p></details></div><footer class="preview-output-footer"><span class="preview-verified">✓ Updated and checked</span><span class="preview-result-label">Interactive demo</span></footer><p class="preview-feedback" role="status"></p></article></div></div></div>
+          <figcaption id="product-description">Edit the reply or preview approval.</figcaption>
+          <span class="product-anchor" data-waypoint="workflow"></span>
+        </figure>
+      </div>
+    </section>
+
+    <section class="attention section" id="attention" aria-labelledby="attention-title">
+      <div class="attention-intro"><h2 id="attention-title" data-copy="attention.title">Your focus<br>stays yours.</h2><p data-copy="attention.description">Routine work stays in the background. Decisions that need you come forward.</p></div>
+      <figure class="attention-figure"><div class="attention-art focus-map" role="img" aria-label="Background threads converge into one decision, shown as a single raised focus point."><svg viewBox="0 0 560 210" aria-hidden="true"><g fill="none" stroke="#c4cfba" stroke-width="1.25"><ellipse cx="285" cy="105" rx="210" ry="77"></ellipse><ellipse cx="285" cy="105" rx="155" ry="54"></ellipse><path d="M78 91 Q175 18 285 105M120 158 Q200 188 285 105M441 49 Q390 20 285 105M481 137 Q400 190 285 105"></path></g><g fill="#f7f7f2" stroke="#9aae8c" stroke-width="1.5"><circle cx="78" cy="91" r="6"></circle><circle cx="120" cy="158" r="5"></circle><circle cx="441" cy="49" r="6"></circle><circle cx="481" cy="137" r="5"></circle></g><ellipse cx="285" cy="129" rx="64" ry="24" fill="#dfe6d6"></ellipse><path d="M221 105V120C221 152 349 152 349 120V105" fill="#bacbac"></path><ellipse cx="285" cy="105" rx="64" ry="25" fill="#426441"></ellipse><text x="285" y="114" text-anchor="middle" fill="#fff" font-family="Helvetica,Arial,sans-serif" font-size="30">1</text></svg></div><div class="preview-toolbar"><span data-copy="attention.try">A reply ready for your decision</span></div><div class="attention-crop"><div class="attention-decision native-preview" data-component="attention"><article class="preview-task preview-task-attention" lang="en"><div class="preview-task-mark" aria-hidden="true"></div><div class="preview-task-content"><h3>Reply to the release plan</h3><p>Release details checked. Reply prepared.</p><footer><span>Needs your confirmation</span><button type="button" data-preview-action="review">Review reply ↗</button></footer><div class="preview-inline-reply" hidden><p>Hi Jordan,<br><br>The release checklist and API tests are checked. Friday remains the target, pending confirmation of the rate-limit fix.<br><br>Please confirm the remaining dependency by Thursday at 16:00.</p><span>Draft · not sent</span></div></div></article></div></div></figure>
+      <div class="attention-principles"><article><h3 data-copy="attention.panels">Updates stay in place</h3></article><article><h3 data-copy="attention.focus">Typing stays uninterrupted</h3></article><article><h3 data-copy="attention.details">Details on demand</h3></article></div>
+    </section>
+
+    <section class="scenarios section" id="scenarios" aria-labelledby="scenarios-title">
+      <div class="section-heading"><h2 id="scenarios-title" data-copy="scenarios.title">It keeps track.<br>You keep going.</h2><p data-copy="scenarios.description">It tracks changes, waits for replies and resumes from saved progress.</p></div>
+      <div class="scenario-layout">
+        <div class="scenario-options" role="tablist" aria-label="Example workflows" aria-orientation="vertical">
+          <button id="scenario-followup" role="tab" aria-selected="true" aria-controls="scenario-panel" tabindex="0" data-scenario="followup" data-short-label="Changes" aria-label="When information changes"><span data-copy="scenario.change">When information changes</span><span aria-hidden="true">↗</span></button>
+          <button id="scenario-evidence" role="tab" aria-selected="false" aria-controls="scenario-panel" tabindex="-1" data-scenario="evidence" data-short-label="Waiting" aria-label="While waiting for replies"><span data-copy="scenario.wait">While waiting for replies</span><span aria-hidden="true">↗</span></button>
+          <button id="scenario-change" role="tab" aria-selected="false" aria-controls="scenario-panel" tabindex="-1" data-scenario="change" data-short-label="Resume" aria-label="After an interruption"><span data-copy="scenario.resume">After an interruption</span><span aria-hidden="true">↗</span></button>
+        </div>
+        <div class="scenario-panel" id="scenario-panel" role="tabpanel" aria-labelledby="scenario-followup" tabindex="0">
+          <div class="scenario-caption"><span id="scenario-source">Source changes</span></div>
+          <div class="scenario-visual"><div class="native-preview" id="scenario-component" data-component="followup-change"><article class="preview-continuity" lang="en"><header><span>Continuous follow-through</span><span>Interactive demo</span></header><ol><li><span class="continuity-mark" aria-hidden="true">✓</span><h3>Source updated</h3><p>A relevant document changes.</p></li><li><span class="continuity-mark" aria-hidden="true">✓</span><h3>Work rechecked</h3><p>Prepared content is checked again.</p></li><li><span class="continuity-mark" aria-hidden="true">→</span><h3>Result updated</h3><p>Stale work is withdrawn or revised.</p></li></ol></article></div></div>
+          <div class="example-result"><div class="result-heading"><span class="status-dot" aria-hidden="true"></span><span id="example-status">Context rechecked</span><span class="delivery-receipt" aria-hidden="true">✓</span></div><p id="example-result">When the source changes, outdated drafts can be withdrawn.</p><span class="result-boundary preview-sr-only" id="example-boundary">No external action without permission.</span></div>
+          <span class="scenario-anchor" data-waypoint="scenarios"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="boundaries section" aria-labelledby="boundaries-title">
+      <div class="boundary-intro"><h2 id="boundaries-title" data-copy="boundaries.title">You set the limits.</h2><a class="text-link" href="privacy.html" data-copy="boundaries.privacy">Data & privacy ↗</a><span data-waypoint="boundaries" class="boundary-anchor"></span></div>
+      <div class="boundary-details"><article><h3 data-copy="boundaries.local">Runs locally</h3><p data-copy="boundaries.localText">Your workspace stays on your machine. Relevant context goes to the model you choose.</p></article><article><h3 data-copy="boundaries.permission">Access you choose</h3><p data-copy="boundaries.permissionText">Read access first. Sending or editing needs your approval or a specific authorization.</p></article><article><h3 data-copy="boundaries.open">Open source</h3><p data-copy="boundaries.openText">Code you can inspect. Local data and credentials are not encrypted.</p></article></div>
+    </section>
+
+    <section class="start section" id="start" aria-labelledby="start-title">
+      <div class="start-copy"><h2 id="start-title" data-copy="start.title">Start with<br>one source.</h2><p data-copy="start.description">Run locally. Choose a model. Connect the work you want it to watch.</p><div class="start-links"><a class="button" href="docs/quickstart/" data-copy="start.cta">Get started ↗</a><a class="text-link" href="https://github.com/PStarH/unprompted" data-copy="start.source">View source ↗</a></div></div>
+      <div class="start-terminal"><div class="terminal-title"><span data-copy="start.run">Run it locally</span><button id="copy-command" aria-label="Copy installation and startup commands" data-copy="start.copy">Copy ⧉</button></div><pre><code id="install-command">git clone https://github.com/PStarH/unprompted.git
+cd unprompted
+npm ci --include=optional
+npm start</code></pre><p class="terminal-note" data-copy="start.node">Node.js 20+ · 22+ recommended</p><ol class="start-setup"><li data-copy="start.ready">Open the address shown after <strong>Ready</strong>.</li><li data-copy="start.model">Connect a model, with an API key if needed.</li><li data-copy="start.sourceStep">Choose a local folder or connect an account.</li></ol><a class="text-link setup-guide" href="docs/quickstart/" data-copy="start.guide">Setup guide ↗</a><p id="copy-status" class="copy-status" role="status"></p><span class="start-anchor" data-waypoint="start"></span></div>
+    </section>
+  </main>
+
+  <footer class="footer"><div class="footer-top"><a class="wordmark" href="./"><img src="assets/logo.svg" alt="" width="27" height="27">unprompted</a><p data-copy="footer.tagline">Work without the prompt.</p><div><a href="docs/" data-copy="footer.docs">Documentation ↗</a><a href="https://github.com/PStarH/unprompted" data-copy="footer.github">GitHub ↗</a></div></div><div class="footer-bottom"><span data-copy="footer.license">Open source · Apache-2.0</span><div><a href="privacy.html" data-copy="footer.privacy">Privacy</a><a href="terms.html" data-copy="footer.terms">Terms</a><a href="https://github.com/PStarH/unprompted/blob/main/LICENSE" data-copy="footer.licenseLink">License ↗</a></div><button class="motion-toggle" id="motion-toggle" aria-pressed="false">Pause animation</button></div></footer>
+
+  <div class="story-layer" aria-hidden="true"><svg class="story-silk"><path id="rail-track"></path><g id="silk-attachments"></g><path id="journey-thread"></path><path id="hanging-thread"></path><g id="silk-pegs"></g></svg><div id="spider" class="spider"><img src="assets/unprompted-spider.webp" alt="" width="424" height="344"><span class="carried-task">✓<span>Ready for review</span></span></div></div>
+  <noscript><style>.story-layer{display:none}.hero-world:after{content:"";position:absolute;inset:100px 20% auto;width:220px;height:180px;background:url(assets/unprompted-spider.webp) center/contain no-repeat}.menu-toggle{display:none}@media(max-width:767px){.header{height:auto;min-height:70px;flex-wrap:wrap;padding-top:18px}.header nav{display:flex;position:static;order:3;width:100%;padding:0 0 18px;border:0;gap:20px;font-size:11px}.header-cta{margin-left:auto}}</style></noscript>
+
+
+
+</body></html>
