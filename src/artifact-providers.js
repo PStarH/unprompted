@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { providerJSON } from './connectors/http.js';
-import { gmailMessageId } from './connectors/google.js';
+import { formatMailbox, gmailMessageId, parseMailbox } from './connectors/google.js';
 import { reminderListId } from './connectors/apple-reminders.js';
 
 export const ARTIFACT_ACTIONS = Object.freeze({
@@ -28,6 +28,17 @@ const splitText = (value, size) => {
 };
 const richText = content => [{ type: 'text', text: { content } }];
 const markerFor = key => `unprompted-artifact:${digest(key)}`;
+const decodeEncodedWords = value => String(value || '').replace(/=\?UTF-8\?B\?([^?]+)\?=(?:\s+(?==\?UTF-8\?B\?))?/gi, (_word, encoded) => {
+  try { return Buffer.from(encoded, 'base64').toString('utf8'); } catch { return _word; }
+});
+function mailboxHeader(value) {
+  try { return parseMailbox(value); } catch { return null; }
+}
+function sameMailbox(header, original) {
+  const left = mailboxHeader(decodeEncodedWords(header));
+  const right = mailboxHeader(original);
+  return Boolean(left && right && left.address.toLowerCase() === right.address.toLowerCase() && (left.displayName || '') === (right.displayName || ''));
+}
 
 export function artifactObservationText(connectorId, payload) {
   if (connectorId === 'apple_notes') return `${payload.title}\n${payload.body}\n${markerFor(payload.idempotencyKey)}`.replace(/\r\n?/g, '\n').trim();
@@ -82,19 +93,22 @@ export class ArtifactProvider {
     const { title, body, to, threadId, replyToMessageId, idempotencyKey } = payload;
     let result;
     if (this.connector.id === 'google') {
-      if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(to) || /[\r\n\0]/.test(title)) throw fail('Invalid draft recipient or subject.');
+      let recipient;
+      try { recipient = parseMailbox(to); } catch { throw fail('Invalid draft recipient or subject.'); }
+      if (/[\r\n\0]/.test(title)) throw fail('Invalid draft recipient or subject.');
       if (replyToMessageId && !/^<[^<>\s]+@[^<>\s]+>$/.test(replyToMessageId)) throw fail('The source message has no safe reply identity.');
       const subject = splitText(title, 30).map(part => `=?UTF-8?B?${Buffer.from(part).toString('base64')}?=`).join('\r\n ');
-      const raw = [`To: ${to}`, `Subject: ${subject}`, `Message-ID: ${gmailMessageId(idempotencyKey)}`,
+      const raw = [`To: ${formatMailbox(recipient)}`, `Subject: ${subject}`, `Message-ID: ${gmailMessageId(idempotencyKey)}`,
         ...(replyToMessageId ? [`In-Reply-To: ${replyToMessageId}`, `References: ${replyToMessageId}`] : []), 'MIME-Version: 1.0',
         'Content-Type: text/plain; charset="UTF-8"', 'Content-Transfer-Encoding: base64', '',
         Buffer.from(body).toString('base64').match(/.{1,76}/g).join('\r\n')].join('\r\n');
       result = await this.request('/gmail/v1/users/me/drafts', { method: 'POST', signal, beforeDispatch,
         body: { message: { raw: Buffer.from(raw).toString('base64url'), ...(threadId ? { threadId } : {}) } } });
     } else if (this.connector.id === 'microsoft') {
-      if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(to)) throw fail('Invalid draft recipient.');
+      let recipient;
+      try { recipient = parseMailbox(to); } catch { throw fail('Invalid draft recipient.'); }
       result = await this.request('/v1.0/me/messages', { method: 'POST', signal, beforeDispatch, body: {
-        subject: title, body: { contentType: 'Text', content: body }, toRecipients: [{ emailAddress: { address: to } }],
+        subject: title, body: { contentType: 'Text', content: body }, toRecipients: [{ emailAddress: { address: recipient.address, ...(recipient.displayName ? { name: recipient.displayName } : {}) } }],
         singleValueExtendedProperties: [{ id: graphProperty, value: markerFor(idempotencyKey) }]
       } });
     } else if (this.connector.id === 'notion') {
@@ -146,16 +160,19 @@ export class ArtifactProvider {
         const header = name => headers.replace(/\r\n[ \t]+/g, ' ').split('\r\n').find(line => line.toLowerCase().startsWith(`${name}:`))?.slice(name.length + 1).trim();
         const subject = (header('subject') || '').replace(/=\?UTF-8\?B\?([^?]+)\?=(?:\s+(?==\?UTF-8\?B\?))?/gi, (_word, encoded) => Buffer.from(encoded, 'base64').toString('utf8'));
         valid = draft.id === receiptId && draft.message?.labelIds?.includes('DRAFT') && !draft.message.labelIds.includes('SENT')
-          && header('message-id') === gmailMessageId(key) && header('to') === payload.to && subject === payload.title
+          && header('message-id') === gmailMessageId(key) && sameMailbox(header('to'), payload.to) && subject === payload.title
           && (!payload.threadId || draft.message.threadId === payload.threadId)
           && (!payload.replyToMessageId || header('in-reply-to') === payload.replyToMessageId && header('references') === payload.replyToMessageId)
           && Buffer.from(content.join('\r\n\r\n'), 'base64').toString('utf8') === payload.body;
       } else if (this.connector.id === 'microsoft') {
         const query = new URLSearchParams({ '$expand': `singleValueExtendedProperties($filter=id eq '${graphProperty}')` });
         const draft = await this.request(`/v1.0/me/messages/${encodeURIComponent(receiptId)}?${query}`, { signal });
+        const expected = mailboxHeader(payload.to);
+        const recipient = draft.toRecipients?.[0]?.emailAddress;
         valid = draft.id === receiptId && draft.isDraft === true && draft.subject === payload.title && draft.body?.content === payload.body
           && String(draft.body.contentType).toLowerCase() === 'text' && draft.toRecipients?.length === 1
-          && draft.toRecipients[0].emailAddress?.address?.toLowerCase() === payload.to.toLowerCase()
+          && recipient?.address?.toLowerCase() === expected?.address?.toLowerCase()
+          && (recipient?.name || '') === (expected?.displayName || '')
           && draft.singleValueExtendedProperties?.some(property => property.id === graphProperty && property.value === markerFor(key));
       } else if (this.connector.id === 'notion') {
         const page = await this.request(`/v1/pages/${encodeURIComponent(receiptId)}`, { signal });

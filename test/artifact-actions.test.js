@@ -15,6 +15,7 @@ import { OpenAiCompatibleReasoner, PiReasoner } from '../src/reasoning.js';
 import { piSupported } from '../src/pi-runtime.js';
 import { LocalSetupStore } from '../src/setup.js';
 import { reminderListId } from '../src/connectors/apple-reminders.js';
+import { parseMailbox } from '../src/connectors/google.js';
 
 const parent = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const json = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
@@ -439,4 +440,196 @@ test('undo leaves an artifact the user changed and refuses targets without autom
   request(notes); await notes.engine.whenSettled();
   const note = notes.runtime.tasks.get(notes.taskId).artifactRequests[0];
   await assert.rejects(notes.runtime.artifacts.undo(notes.taskId, note.id), error => error.code === 'UNDO_UNSUPPORTED');
+});
+
+test('mail drafts accept a display name and reject header injection', async t => {
+  for (const [id, recipient, header] of [
+    ['google', 'Alex <alex@example.com>', /^To: Alex <alex@example.com>/m],
+    ['google', '"Alex Chen" <alex@example.com>', /^To: Alex Chen <alex@example.com>/m],
+    ['google', 'Ann; <alex@example.com>', /^To: "Ann;" <alex@example.com>/m],
+    ['google', '=?UTF-8?B?hi?= <alex@example.com>', /^To: =\?UTF-8\?B\?/m],
+    ['google', '陈 <alex@example.com>', null],
+    ['microsoft', 'Ann: Bob <alex@example.com>', null],
+    ['microsoft', '陈 <alex@example.com>', null]
+  ]) {
+    const context = await fixture(t, id);
+    context.store.mutate(state => { state.tasks[context.taskId].draft.to = recipient; });
+    const task = context.runtime.tasks.get(context.taskId);
+    context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id }, { actor: 'user', reviewToken: draftReviewToken(task) });
+    await context.engine.whenSettled();
+    const artifact = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+    assert.equal(artifact.status, 'verified', `${id} ${recipient}`);
+    if (id === 'google') {
+      const raw = Buffer.from(context.connection.writes.at(-1).body.message.raw, 'base64url').toString('utf8');
+      if (header) assert.match(raw, header);
+      else assert.match(raw, /=\?UTF-8\?B\?/);
+      assert.doesNotMatch(raw, /\r\nBcc:/);
+    } else {
+      const posted = context.connection.writes.at(-1).body.toRecipients[0].emailAddress;
+      assert.equal(posted.address, 'alex@example.com');
+      assert.equal(posted.name, parseMailbox(recipient).displayName);
+    }
+  }
+  const context = await fixture(t, 'google');
+  const provider = new ArtifactProvider(context.connection, 'drafts');
+  await assert.rejects(provider.create({ title: 'Cedar', body: 'Hello', to: 'Alex <alex@example.com>\r\nBcc: evil@example.com', idempotencyKey: 'inject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
+  await assert.rejects(provider.create({ title: 'Cedar\nBcc: evil@example.com', body: 'Hello', to: 'alex@example.com', idempotencyKey: 'inject-subject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a new destination grant does not cancel a queued non-mail artifact', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  const version = Number(context.runtime.database.get('context_version'));
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  assert.equal(Number(context.runtime.database.get('context_version')), version + 1);
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.some(item => item.status === 'verified'), true, JSON.stringify(requests));
+  assert.equal(context.connection.writes.length, 1);
+});
+
+test('a changed reply is not retried as an approved draft', async t => {
+  const context = await fixture(t, 'google');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  const approved = task.draft.body;
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  context.store.mutate(state => { state.tasks[context.taskId].draft.body = `${approved}\nUnapproved edit`; });
+  await context.runtime.artifacts.createGrant({ connectorId: 'google', targetId: 'drafts', project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'blocked');
+  assert.match(requests[0].error, /Review it before trying again/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a context retry happens once and does not chain', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseFirst;
+  let releaseSecond;
+  let markStarted;
+  let markSecond;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const second = new Promise(resolve => { markSecond = resolve; });
+  let phase = 'first';
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (phase === 'first') { phase = 'between'; markStarted(); await new Promise(resolve => { releaseFirst = resolve; }); phase = 'retry'; }
+    else if (phase === 'retry') { phase = 'second-wait'; markSecond(); await new Promise(resolve => { releaseSecond = resolve; }); phase = 'done'; }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  releaseFirst();
+  await second;
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Other' }, { confirmed: true });
+  releaseSecond();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2);
+  assert.equal(requests.every(item => item.status === 'blocked'), true, JSON.stringify(requests));
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('an automatic draft retry stays non-explicit', async t => {
+  const context = await fixture(t, 'google');
+  const approvals = [];
+  const authorize = context.engine.policy.authorize.bind(context.engine.policy);
+  context.engine.policy.authorize = input => {
+    if (input.actionClass === 'execute_external') approvals.push(input.approval?.permission);
+    return authorize(input);
+  };
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  await started;
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].explicit, false);
+  await context.runtime.artifacts.createGrant({ connectorId: 'google', targetId: 'drafts', project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2, JSON.stringify(requests));
+  assert.equal(requests[0].status, 'blocked');
+  assert.equal(requests[1].explicit, false);
+  assert.equal(requests[1].status, 'verified');
+  assert.deepEqual([...new Set(approvals)], ['pre_authorized']);
+  assert.equal(context.connection.writes.length, 1);
+});
+
+test('a changed review token blocks a non-mail retry', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  const approved = draftReviewToken(task);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: approved });
+  await started;
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].reviewToken, approved);
+  context.store.mutate(state => { state.tasks[context.taskId].draft.body = `${state.tasks[context.taskId].draft.body}\nUnreviewed edit`; });
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'blocked');
+  assert.equal(requests[0].reviewToken, approved);
+  assert.match(requests[0].error, /Review it before trying again/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a permission refresh retries a draft that was cancelled before dispatch', async t => {
+  const context = await fixture(t, 'google');
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  await context.engine.whenSettled();
+  const task = context.runtime.tasks.get(context.taskId);
+  assert.equal(task.artifactRequests[0].status, 'verified');
+  context.store.mutate(state => { state.tasks[context.taskId].artifactRequests[0].status = 'blocked'; });
+  context.store.db.prepare("UPDATE tool_executions SET status='cancelled', last_error_class='confirmed_no_effect' WHERE idempotency_key=?").run(task.artifactRequests[0].key);
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests.length, 1, 'an ordinary reassessment does not repeat a blocked draft');
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId), { retryInterrupted: true });
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].status, 'verified');
 });

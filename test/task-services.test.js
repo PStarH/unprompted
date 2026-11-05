@@ -7,7 +7,7 @@ import { JsonStore } from '../src/store.js';
 import { WorkEngine } from '../src/engine.js';
 import { NullReasoner } from '../src/reasoning.js';
 import { TaskServices } from '../src/task-services.js';
-import { GoogleDocsWriteProvider } from '../src/document-delivery.js';
+import { applyTextChanges, GoogleDocsWriteProvider } from '../src/document-delivery.js';
 import { aggregateTaskDependencies, projectTaskManagement } from '../src/task-management.js';
 import { computeProductMetrics } from '../src/metrics.js';
 import { requestRevisionSignature } from '../src/commitments.js';
@@ -272,6 +272,62 @@ test('the Google Docs fake uses documents.batchUpdate writeControl and verifies 
   assert.equal(applied.content, 'Heading\nNew result: 12.5%\n');
   assert.equal(applied.revisionId, 'revision-2');
   assert.equal(applied.readbackVerified, true);
+});
+
+test('two Google Docs insertions at the same position keep source order and verify on readback', async () => {
+  let content = 'Heading\nBody\n';
+  let revision = 'revision-1';
+  let batchBody = null;
+  const connector = { auth: { configured: () => true, headers: async () => ({ authorization: 'Bearer test' }) } };
+  const fetchImpl = async (_url, options = {}) => {
+    if (options.method === 'POST') {
+      batchBody = JSON.parse(options.body);
+      for (const request of batchBody.requests) {
+        const offset = request.insertText.location.index - 1;
+        content = content.slice(0, offset) + request.insertText.text + content.slice(offset);
+      }
+      revision = 'revision-2';
+    }
+    const document = {
+      documentId: 'google-doc-1', title: 'Proposal', revisionId: revision,
+      body: { content: [{ startIndex: 1, endIndex: content.length + 1, paragraph: { elements: [{ textRun: { content } }] } }] }
+    };
+    return { ok: true, status: 200, text: async () => JSON.stringify(document) };
+  };
+  const provider = new GoogleDocsWriteProvider({ connector, enabled: true, shadow: false, fetchImpl });
+  const document = { id: 'google-doc-1', externalId: 'google-doc-1', source: 'google', available: true, content: 'Heading\nBody\n', version: 4 };
+  const changes = [
+    { type: 'append', text: 'First result: 12.5%' },
+    { type: 'append', text: 'Second result: 8%' },
+    { type: 'insert_after', anchor: 'Heading', text: 'Alpha note' },
+    { type: 'insert_after', anchor: 'Heading', text: 'Beta note' }
+  ];
+  const base = await provider.prepareBase(document);
+  const applied = await provider.apply({ document, requiredRevisionId: base.revisionId, changes });
+  const expected = applyTextChanges(document.content, changes);
+  assert.equal(batchBody.requests.length, changes.length);
+  assert.ok(batchBody.requests[1].insertText.location.index > batchBody.requests[0].insertText.location.index, 'a later append uses the index after the earlier insert');
+  assert.equal(applied.content, expected);
+  assert.ok(applied.content.indexOf('First result: 12.5%') < applied.content.indexOf('Second result: 8%'));
+  assert.ok(applied.content.includes('Alpha note') && applied.content.includes('Beta note'));
+  assert.equal(applied.readbackVerified, true);
+});
+
+test('a Google Docs readback mismatch names the table and inline-object index caveat', async () => {
+  const connector = { auth: { configured: () => true, headers: async () => ({ authorization: 'Bearer test' }) } };
+  const fetchImpl = async () => {
+    const content = 'Heading\n';
+    const document = {
+      documentId: 'google-doc-1', title: 'Proposal', revisionId: 'revision-1',
+      body: { content: [{ startIndex: 1, endIndex: content.length + 1, paragraph: { elements: [{ textRun: { content } }] } }] }
+    };
+    return { ok: true, status: 200, text: async () => JSON.stringify(document) };
+  };
+  const provider = new GoogleDocsWriteProvider({ connector, enabled: true, shadow: false, fetchImpl });
+  const document = { id: 'google-doc-1', externalId: 'google-doc-1', source: 'google', available: true, content: 'Heading\n', version: 4 };
+  await assert.rejects(provider.apply({
+    document, requiredRevisionId: 'revision-1', changes: [{ type: 'append', text: 'Missing from readback' }]
+  }), /tables and inline objects/);
 });
 
 test('the Google Docs writer refuses a revision mismatch before sending a write', async () => {

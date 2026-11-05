@@ -5,6 +5,13 @@ import { startFixtureServer } from '../browser/fixture-server.mjs';
 export async function startGoogleFixture({ provisioned = true, directory = null, root = null } = {}) {
   const controls = { apiDisabled: false, rejectTask: false, rejectModel: false, empty: false, identityVerified: true, searchPaged: false, extraGrantedScopes: [] };
   const calls = [];
+  const docText = 'Cedar proposal\nSample size: 1200\nConclusion: Proceed with the rollout.';
+  const documents = new Map();
+  const drafts = new Map();
+  const documentFor = id => {
+    if (!documents.has(id)) documents.set(id, { content: docText, revisionId: 'rev-1' });
+    return documents.get(id);
+  };
   const requests = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://fixture.local');
@@ -14,9 +21,10 @@ export async function startGoogleFixture({ provisioned = true, directory = null,
       const json = (value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
       const account = req.headers.authorization?.includes('reader-b') ? 'reader-b' : 'reader-a';
       if (url.pathname === '/google/oauth2.googleapis.com/token') {
+        if (controls.holdToken) await controls.holdToken;
         const fields = new URLSearchParams(body);
         const id = fields.get('code') === 'reader-b' || fields.get('refresh_token') === 'PRIVATE_REFRESH_reader-b' ? 'reader-b' : 'reader-a';
-        return json({ access_token: `PRIVATE_ACCESS_${id}`, refresh_token: `PRIVATE_REFRESH_${id}`, expires_in: 3600,
+        return json({ access_token: `PRIVATE_ACCESS_${id}`, refresh_token: `PRIVATE_REFRESH_${id}`, expires_in: controls.expiresIn ?? 3600,
           scope: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/documents', ...controls.extraGrantedScopes].join(' ') });
       }
       if (url.pathname === '/google/openidconnect.googleapis.com/v1/userinfo') return json({ sub: account, email: `${account}@example.test`, email_verified: controls.identityVerified });
@@ -48,7 +56,34 @@ export async function startGoogleFixture({ provisioned = true, directory = null,
         id: `doc-${account}`, name: 'Cedar proposal', mimeType: 'application/vnd.google-apps.document', modifiedTime: new Date().toISOString(), version: '1'
       }] });
       if (url.pathname.endsWith('/export')) {
-        res.writeHead(200, { 'content-type': 'text/plain' }); res.end('Cedar proposal\nSample size: 1200\nConclusion: Proceed with the rollout.'); return;
+        const id = decodeURIComponent(url.pathname.split('/').at(-2));
+        res.writeHead(200, { 'content-type': 'text/plain' }); res.end(documentFor(id).content); return;
+      }
+      if (url.pathname.includes('/gmail/v1/users/me/drafts')) {
+        const draftId = decodeURIComponent(url.pathname.split('/').at(-1));
+        if (req.method === 'POST' && draftId === 'drafts') {
+          const message = JSON.parse(body).message;
+          const id = `draft-${drafts.size + 1}`;
+          drafts.set(id, message);
+          return json({ id, message: { id: `msg-${id}`, threadId: message.threadId || null, labelIds: ['DRAFT'] } });
+        }
+        const message = drafts.get(draftId);
+        if (!message) return json({ error: 'draft missing' }, 404);
+        return json({ id: draftId, message: { ...message, id: `msg-${draftId}`, labelIds: ['DRAFT'] } });
+      }
+      if (url.pathname.includes('/v1/documents/')) {
+        const id = decodeURIComponent(url.pathname.split('/').pop().replace(/:batchUpdate$/, ''));
+        const document = documentFor(id);
+        if (req.method === 'POST' && url.pathname.endsWith(':batchUpdate')) {
+          const request = JSON.parse(body);
+          if (request.writeControl?.requiredRevisionId !== document.revisionId) return json({ error: 'revision conflict' }, 400);
+          for (const change of request.requests) {
+            const offset = change.insertText.location.index - 1;
+            document.content = document.content.slice(0, offset) + change.insertText.text + document.content.slice(offset);
+          }
+          document.revisionId = `rev-${Number(document.revisionId.slice(4)) + 1}`;
+        }
+        return json({ documentId: id, title: 'Cedar proposal', revisionId: document.revisionId, body: { content: [{ startIndex: 1, endIndex: document.content.length + 1, paragraph: { elements: [{ textRun: { content: document.content } }] } }] } });
       }
       return json({ error: 'Unscripted fixture request' }, 404);
     } catch { res.writeHead(500); res.end(); }

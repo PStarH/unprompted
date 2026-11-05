@@ -132,6 +132,15 @@ function progressSignature(task) {
   });
 }
 
+function samePreparedReply(previous, next) {
+  if (!previous || previous.userEdited || !next) return false;
+  const keys = ['to', 'subject', 'body', 'documentId', 'documentVersion', 'documentUrl', 'requestVersion', 'providerKind', 'live', 'canSend', 'simulationOnly'];
+  return keys.every(key => previous[key] === next[key])
+    && JSON.stringify(previous.claims || null) === JSON.stringify(next.claims || null)
+    && JSON.stringify(previous.withheldClaims || null) === JSON.stringify(next.withheldClaims || null)
+    && JSON.stringify(previous.satisfiedCriteria || null) === JSON.stringify(next.satisfiedCriteria || null);
+}
+
 export function resolveDocumentLink(document, baseUrl) {
   if (document?.url && /^https?:\/\//i.test(document.url)) return document.url;
   if (document?.externalId && /^https?:\/\//i.test(document.externalId)) return document.externalId;
@@ -1790,7 +1799,10 @@ export class WorkEngine {
           target.status = currentDraft ? 'ready_for_approval' : 'waiting_for_information';
           target.reason = currentDraft ? 'Your edited draft is preserved for your review.' : 'Your edited draft is preserved; review the changed evidence before updating it.';
         } else {
-          target.draft = this.#buildDraft(target, document, criteria, freshness, claims);
+          const nextDraft = this.#buildDraft(target, document, criteria, freshness, claims);
+          // Reassessment stamps a new preparedAt even when the reply is unchanged.
+          // Replacing the object would cancel a draft already queued for a destination.
+          target.draft = samePreparedReply(target.draft, nextDraft) ? target.draft : nextDraft;
           target.status = 'ready_for_approval';
           record(current, 'preparation',
             `Satisfied all ${criteria.length} criterion/criteria in ${document.title} with direct evidence; prepared a reply for approval. Nothing was sent.`,

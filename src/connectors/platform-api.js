@@ -18,7 +18,7 @@ export function platformRequest(connectorId, input) {
   const api = PLATFORM_APIS[connectorId];
   if (!api || !object(input) || Object.keys(input).some(key => !['method', 'path', 'origin', 'query', 'headers', 'body', 'bodyEncoding', 'responseType'].includes(key))) throw fail('Choose a connected platform API and supported request fields.');
   const method = String(input.method || 'GET').toUpperCase();
-  if (!API_METHODS.includes(method) || typeof input.path !== 'string' || !input.path.startsWith('/') || input.path.startsWith('//') || input.path.length > 8192 || /[\\\u0000-\u0020\u007f]/.test(input.path)) throw fail('Use a valid API method and absolute API path.');
+  if (!API_METHODS.includes(method) || typeof input.path !== 'string' || !input.path.startsWith('/') || input.path.startsWith('//') || input.path.length > 8192 || /[\\\u0000-\u0020\u007f]/.test(input.path) || /%(?:2f|2e)/i.test(input.path)) throw fail('Use a valid API method and absolute API path. Encoded slashes or dots are not allowed.');
   if (connectorId === 'apple_reminders') {
     if (input.origin != null || input.query != null || input.headers != null || input.bodyEncoding != null || input.responseType != null
       || !['GET', 'POST', 'PATCH', 'DELETE'].includes(method)

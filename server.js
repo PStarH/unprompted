@@ -12,7 +12,7 @@ import { demoMemorySpace, demoMemoryDetail } from './src/demo-memory-space.js';
 import { buildRuntime } from './src/connectors/index.js';
 import { ConnectorSync } from './src/connectors/sync.js';
 import { createReasoner } from './src/reasoning.js';
-import { PermissionDeniedError } from './src/permissions.js';
+import { PermissionDeniedError, grantInvestigationDecision, shadowAfterFailedSourceRefresh } from './src/permissions.js';
 import { normaliseDateLocale } from './src/requests.js';
 import { GoogleAuth } from './src/connectors/google.js';
 import { GoogleDocsWriteProvider } from './src/document-delivery.js';
@@ -31,7 +31,7 @@ import { nativeSnapshot } from './src/connectors/local-snapshot.js';
 import { mailScopeRemoval } from './src/connectors/apple-mail.js';
 import { bindConnectionAccount } from './src/external-work.js';
 import { readRegularFile } from './src/local-files.js';
-import { McpManager, McpConfigStore } from './src/mcp.js';
+import { McpManager, McpConfigStore, mcpWritesWidened } from './src/mcp.js';
 import { McpOAuthBroker } from './src/mcp-oauth.js';
 import { SqliteStore } from './src/durable/store.js';
 import { DurableRuntime } from './src/durable/runtime.js';
@@ -390,15 +390,36 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
   } finally { workspaceChanging = false; }
 }
 
-async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null } = {}) {
+let sourceRefreshGeneration = 0;
+
+function failClosedForRefresh() {
+  engine.policy.shadow = true;
+  if (engine.taskServices?.policy) engine.taskServices.policy.shadow = true;
+  if (documentProvider) documentProvider.shadow = true;
+  if (googleConnector) googleConnector.shadow = true;
+}
+
+async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null, reassess = true, widening = false } = {}) {
   if (workspaceChanging || modelSetupBusy) throw new Error('A connection update is already running.');
   workspaceChanging = true;
   if (durableRuntime) durableRuntime.suspended = true;
+  const heldPolicy = engine.policy;
+  const previousShadow = heldPolicy.shadow;
+  const previousTaskShadow = engine.taskServices?.policy?.shadow;
+  const previousDocShadow = documentProvider?.shadow;
+  const previousConnectorShadow = googleConnector?.shadow;
+  let installed = false;
   try {
-    monitoring.stop(); simulation.stop(); engine.policy.shadow = true;
+    sourceRefreshGeneration += 1;
+    monitoring.stop(); simulation.stop();
+    // Disconnects and scope removals must refuse new writes before the drain.
+    // Only a widening grant may let an already authorized action finish first.
+    if (!widening) failClosedForRefresh();
     await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
     await monitoring.whenIdle(); await engine.whenSettled();
+    await durableRuntime?.whenIdle();
     if (shutdownPromise) throw new Error('The application is shutting down.');
+    if (widening) failClosedForRefresh();
     // Remove revoked local evidence before rebuilding the active sources.
     for (const id of NATIVE_SOURCE_IDS) {
       const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
@@ -456,20 +477,60 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     googleConnector = runtime.connectors.find(connector => connector.id === 'google') || null;
     documentProvider = googleConnector ? new GoogleDocsWriteProvider({ connector: googleConnector,
       enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: runtime.shadow }) : null;
+    // Task services captured the policy object at startup. Replacing only
+    // engine.policy left Google Docs writes on the drained read-only policy.
+    runtime.policy.temporaryAuthorization = heldPolicy.temporaryAuthorization;
     engine.provider = runtime.provider; engine.policy = runtime.policy; engine.mode = runtime.mode;
-    engine.documentProvider = documentProvider; engine.taskServices.documentProvider = documentProvider;
+    engine.documentProvider = documentProvider;
+    engine.taskServices.policy = runtime.policy;
+    engine.taskServices.provider = runtime.provider;
+    engine.taskServices.mode = runtime.mode;
+    engine.taskServices.documentProvider = documentProvider;
+    installed = true;
     runSimulation = false;
     sync = new ConnectorSync({ connectors: runtime.connectors, cursors: runtime.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
     monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
     store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
-    for (const task of Object.values(store.state.tasks)) if (!task.action && !['completed', 'cancelled'].includes(task.status)) engine.assess(task.id, null, { force: true, allowAutomation: false });
+    // A permission refresh must not rebuild a reply that is already prepared.
+    // That new object cancels the draft request queued for the new destination.
+    if (reassess) for (const task of Object.values(store.state.tasks)) if (!task.action && !['completed', 'cancelled'].includes(task.status)) engine.assess(task.id, null, { force: true, allowAutomation: false });
     engine.changed();
     if (runtime.live) {
       await monitoring.setSettings({ enabled: observe === true });
       if (!observe && initialRead) void monitoring.runNow();
     } else await monitoring.setSettings({ enabled: false });
     return publicSetupStatus();
+  } catch (error) {
+    if (!installed) {
+      // A narrowing refresh already failed closed. Do not put the previous
+      // writable flags back. A widening grant may restore the flags it had.
+      const shadow = shadowAfterFailedSourceRefresh({ widening, previousShadow });
+      heldPolicy.shadow = shadow;
+      if (engine.taskServices?.policy) engine.taskServices.policy.shadow = widening ? previousTaskShadow : true;
+      if (documentProvider) documentProvider.shadow = widening ? previousDocShadow : true;
+      if (googleConnector) googleConnector.shadow = widening ? previousConnectorShadow : true;
+    }
+    throw error;
   } finally { workspaceChanging = false; if (durableRuntime) { durableRuntime.suspended = false; durableRuntime.kick(); } }
+}
+
+function draftStillDispatching() {
+  return Object.values(store.state.tasks).some(task => (task.artifactRequests || []).some(request => request.family === 'email.draft' && (request.status === 'queued' || request.status === 'executing')));
+}
+
+function investigateAfterGrant() {
+  const generation = sourceRefreshGeneration;
+  const wait = async (round = 0) => {
+    let timer;
+    const bounded = new Promise(resolve => { timer = setTimeout(resolve, 10_000); timer.unref?.(); });
+    try { await Promise.race([durableRuntime.whenIdle(), bounded]); }
+    finally { clearTimeout(timer); }
+    if (generation !== sourceRefreshGeneration || shutdownPromise) return;
+    const decision = grantInvestigationDecision({ draftExecuting: draftStillDispatching(), round });
+    if (decision === 'defer') return wait(round + 1);
+    if (decision === 'investigate') engine.investigateWithTools();
+  };
+  void wait().catch(() => {});
 }
 
 function disconnectGoogleForThisRun() {
@@ -727,12 +788,19 @@ async function handleHttpRequest(req, res) {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid artifact request.' });
         if (url.pathname === '/api/artifact-grants') {
           if (process.env.UNPROMPTED_SHADOW_MODE === 'true') return json(res, 403, { error: 'The launch environment explicitly requires read-only mode.', code: 'SHADOW_MODE' });
-          const grant = await durableRuntime.artifacts.createGrant(body, { actor: 'user', confirmed: body.confirmed === true });
-          localSetup.setArtifactWrites(true);
-          await applyConnectedSources({ request: req, initialRead: false });
-          engine.investigateWithTools();
-          for (const task of Object.values(store.state.tasks)) durableRuntime.artifacts.schedulePrepared(task);
-          return json(res, 200, { grant, setup: publicSetupStatus(), state: engine.publicState() });
+          if (durableRuntime) durableRuntime.suspended = true;
+          try {
+            await durableRuntime.whenIdle();
+            await engine.whenSettled();
+            const grant = await durableRuntime.artifacts.createGrant(body, { actor: 'user', confirmed: body.confirmed === true });
+            localSetup.setArtifactWrites(true);
+            await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: true });
+            for (const task of Object.values(store.state.tasks)) durableRuntime.artifacts.schedulePrepared(task, { retryInterrupted: true });
+            // The response does not wait for Gmail. Investigation starts after
+            // the draft dispatch, and a later refresh cancels a stale one.
+            investigateAfterGrant();
+            return json(res, 200, { grant, setup: publicSetupStatus(), state: engine.publicState() });
+          } finally { if (durableRuntime?.suspended) { durableRuntime.suspended = false; durableRuntime.kick(); } }
         }
         const revoke = url.pathname.match(/^\/api\/artifact-grants\/([^/]+)\/revoke$/);
         if (revoke) {
@@ -845,11 +913,16 @@ async function handleHttpRequest(req, res) {
         try {
           if (url.pathname === '/api/connector-grants') {
             if (process.env.UNPROMPTED_SHADOW_MODE === 'true') return json(res, 403, { error: 'The launch environment requires read-only mode.' });
-            const grant = durableRuntime.connectorActions.createGrant(body, { actor: 'user' });
-            localSetup.setArtifactWrites(true);
-            await applyConnectedSources({ request: req, initialRead: false });
-            engine.investigateWithTools();
-            return json(res, 200, { grant, setup: publicSetupStatus() });
+            if (durableRuntime) durableRuntime.suspended = true;
+            try {
+              await durableRuntime.whenIdle();
+              await engine.whenSettled();
+              const grant = durableRuntime.connectorActions.createGrant(body, { actor: 'user' });
+              localSetup.setArtifactWrites(true);
+              await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: true });
+              engine.investigateWithTools();
+              return json(res, 200, { grant, setup: publicSetupStatus() });
+            } finally { if (durableRuntime?.suspended) { durableRuntime.suspended = false; durableRuntime.kick(); } }
           }
           const revoke = url.pathname.match(/^\/api\/connector-grants\/([^/]+)\/revoke$/);
           if (revoke) { durableRuntime.connectorActions.revoke(decodeURIComponent(revoke[1])); return json(res, 200, { setup: publicSetupStatus() }); }
@@ -877,11 +950,18 @@ async function handleHttpRequest(req, res) {
       if (url.pathname === '/api/mcp/import' || /^\/api\/mcp\/servers\/[^/]+$/.test(url.pathname)) {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid MCP request body.' });
         if (demoMode) return json(res, 409, { error: 'Open your persistent workspace to connect MCP services.', code: 'DISPOSABLE_DEMO' });
+        const serverId = url.pathname === '/api/mcp/import' ? null : decodeURIComponent(url.pathname.split('/').pop());
+        const previousMcp = serverId ? mcp.configs[serverId] : null;
         const result = url.pathname === '/api/mcp/import'
           ? await mcp.import(body.config, { allowDeclaredRead: body.allowDeclaredRead === true })
-          : await mcp.update(decodeURIComponent(url.pathname.split('/').pop()), body);
-        if (Array.isArray(body.writeTools) && body.writeTools.length) {
-          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false }); }
+          : await mcp.update(serverId, body);
+        const writesTouched = Array.isArray(body.writeTools) || body.enabled != null;
+        if (serverId && writesTouched) {
+          const widening = mcpWritesWidened(previousMcp, body);
+          if (widening && process.env.UNPROMPTED_SHADOW_MODE !== 'true') localSetup.setArtifactWrites(true);
+          if (widening || body.enabled === false || Array.isArray(body.writeTools)) {
+            await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: widening && process.env.UNPROMPTED_SHADOW_MODE !== 'true' });
+          }
         }
         engine.investigateWithTools();
         return json(res, 200, { mcp: result, setup: publicSetupStatus() });

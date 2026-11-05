@@ -94,19 +94,41 @@ function assertNoHeaderBreak(value, label) {
   }
 }
 
+const DISPLAY_SPECIAL = /[()<>[\]:;@\\,."]/;
+
+function unquoteDisplayName(quoted) {
+  if (!quoted.startsWith('"') || !quoted.endsWith('"') || quoted.length < 2) {
+    throw new ConnectorError('The recipient display name is not a valid quoted string.', { connectorId: 'google' });
+  }
+  let name = '';
+  for (let index = 1; index < quoted.length - 1; index += 1) {
+    const character = quoted[index];
+    if (character === '\\') {
+      const next = quoted[index + 1];
+      if (next == null) throw new ConnectorError('The recipient display name has a dangling escape.', { connectorId: 'google' });
+      name += next;
+      index += 1;
+      continue;
+    }
+    if (character === '"') throw new ConnectorError('The recipient display name has an unescaped quote.', { connectorId: 'google' });
+    name += character;
+  }
+  return name.trim() || null;
+}
+
 /** Parse exactly one mailbox: `address` or `Display Name <address>`. */
-function parseMailbox(value) {
+export function parseMailbox(value) {
   const raw = String(value ?? '').trim();
   if (!raw) throw new ConnectorError('A recipient address is required.', { connectorId: 'google' });
   assertNoHeaderBreak(raw, 'The recipient address');
-  const angled = raw.match(/^(?:"([^"]*)"|([^<>"]*?))?\s*<([^<>]+)>\s*$/);
   let displayName = null;
-  let address;
-  if (angled) {
-    displayName = (angled[1] ?? angled[2] ?? '').trim() || null;
-    address = angled[3].trim();
-  } else {
-    address = raw;
+  let address = raw;
+  if (raw.endsWith('>') && raw.includes('<')) {
+    const open = raw.lastIndexOf('<');
+    const namePart = raw.slice(0, open).trim();
+    address = raw.slice(open + 1, -1).trim();
+    if (namePart.startsWith('"')) displayName = unquoteDisplayName(namePart);
+    else if (namePart) displayName = namePart;
   }
   if (!MAILBOX.test(address)) {
     throw new ConnectorError(`The recipient "${address}" is not a single valid email address.`, { connectorId: 'google' });
@@ -120,9 +142,9 @@ function parseMailbox(value) {
  * Long values are split into encoded words no larger than `maxBytes` each and
  * folded on continuation lines, so a subject can never smuggle a header.
  */
-function encodeHeaderValue(value, { maxBytes = 45 } = {}) {
+function encodeHeaderValue(value, { maxBytes = 45, force = false } = {}) {
   const text = String(value ?? '');
-  if (/^[\x20-\x7e]*$/.test(text)) return text;
+  if (!force && /^[\x20-\x7e]*$/.test(text)) return text;
   const words = [];
   let chunk = '';
   for (const character of text) {
@@ -136,13 +158,15 @@ function encodeHeaderValue(value, { maxBytes = 45 } = {}) {
   return words.join('\r\n ');
 }
 
-function formatMailbox({ address, displayName }) {
+export function formatMailbox({ address, displayName }) {
   if (!displayName) return address;
+  assertNoHeaderBreak(displayName, 'The recipient display name');
   const ascii = /^[\x20-\x7e]*$/.test(displayName);
-  const rendered = ascii
-    ? (displayName.includes(',') ? `"${displayName.replace(/(["\\])/g, '\\$1')}"` : displayName)
-    : encodeHeaderValue(displayName);
-  return `${rendered} <${address}>`;
+  // A name that looks like an encoded-word must not be copied raw: the
+  // receiver would decode it into a different display name.
+  if (!ascii || displayName.startsWith('=?')) return `${encodeHeaderValue(displayName, { force: true })} <${address}>`;
+  if (DISPLAY_SPECIAL.test(displayName)) return `"${displayName.replace(/(["\\])/g, '\\$&')}" <${address}>`;
+  return `${displayName} <${address}>`;
 }
 
 const normaliseBody = value => String(value ?? '').replace(/\r\n|\r|\n/g, '\r\n');
@@ -1138,4 +1162,4 @@ export function googleConfigFromEnv(env = process.env) {
   };
 }
 
-export const googleApi = { GoogleAuth, GoogleWorkspaceConnector, googleConfigFromEnv };
+export const googleApi = { GoogleAuth, GoogleWorkspaceConnector, googleConfigFromEnv, parseMailbox, formatMailbox };

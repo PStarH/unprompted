@@ -104,6 +104,17 @@ test('late token refresh cannot dispatch after account revocation', async () => 
   assert.equal(dispatches, 0);
 });
 
+test('encoded slashes and dots cannot widen a platform path prefix', async t => {
+  assert.throws(() => platformRequest('github', { method: 'PATCH', path: '/repos/owner/repo%2Fadmin' }), /Encoded slashes or dots/);
+  assert.throws(() => platformRequest('github', { method: 'GET', path: '/repos/owner/%2e%2E/other' }), /Encoded slashes or dots/);
+  const context = await fixture(t);
+  context.runtime.connectorActions.createGrant({ connectorId: 'github', pathPrefix: '/repos/owner', methods: ['PATCH'], confirmed: true });
+  const grant = context.runtime.connectorActions.grants().find(item => item.pathPrefix === '/repos/owner');
+  const task = context.runtime.tasks.get(context.taskId);
+  assert.equal(context.runtime.connectorActions.covers(grant, task, { path: '/repos/owner/repo%2Fadmin', method: 'PATCH', connectorId: 'github' }, 'account-1'), false);
+  assert.equal(context.runtime.connectorActions.covers(grant, task, { path: '/repos/owner/repo/issues/42', method: 'PATCH', connectorId: 'github' }, 'account-1'), true);
+});
+
 test('OAuth supports arbitrary platform scopes while rejecting malformed scope injection', () => {
   assert.deepEqual(withOAuthScopes(['read'], 'write admin write'), ['read', 'write', 'admin']);
   assert.deepEqual(oauthScopes('Mail.Send,Mail.ReadWrite'), ['Mail.Send', 'Mail.ReadWrite']);

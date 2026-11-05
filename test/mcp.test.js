@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { McpManager, McpConfigStore, normalizeMcpConfig, parseMcpImport, MCP_LIMITS } from '../src/mcp.js';
+import { McpManager, McpConfigStore, normalizeMcpConfig, parseMcpImport, MCP_LIMITS, mcpWritesWidened } from '../src/mcp.js';
 import { OpenAiCompatibleReasoner, NullReasoner } from '../src/reasoning.js';
 import { WorkEngine } from '../src/engine.js';
 import { JsonStore } from '../src/store.js';
@@ -28,6 +28,16 @@ async function connected(t) {
   assert.equal(context.manager.describe().servers[0].status, 'connected');
   return context;
 }
+
+test('MCP write updates widen only when a tool is added or a disabled server is enabled', () => {
+  const previous = { enabled: true, writeTools: ['commit', 'add'] };
+  assert.equal(mcpWritesWidened(previous, { writeTools: ['commit', 'add', 'reset'] }), true);
+  assert.equal(mcpWritesWidened(previous, { writeTools: ['commit'] }), false);
+  assert.equal(mcpWritesWidened(previous, { writeTools: ['commit', 'add'], enabled: false }), false);
+  assert.equal(mcpWritesWidened({ enabled: false, writeTools: ['commit'] }, { writeTools: ['commit'], enabled: true }), true);
+  assert.equal(mcpWritesWidened(previous, { enabled: true }), false);
+  assert.equal(mcpWritesWidened(null, { writeTools: ['commit'], enabled: true }), true);
+});
 
 test('MCP import validates transports, local execution arguments and credentials without evaluating commands', () => {
   assert.equal(normalizeMcpConfig('notes', { url: 'https://example.test/mcp', type: 'streamable-http' }).type, 'http');
