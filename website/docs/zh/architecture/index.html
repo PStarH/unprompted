@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh" data-root="../../" data-copy="复制" data-copied="已复制" data-no-results="没有匹配" data-search-start="输入关键词搜索文档。" data-close="关闭">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>架构 · Unprompted 文档</title>
+  <meta name="description" content="一件工作如何穿过本地 Node.js 进程，以及什么还没有实现。">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/zh/architecture/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/architecture/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/architecture/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/architecture/">
+  <meta property="og:title" content="架构 · Unprompted 文档">
+  <meta property="og:description" content="一件工作如何穿过本地 Node.js 进程，以及什么还没有实现。">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/zh/architecture/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../../sitemap.xml">
+  <link rel="stylesheet" href="../../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"架构","description":"一件工作如何穿过本地 Node.js 进程，以及什么还没有实现。","inLanguage":"zh-CN","url":"https://pstarh.github.io/unprompted/docs/zh/architecture/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"文档","item":"https://pstarh.github.io/unprompted/docs/zh/"},{"@type":"ListItem","position":2,"name":"参考"},{"@type":"ListItem","position":3,"name":"架构","item":"https://pstarh.github.io/unprompted/docs/zh/architecture/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="打开菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../../zh/"><img src="../../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">文档</span></a>
+    <button class="search-button" type="button" data-search><span>搜索文档</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="语言"><a href="../../architecture/" hreflang="en">EN</a><a href="../../zh/architecture/" hreflang="zh-CN" aria-current="true">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>文档目录</summary><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/" aria-current="page">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/" aria-current="page">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="当前位置"><a href="../../zh/">文档</a><span class="crumb-sep" aria-hidden="true">/</span><span>参考</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">架构</span></nav>
+      <p class="page-kicker">参考</p><h1 class="page-title">架构</h1>
+      <details class="mobile-toc"><summary>本页目录</summary><ol><li><a class="" href="#一件工作">一件工作</a></li><li><a class="" href="#模块">模块</a></li><li><a class="" href="#没有实现的部分">没有实现的部分</a></li></ol></details>
+      <article class="prose"><p>Unprompted 是一个 Node.js 进程，使用 SQLite，浏览器界面在 <code>public/</code>，HTTP 在 <code>server.js</code>。<code>better-sqlite3</code> 是必需依赖。Pi Agent Core 和 MCP 客户端是可选的。演示保留 JSON 存储。</p>
+<h2 id="一件工作">一件工作<a class="heading-link" href="#一件工作" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">text</span><pre><code>事件 → 规范化 → 请求 → 关联 → 证据
+    → 准备 → 检查权限 → 执行 → 核验</code></pre><button type="button" class="code-copy">复制</button></div>
+<p>后来的事件可以重新评估仍打开的请求。无关事件会被记下，但不创建任务。如果更新的证据使草稿失效，草稿会被撤回。完成需要核验过的结果，而不是模型的一句话。</p>
+<h2 id="模块">模块<a class="heading-link" href="#模块" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="table-wrap"><table><thead><tr><th>层</th><th>职责</th><th>位置</th></tr></thead><tbody><tr><td>连接器</td><td>读取来源并保持游标</td><td><code>src/connectors/</code></td></tr><tr><td>上下文</td><td>请求、文档、新鲜度</td><td><code>src/requests.js</code>、<code>src/store.js</code></td></tr><tr><td>规划</td><td>解释并选择检查</td><td><code>src/reasoning.js</code>、<code>src/pi-runtime.js</code></td></tr><tr><td>权限</td><td>证据和许可</td><td><code>src/evidence.js</code>、<code>src/permissions.js</code></td></tr><tr><td>执行</td><td>准备并运行被允许的动作</td><td><code>src/engine.js</code></td></tr><tr><td>MCP</td><td>可选的读取工具</td><td><code>src/mcp.js</code>、<code>src/tool-loop.js</code></td></tr><tr><td>界面</td><td>本地工作区</td><td><code>public/</code></td></tr></tbody></table></div>
+<p>这些层交换的数据结构定义在 <code>src/contracts.js</code>。</p>
+<h2 id="没有实现的部分">没有实现的部分<a class="heading-link" href="#没有实现的部分" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>通用桌面控制、日历，以及不受限制的文档重写都没有实现。没有托管服务，没有身份验证，也没有多用户租户。</p>
+<p>Google 同步靠轮询，不会续订推送通道。测试和场景分数只说明那组固定样本，不代表省下了多少时间，也不代表生产环境的可靠性。</p>
+<p>更长的设计记录是 <a href="https://github.com/PStarH/unprompted/blob/main/docs/ARCHITECTURE.md" rel="noreferrer">docs/ARCHITECTURE.md</a>。v0.3 基线是 <a href="https://github.com/PStarH/unprompted/blob/main/docs/PRD.md" rel="noreferrer">docs/PRD.md</a>。</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>复制本页</button><script type="application/json" id="page-markdown">"# 架构\n\n> 一件工作如何穿过本地 Node.js 进程，以及什么还没有实现。\n\nUnprompted 是一个 Node.js 进程，使用 SQLite，浏览器界面在 `public/`，HTTP 在 `server.js`。`better-sqlite3` 是必需依赖。Pi Agent Core 和 MCP 客户端是可选的。演示保留 JSON 存储。\n\n## 一件工作\n\n```text\n事件 → 规范化 → 请求 → 关联 → 证据\n    → 准备 → 检查权限 → 执行 → 核验\n```\n\n后来的事件可以重新评估仍打开的请求。无关事件会被记下，但不创建任务。如果更新的证据使草稿失效，草稿会被撤回。完成需要核验过的结果，而不是模型的一句话。\n\n## 模块\n\n| 层 | 职责 | 位置 |\n| --- | --- | --- |\n| 连接器 | 读取来源并保持游标 | `src/connectors/` |\n| 上下文 | 请求、文档、新鲜度 | `src/requests.js`、`src/store.js` |\n| 规划 | 解释并选择检查 | `src/reasoning.js`、`src/pi-runtime.js` |\n| 权限 | 证据和许可 | `src/evidence.js`、`src/permissions.js` |\n| 执行 | 准备并运行被允许的动作 | `src/engine.js` |\n| MCP | 可选的读取工具 | `src/mcp.js`、`src/tool-loop.js` |\n| 界面 | 本地工作区 | `public/` |\n\n这些层交换的数据结构定义在 `src/contracts.js`。\n\n## 没有实现的部分\n\n通用桌面控制、日历，以及不受限制的文档重写都没有实现。没有托管服务，没有身份验证，也没有多用户租户。\n\nGoogle 同步靠轮询，不会续订推送通道。测试和场景分数只说明那组固定样本，不代表省下了多少时间，也不代表生产环境的可靠性。\n\n更长的设计记录是 [docs/ARCHITECTURE.md](https://github.com/PStarH/unprompted/blob/main/docs/ARCHITECTURE.md)。v0.3 基线是 [docs/PRD.md](https://github.com/PStarH/unprompted/blob/main/docs/PRD.md)。\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=%E6%96%87%E6%A1%A3%3A%20%E6%9E%B6%E6%9E%84&amp;body=%E9%A1%B5%E9%9D%A2%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fzh%2Farchitecture%2F%0A%0A%E9%97%AE%E9%A2%98%3A%0A%0A" rel="noreferrer">反馈本页问题</a><span>版本 0.3.0 · 对应当前 main 分支</span></div>
+      <nav class="pager" aria-label="上一篇"><a href="../../zh/api/"><span>上一篇</span><strong>本地 API</strong></a><a class="next" href="../../zh/development/"><span>下一篇</span><strong>开发与测试</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="本页目录"><h2>本页目录</h2><ol><li><a class="" href="#一件工作">一件工作</a></li><li><a class="" href="#模块">模块</a></li><li><a class="" href="#没有实现的部分">没有实现的部分</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../../">官网</a><a href="../../zh/">文档</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="打开菜单">
+    <div class="drawer-head"><strong>文档</strong><button class="icon-button" type="button" data-menu-close aria-label="关闭">×</button></div>
+    <section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/" aria-current="page">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="搜索">
+    <div class="search-head"><strong>搜索</strong><button class="icon-button" type="button" data-search-close aria-label="关闭">×</button></div>
+    <input type="search" placeholder="搜索文档" aria-label="搜索">
+    <p class="search-status">输入关键词搜索文档。</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

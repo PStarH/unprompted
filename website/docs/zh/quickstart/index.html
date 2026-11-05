@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh" data-root="../../" data-copy="复制" data-copied="已复制" data-no-results="没有匹配" data-search-start="输入关键词搜索文档。" data-close="关闭">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安装与首次运行 · Unprompted 文档</title>
+  <meta name="description" content="克隆仓库、安装依赖，并用 npm start 启动本地应用。">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/zh/quickstart/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/quickstart/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/quickstart/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/quickstart/">
+  <meta property="og:title" content="安装与首次运行 · Unprompted 文档">
+  <meta property="og:description" content="克隆仓库、安装依赖，并用 npm start 启动本地应用。">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/zh/quickstart/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../../sitemap.xml">
+  <link rel="stylesheet" href="../../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"安装与首次运行","description":"克隆仓库、安装依赖，并用 npm start 启动本地应用。","inLanguage":"zh-CN","url":"https://pstarh.github.io/unprompted/docs/zh/quickstart/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"文档","item":"https://pstarh.github.io/unprompted/docs/zh/"},{"@type":"ListItem","position":2,"name":"开始使用"},{"@type":"ListItem","position":3,"name":"安装与首次运行","item":"https://pstarh.github.io/unprompted/docs/zh/quickstart/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="打开菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../../zh/"><img src="../../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">文档</span></a>
+    <button class="search-button" type="button" data-search><span>搜索文档</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="语言"><a href="../../quickstart/" hreflang="en">EN</a><a href="../../zh/quickstart/" hreflang="zh-CN" aria-current="true">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>文档目录</summary><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/" aria-current="page">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/" aria-current="page">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="当前位置"><a href="../../zh/">文档</a><span class="crumb-sep" aria-hidden="true">/</span><span>开始使用</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">安装与首次运行</span></nav>
+      <p class="page-kicker">开始使用</p><h1 class="page-title">安装与首次运行</h1>
+      <details class="mobile-toc"><summary>本页目录</summary><ol><li><a class="" href="#环境">环境</a></li><li><a class="" href="#安装并启动">安装并启动</a></li><li><a class="" href="#连接模型">连接模型</a></li><li><a class="" href="#选择一个来源">选择一个来源</a></li><li><a class="" href="#演示不是正式运行">演示不是正式运行</a></li><li><a class="" href="#启动之后">启动之后</a></li></ol></details>
+      <article class="prose"><h2 id="环境">环境<a class="heading-link" href="#环境" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<ul><li>Node.js <strong>20+</strong> 和 npm。建议 <strong>22+</strong>。可选的 Pi 运行时需要 <strong>22.19+</strong>。</li><li>Git，或者把源码压缩包解压后在该目录打开终端。</li><li>浏览器。</li><li>模型接口地址、模型 ID，以及提供商要求的 API 密钥。兼容的本地模型可以不填密钥。</li><li>只有连接某个云端来源时才需要那个账号。本地文件夹不需要账号。Apple 备忘录需要 macOS。</li></ul>
+<p>用 <code>node --version</code> 确认版本。</p>
+<h2 id="安装并启动">安装并启动<a class="heading-link" href="#安装并启动" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>git clone https://github.com/PStarH/unprompted.git
+cd unprompted
+npm ci --include=optional
+npm start</code></pre><button type="button" class="code-copy">复制</button></div>
+<p><code>npm ci --include=optional</code> 会安装锁定的 SQLite 运行时，以及可选的 Pi 和 MCP 包。不需要构建前端。</p>
+<p><code>npm start</code> 在 <strong>Ready</strong> 之后打印地址，例如 <code>Ready → http://127.0.0.1:4173/</code>。打开这个地址。服务只监听本机，没有登录。</p>
+<p>4173 被占用时，启动器会另选端口并打印出来。指定端口：</p>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm start -- --port 4180</code></pre><button type="button" class="code-copy">复制</button></div>
+<p>你明确指定的端口如果被占用，启动会失败，并提示换一个。不想自动打开浏览器时加上 <code>--no-open</code>。</p>
+<h2 id="连接模型">连接模型<a class="heading-link" href="#连接模型" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>在第一屏填写接口地址、模型 ID 和 API 密钥。选择<strong>验证并连接模型</strong>。它会用一段示例内容发一次真实请求。失败不会覆盖已经可用的连接。成功后，密钥保存在本机私有设置里，输入框会被清空，不用重启。</p>
+<p><code>npm start</code> 不会读取 <code>.env</code>。见<a href="../../zh/models/">模型</a>和<a href="../../zh/configuration/">配置</a>。</p>
+<h2 id="选择一个来源">选择一个来源<a class="heading-link" href="#选择一个来源" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>一个来源就够开始。</p>
+<ul><li><strong>本地文件夹</strong>读取 Markdown 和文本。选择<strong>选择文件夹</strong>。macOS 会打开系统选择器，其他系统填写绝对路径。不申请完全磁盘访问。</li><li><strong>Apple 备忘录</strong>仅限 macOS。选择<strong>选择备忘录文件夹</strong>。启动 Unprompted 的应用（通常是终端）需要自动化权限。</li><li><strong>Google、GitHub、Outlook、Slack 和 Notion</strong>使用你自己的账号。Google 选择<strong>连接 Google</strong>。GitHub 选择<strong>获取授权码</strong>。Outlook、Slack 和 Notion 选择<strong>连接</strong>，再到提供商页面确认。各自读取什么，见<a href="../../zh/connectors/">连接器</a>。</li></ul>
+<p>授权后会立刻开始第一次读取，不用重启。数量来自提供商。空结果会保持为空。</p>
+<h2 id="演示不是正式运行">演示不是正式运行<a class="heading-link" href="#演示不是正式运行" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm run demo</code></pre><button type="button" class="code-copy">复制</button></div>
+<p>演示是用完即弃的本地模拟。它不使用已保存的账号，也不访问外部服务。自己的模型和来源请用 <code>npm start</code>。</p>
+<h2 id="启动之后">启动之后<a class="heading-link" href="#启动之后" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>若要持续观察，让进程保持运行。可以在「连接」里暂停，或选择<strong>现在检查</strong>。来源默认只读。写入、本地存储，以及模型提供商会收到什么，见<a href="../../zh/permissions/">权限与隐私</a>。</p>
+<p>页面打不开时，看<a href="../../zh/troubleshooting/">故障排查</a>。</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>复制本页</button><script type="application/json" id="page-markdown">"# 安装与首次运行\n\n> 克隆仓库、安装依赖，并用 npm start 启动本地应用。\n\n## 环境\n\n- Node.js **20+** 和 npm。建议 **22+**。可选的 Pi 运行时需要 **22.19+**。\n- Git，或者把源码压缩包解压后在该目录打开终端。\n- 浏览器。\n- 模型接口地址、模型 ID，以及提供商要求的 API 密钥。兼容的本地模型可以不填密钥。\n- 只有连接某个云端来源时才需要那个账号。本地文件夹不需要账号。Apple 备忘录需要 macOS。\n\n用 `node --version` 确认版本。\n\n## 安装并启动\n\n```sh\ngit clone https://github.com/PStarH/unprompted.git\ncd unprompted\nnpm ci --include=optional\nnpm start\n```\n\n`npm ci --include=optional` 会安装锁定的 SQLite 运行时，以及可选的 Pi 和 MCP 包。不需要构建前端。\n\n`npm start` 在 **Ready** 之后打印地址，例如 `Ready → http://127.0.0.1:4173/`。打开这个地址。服务只监听本机，没有登录。\n\n4173 被占用时，启动器会另选端口并打印出来。指定端口：\n\n```sh\nnpm start -- --port 4180\n```\n\n你明确指定的端口如果被占用，启动会失败，并提示换一个。不想自动打开浏览器时加上 `--no-open`。\n\n## 连接模型\n\n在第一屏填写接口地址、模型 ID 和 API 密钥。选择**验证并连接模型**。它会用一段示例内容发一次真实请求。失败不会覆盖已经可用的连接。成功后，密钥保存在本机私有设置里，输入框会被清空，不用重启。\n\n`npm start` 不会读取 `.env`。见[模型](https://pstarh.github.io/unprompted/docs/zh/models/)和[配置](https://pstarh.github.io/unprompted/docs/zh/configuration/)。\n\n## 选择一个来源\n\n一个来源就够开始。\n\n- **本地文件夹**读取 Markdown 和文本。选择**选择文件夹**。macOS 会打开系统选择器，其他系统填写绝对路径。不申请完全磁盘访问。\n- **Apple 备忘录**仅限 macOS。选择**选择备忘录文件夹**。启动 Unprompted 的应用（通常是终端）需要自动化权限。\n- **Google、GitHub、Outlook、Slack 和 Notion**使用你自己的账号。Google 选择**连接 Google**。GitHub 选择**获取授权码**。Outlook、Slack 和 Notion 选择**连接**，再到提供商页面确认。各自读取什么，见[连接器](https://pstarh.github.io/unprompted/docs/zh/connectors/)。\n\n授权后会立刻开始第一次读取，不用重启。数量来自提供商。空结果会保持为空。\n\n## 演示不是正式运行\n\n```sh\nnpm run demo\n```\n\n演示是用完即弃的本地模拟。它不使用已保存的账号，也不访问外部服务。自己的模型和来源请用 `npm start`。\n\n## 启动之后\n\n若要持续观察，让进程保持运行。可以在「连接」里暂停，或选择**现在检查**。来源默认只读。写入、本地存储，以及模型提供商会收到什么，见[权限与隐私](https://pstarh.github.io/unprompted/docs/zh/permissions/)。\n\n页面打不开时，看[故障排查](https://pstarh.github.io/unprompted/docs/zh/troubleshooting/)。\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=%E6%96%87%E6%A1%A3%3A%20%E5%AE%89%E8%A3%85%E4%B8%8E%E9%A6%96%E6%AC%A1%E8%BF%90%E8%A1%8C&amp;body=%E9%A1%B5%E9%9D%A2%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fzh%2Fquickstart%2F%0A%0A%E9%97%AE%E9%A2%98%3A%0A%0A" rel="noreferrer">反馈本页问题</a><span>版本 0.3.0 · 对应当前 main 分支</span></div>
+      <nav class="pager" aria-label="上一篇"><a href="../../zh/"><span>上一篇</span><strong>概览</strong></a><a class="next" href="../../zh/models/"><span>下一篇</span><strong>模型</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="本页目录"><h2>本页目录</h2><ol><li><a class="" href="#环境">环境</a></li><li><a class="" href="#安装并启动">安装并启动</a></li><li><a class="" href="#连接模型">连接模型</a></li><li><a class="" href="#选择一个来源">选择一个来源</a></li><li><a class="" href="#演示不是正式运行">演示不是正式运行</a></li><li><a class="" href="#启动之后">启动之后</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../../">官网</a><a href="../../zh/">文档</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="打开菜单">
+    <div class="drawer-head"><strong>文档</strong><button class="icon-button" type="button" data-menu-close aria-label="关闭">×</button></div>
+    <section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/" aria-current="page">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="搜索">
+    <div class="search-head"><strong>搜索</strong><button class="icon-button" type="button" data-search-close aria-label="关闭">×</button></div>
+    <input type="search" placeholder="搜索文档" aria-label="搜索">
+    <p class="search-status">输入关键词搜索文档。</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

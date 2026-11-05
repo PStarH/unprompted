@@ -1,4 +1,5 @@
 # Internal working notes and generated artefacts — never publish these.
+# AI agent reports go in .internal/agents/<agent>/ (see AGENTS.md).
 .internal/
 outputs/
 .workbuddy-ai/

@@ -94,7 +94,7 @@ export function createInteractions({ context, renderTask, renderNotice, update, 
       closed: copy('已关闭，没有发送'), restored: copy('已恢复跟进，没有发送'),
       uncertain: copy('结果仍待核实')
     };
-    update('decisionReceipt', ui`<span class="receipt-mark" aria-hidden="true">${receipt.kind === 'uncertain' ? '·' : '✓'}</span><div><strong>${labels[receipt.kind]}</strong><p>${escape(receipt.title)}</p></div>${['declined', 'closed'].includes(receipt.kind) ? ui`<button class="text-button" data-action="reopen" data-id="${escape(receipt.taskId)}">撤销</button>` : ''}<button class="icon-button" data-clear-receipt aria-label="收起这条回执">×</button>`);
+    update('decisionReceipt', ui`<span class="receipt-mark" aria-hidden="true">${receipt.kind === 'uncertain' ? '·' : '✓'}</span><div><strong>${labels[receipt.kind]}</strong><p>${escape(receipt.title)}</p></div>${['declined', 'closed'].includes(receipt.kind) ? ui`<button class="text-button" data-action="reopen" data-id="${escape(receipt.taskId)}">${copy('恢复跟进')}</button>` : ''}<button class="icon-button" data-clear-receipt aria-label="收起这条回执">×</button>`);
   }
 
   function noteResult(taskId, action, result) {

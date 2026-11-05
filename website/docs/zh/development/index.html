@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh" data-root="../../" data-copy="复制" data-copied="已复制" data-no-results="没有匹配" data-search-start="输入关键词搜索文档。" data-close="关闭">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>开发与测试 · Unprompted 文档</title>
+  <meta name="description" content="第一次改动用的命令、测试套件，以及这个文档站如何构建。">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/zh/development/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/development/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/development/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/development/">
+  <meta property="og:title" content="开发与测试 · Unprompted 文档">
+  <meta property="og:description" content="第一次改动用的命令、测试套件，以及这个文档站如何构建。">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/zh/development/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../../sitemap.xml">
+  <link rel="stylesheet" href="../../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"开发与测试","description":"第一次改动用的命令、测试套件，以及这个文档站如何构建。","inLanguage":"zh-CN","url":"https://pstarh.github.io/unprompted/docs/zh/development/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"文档","item":"https://pstarh.github.io/unprompted/docs/zh/"},{"@type":"ListItem","position":2,"name":"参考"},{"@type":"ListItem","position":3,"name":"开发与测试","item":"https://pstarh.github.io/unprompted/docs/zh/development/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="打开菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../../zh/"><img src="../../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">文档</span></a>
+    <button class="search-button" type="button" data-search><span>搜索文档</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="语言"><a href="../../development/" hreflang="en">EN</a><a href="../../zh/development/" hreflang="zh-CN" aria-current="true">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>文档目录</summary><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/" aria-current="page">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/" aria-current="page">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="当前位置"><a href="../../zh/">文档</a><span class="crumb-sep" aria-hidden="true">/</span><span>参考</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">开发与测试</span></nav>
+      <p class="page-kicker">参考</p><h1 class="page-title">开发与测试</h1>
+      <details class="mobile-toc"><summary>本页目录</summary><ol><li><a class="" href="#一小段循环">一小段循环</a></li><li><a class="" href="#检查">检查</a></li><li><a class="" href="#这个站点">这个站点</a></li><li><a class="" href="#从哪里改">从哪里改</a></li></ol></details>
+      <article class="prose"><p>中文或英文的议题和拉取请求都可以。Node.js 20+ 可以跑基础测试。Pi 检查需要 Node.js 22.19+。</p>
+<h2 id="一小段循环">一小段循环<a class="heading-link" href="#一小段循环" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm run example
+npm run example -- --approve</code></pre><button type="button" class="code-copy">复制</button></div>
+<p>两条命令都使用虚构数据和模拟提供商，不需要账号或模型。反馈、拉取请求和审阅要求见<a href="../../zh/contributing/">参与贡献</a>。</p>
+<h2 id="检查">检查<a class="heading-link" href="#检查" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm test
+npm run test:fast
+npm run check:syntax
+npm run check:public</code></pre><button type="button" class="code-copy">复制</button></div>
+<p><code>npm test</code> 运行行为、HTTP、连接器、权限、存储、界面和启动器测试。<code>test:fast</code> 跳过较长的 API、framework-eval 和泛化文件。<code>check:syntax</code> 解析 Git 已经跟踪的 JavaScript。<code>check:public</code> 检查可发布路径、Markdown 链接，以及看起来像凭据的字符串。</p>
+<p>一次只跑一个文件：</p>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm test -- --file=test/workflow.test.js
+npm run test:workflow</code></pre><button type="button" class="code-copy">复制</button></div>
+<p>浏览器契约包括 <code>npm run test:model-onboarding</code>、<code>npm run test:google-onboarding</code> 和 <code>npm run test:connections</code>。它们使用脚本化的本地服务器。不要把它们指向个人工作区。</p>
+<p>可选评估：<code>npm run eval</code>、<code>npm run eval:framework</code>、<code>npm run eval:resilience</code>、<code>npm run eval:lifecycle</code>、<code>npm run eval:pi</code> 和 <code>npm run eval:value</code>。通过只说明夹具符合预期，不是生产结论。Pi 需要可选安装和 Node.js 22.19+。</p>
+<p>macOS 包是本地的未签名构建：</p>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm run build:macos-app
+npm run smoke:macos-app</code></pre><button type="button" class="code-copy">复制</button></div>
+<h2 id="这个站点">这个站点<a class="heading-link" href="#这个站点" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>node docs-site/build.mjs
+node docs-site/check-links.mjs</code></pre><button type="button" class="code-copy">复制</button></div>
+<p>Markdown 在 <code>docs-site/content/en/</code> 和 <code>docs-site/content/zh/</code>。导航文案在 <code>docs-site/nav.json</code>。构建写入 <code>website/docs/</code>，也就是 GitHub Pages 上的 <code>/unprompted/docs/</code>。</p>
+<h2 id="从哪里改">从哪里改<a class="heading-link" href="#从哪里改" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="table-wrap"><table><thead><tr><th>改动</th><th>起点</th></tr></thead><tbody><tr><td>连接器</td><td><code>src/connectors/</code> 和 <code>docs/CONNECTORS.md</code></td></tr><tr><td>权限或证据</td><td><code>src/permissions.js</code>、<code>src/evidence.js</code></td></tr><tr><td>工作区</td><td><code>public/</code> 和 <code>test/browser/</code></td></tr><tr><td>MCP</td><td><code>src/mcp.js</code>、<code>src/tool-loop.js</code></td></tr><tr><td>这些页面</td><td><code>docs-site/content/</code></td></tr></tbody></table></div>
+<p>按路径暂存文件。不要在这个检出里使用 <code>git add -A</code>。其他代理可能有未提交的改动。</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>复制本页</button><script type="application/json" id="page-markdown">"# 开发与测试\n\n> 第一次改动用的命令、测试套件，以及这个文档站如何构建。\n\n中文或英文的议题和拉取请求都可以。Node.js 20+ 可以跑基础测试。Pi 检查需要 Node.js 22.19+。\n\n## 一小段循环\n\n```sh\nnpm run example\nnpm run example -- --approve\n```\n\n两条命令都使用虚构数据和模拟提供商，不需要账号或模型。反馈、拉取请求和审阅要求见[参与贡献](https://pstarh.github.io/unprompted/docs/zh/contributing/)。\n\n## 检查\n\n```sh\nnpm test\nnpm run test:fast\nnpm run check:syntax\nnpm run check:public\n```\n\n`npm test` 运行行为、HTTP、连接器、权限、存储、界面和启动器测试。`test:fast` 跳过较长的 API、framework-eval 和泛化文件。`check:syntax` 解析 Git 已经跟踪的 JavaScript。`check:public` 检查可发布路径、Markdown 链接，以及看起来像凭据的字符串。\n\n一次只跑一个文件：\n\n```sh\nnpm test -- --file=test/workflow.test.js\nnpm run test:workflow\n```\n\n浏览器契约包括 `npm run test:model-onboarding`、`npm run test:google-onboarding` 和 `npm run test:connections`。它们使用脚本化的本地服务器。不要把它们指向个人工作区。\n\n可选评估：`npm run eval`、`npm run eval:framework`、`npm run eval:resilience`、`npm run eval:lifecycle`、`npm run eval:pi` 和 `npm run eval:value`。通过只说明夹具符合预期，不是生产结论。Pi 需要可选安装和 Node.js 22.19+。\n\nmacOS 包是本地的未签名构建：\n\n```sh\nnpm run build:macos-app\nnpm run smoke:macos-app\n```\n\n## 这个站点\n\n```sh\nnode docs-site/build.mjs\nnode docs-site/check-links.mjs\n```\n\nMarkdown 在 `docs-site/content/en/` 和 `docs-site/content/zh/`。导航文案在 `docs-site/nav.json`。构建写入 `website/docs/`，也就是 GitHub Pages 上的 `/unprompted/docs/`。\n\n## 从哪里改\n\n| 改动 | 起点 |\n| --- | --- |\n| 连接器 | `src/connectors/` 和 `docs/CONNECTORS.md` |\n| 权限或证据 | `src/permissions.js`、`src/evidence.js` |\n| 工作区 | `public/` 和 `test/browser/` |\n| MCP | `src/mcp.js`、`src/tool-loop.js` |\n| 这些页面 | `docs-site/content/` |\n\n按路径暂存文件。不要在这个检出里使用 `git add -A`。其他代理可能有未提交的改动。\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=%E6%96%87%E6%A1%A3%3A%20%E5%BC%80%E5%8F%91%E4%B8%8E%E6%B5%8B%E8%AF%95&amp;body=%E9%A1%B5%E9%9D%A2%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fzh%2Fdevelopment%2F%0A%0A%E9%97%AE%E9%A2%98%3A%0A%0A" rel="noreferrer">反馈本页问题</a><span>版本 0.3.0 · 对应当前 main 分支</span></div>
+      <nav class="pager" aria-label="上一篇"><a href="../../zh/architecture/"><span>上一篇</span><strong>架构</strong></a><a class="next" href="../../zh/glossary/"><span>下一篇</span><strong>术语</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="本页目录"><h2>本页目录</h2><ol><li><a class="" href="#一小段循环">一小段循环</a></li><li><a class="" href="#检查">检查</a></li><li><a class="" href="#这个站点">这个站点</a></li><li><a class="" href="#从哪里改">从哪里改</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../../">官网</a><a href="../../zh/">文档</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="打开菜单">
+    <div class="drawer-head"><strong>文档</strong><button class="icon-button" type="button" data-menu-close aria-label="关闭">×</button></div>
+    <section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/" aria-current="page">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="搜索">
+    <div class="search-head"><strong>搜索</strong><button class="icon-button" type="button" data-search-close aria-label="关闭">×</button></div>
+    <input type="search" placeholder="搜索文档" aria-label="搜索">
+    <p class="search-status">输入关键词搜索文档。</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import { withOAuthScopes } from './oauth-scopes.js';
 import { connectionProvider, validPublicClientId } from './connection-catalog.js';
 import { providerJSON } from './connectors/http.js';
 import { retryAfterMs } from './reasoning-recovery.js';
@@ -26,7 +27,7 @@ export class DeviceOAuth {
   describe(id) { return { ...(this.status.get(id) || { phase: 'idle' }) }; }
   #status(id, phase, values = {}) { this.status.set(id, { phase, updatedAt: new Date(this.now()).toISOString(), ...values }); }
 
-  async start(id, { clientId = null, observe = true, drafts = false } = {}) {
+  async start(id, { clientId = null, observe = true, drafts = false, scopes = [] } = {}) {
     const provider = connectionProvider(id);
     this.cancel(id);
     const configured = this.setup.getConnection(id);
@@ -37,7 +38,7 @@ export class DeviceOAuth {
     try {
       const response = await providerJSON(provider.deviceUrl, { provider: id, origin: new URL(provider.deviceUrl).origin,
         fetchImpl: this.fetchImpl, method: 'POST', signal: session.controller.signal,
-        form: { client_id: selected, ...(provider.scope ? { scope: `${provider.scope}${id === 'microsoft' && drafts === true ? ' Mail.ReadWrite' : ''}` } : {}) }, maxChars: 32_000, allowOAuthError: true });
+        form: { client_id: selected, ...(provider.scope ? { scope: withOAuthScopes(`${provider.scope}${id === 'microsoft' && drafts === true ? ' Mail.ReadWrite' : ''}`, scopes).join(' ') } : {}) }, maxChars: 32_000, allowOAuthError: true });
       if (this.sessions.get(id) !== session) return this.describe(id);
       if (response.error) throw new Error('The provider rejected device authorization.');
       const verification = new URL(response.verification_uri);

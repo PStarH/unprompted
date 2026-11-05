@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto';
  *
  * This module answers exactly one question about existing event data: does the
  * content of an authorized event state a failure, and on what evidence? It is a
- * pure derivation — it reads state and returns a report; it writes nothing, and
- * it deliberately runs nowhere in the server yet.
+ * pure derivation — it reads state and returns a report; it writes nothing.
+ * Durable task preparation calls it for sources this process is allowed to
+ * read. It still creates no tasks, notifications, clarifications or records.
  *
  * What it does NOT do, by design (Phase 0 boundary):
  * - no candidate generation, no root-cause merging, no handoff, no tasks,

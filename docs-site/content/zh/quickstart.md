@@ -46,7 +46,7 @@ npm start -- --port 4180
 
 - **本地文件夹**读取 Markdown 和文本。选择**选择文件夹**。macOS 会打开系统选择器，其他系统填写绝对路径。不申请完全磁盘访问。
 - **Apple 备忘录**仅限 macOS。选择**选择备忘录文件夹**。启动 Unprompted 的应用（通常是终端）需要自动化权限。
-- **Google、GitHub、Outlook、Slack 和 Notion**使用你自己的账号。Google 选择**连接 Google**。GitHub 和 Outlook 选择**获取授权码**。Slack 和 Notion 选择**连接**，再到提供商页面确认。各自读取什么，见[连接器](connectors.md)。
+- **Google、GitHub、Outlook、Slack 和 Notion**使用你自己的账号。Google 选择**连接 Google**。GitHub 选择**获取授权码**。Outlook、Slack 和 Notion 选择**连接**，再到提供商页面确认。各自读取什么，见[连接器](connectors.md)。
 
 授权后会立刻开始第一次读取，不用重启。数量来自提供商。空结果会保持为空。
 

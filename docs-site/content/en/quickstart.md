@@ -46,7 +46,7 @@ One source is enough.
 
 - **Local folders** read Markdown and text. **Choose folders** opens the macOS folder picker. Other systems take an absolute path. No Full Disk Access.
 - **Apple Notes** is macOS only. Use **Choose Notes folders**. The app that launched Unprompted, often Terminal, needs Automation permission.
-- **Google, GitHub, Outlook, Slack, and Notion** — your own account. Google uses **Connect Google**. GitHub and Outlook use **Get authorization code**. Slack and Notion use **Connect** and the provider's page. [Connectors](connectors.md) lists what each one reads.
+- **Google, GitHub, Outlook, Slack, and Notion** — your own account. Google uses **Connect Google**. GitHub uses **Get authorization code**. Outlook, Slack and Notion use **Connect** and the provider's page. [Connectors](connectors.md) lists what each one reads.
 
 Authorization starts the first read without a restart. Counts come from the provider. An empty result stays empty.
 

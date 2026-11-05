@@ -51,6 +51,8 @@ async function startServer(extraEnv = {}, { setupSeed = null, reuse = null } = {
       PORT: String(port),
       UNPROMPTED_STATE_FILE: stateFile,
       UNPROMPTED_CONFIG_DIR: configDir,
+      UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(configDir, 'unprovisioned-client.json'),
+      UNPROMPTED_CONNECTOR_CLIENTS_FILE: path.join(configDir, 'unprovisioned-connectors.json'),
       // The shipped server defaults to read-only shadow mode. These tests keep
       // the frozen approval path by opting out; shadow denial is covered in
       // test/shadow.test.js.

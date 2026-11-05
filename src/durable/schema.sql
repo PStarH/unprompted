@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS resource_claims (
 CREATE TABLE IF NOT EXISTS user_memories (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT 'local', scope_type TEXT NOT NULL, scope_key TEXT NOT NULL,
  content TEXT NOT NULL, source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
+ memory_kind TEXT NOT NULL DEFAULT 'fact' CHECK(memory_kind IN ('fact','preference')),
+ lifecycle_state TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_state IN ('active','disabled','archived','deleted','superseded')),
+ valid_until TEXT, lifecycle_updated_at TEXT,
  version INTEGER NOT NULL DEFAULT 1, privacy_epoch INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -124,6 +127,28 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
  memory_id TEXT PRIMARY KEY REFERENCES user_memories(id) ON DELETE CASCADE,
  model_id TEXT NOT NULL, dimensions INTEGER NOT NULL, vector BLOB NOT NULL, privacy_epoch INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS memory_versions (
+ memory_id TEXT NOT NULL REFERENCES user_memories(id) ON DELETE CASCADE,
+ version INTEGER NOT NULL, content TEXT NOT NULL, scope_type TEXT NOT NULL, scope_key TEXT NOT NULL,
+ memory_kind TEXT NOT NULL CHECK(memory_kind IN ('fact','preference')),
+ source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
+ lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('active','disabled','archived','deleted','superseded')),
+ valid_until TEXT, change_kind TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(memory_id,version)
+);
+CREATE TABLE IF NOT EXISTS memory_relations (
+ id TEXT PRIMARY KEY,
+ source_memory_id TEXT NOT NULL REFERENCES user_memories(id),
+ target_memory_id TEXT NOT NULL REFERENCES user_memories(id),
+ relation_kind TEXT NOT NULL CHECK(relation_kind IN ('belongs_to','mentions','related_to','derived_from','supersedes','contradicts')),
+ status TEXT NOT NULL DEFAULT 'established' CHECK(status IN ('established','suggested')),
+ evidence_kind TEXT, evidence_ref TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(source_memory_id,target_memory_id,relation_kind),
+ CHECK(source_memory_id <> target_memory_id),
+ CHECK(relation_kind NOT IN ('related_to','contradicts') OR source_memory_id < target_memory_id)
+);
+CREATE INDEX IF NOT EXISTS ix_memory_relations_target ON memory_relations(target_memory_id,relation_kind,status);
+CREATE INDEX IF NOT EXISTS ix_memory_relations_source ON memory_relations(source_memory_id,relation_kind);
 CREATE TABLE IF NOT EXISTS activation_policies (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT 'local', status TEXT NOT NULL CHECK(status IN ('active','draft','disabled')),
  scope_type TEXT NOT NULL, scope_key TEXT NOT NULL, predicate_ast_json TEXT NOT NULL,

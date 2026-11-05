@@ -33,8 +33,8 @@ For example, `/repos/my-org/my-repo` covers the corresponding API paths for one 
 
 ## Microsoft Outlook
 
-1. Choose **Connections → Outlook**. To manage and send mail, enter `Mail.ReadWrite Mail.Send` under **Additional OAuth scopes**; add other Graph scopes as needed.
-2. Request the device code, copy it, and enter it on Microsoft's official page. Sign in and consent with your own account.
+1. Choose **Connections → Outlook**. Sign in and consent on the Microsoft page that opens.
+2. To manage or send mail, open the connected account settings and reauthorize with `Mail.ReadWrite Mail.Send` under **Additional OAuth scopes**; add other Graph scopes as needed.
 3. Return to the app and confirm that the account is connected. The source observes the inbox; calendar or file scopes do not start those observers.
 4. For general Graph actions, allow the account and API path under **Platform action access**. For drafts, you can instead authorize a Drafts destination in **Create work artifacts**.
 
@@ -75,7 +75,7 @@ Explicit to-dos such as `- [ ]`, `TODO:` and `☐` can be tracked. The existing 
 3. If access was denied, open macOS **System Settings → Privacy & Security → Automation**, allow access for the application that actually launched Unprompted, and retry.
 4. To create an Apple Note, separately authorize a selected folder under **Connections → Create work artifacts**.
 
-Notes reads available text in selected folders and skips locked notes and attachments. The native Reminders connector observes selected lists. A source checkbox alone is not proof that the agent completed work.
+Notes reads available text in selected folders and skips locked notes and attachments. The native Reminders connector observes selected lists and can create reminders in a separately authorized list. To edit, complete or delete existing reminders, separately allow **Platform action access**. Actions are limited to selected lists and check the last modification time. A source checkbox alone is not proof that the agent completed work.
 
 ## MCP presets and custom services
 

@@ -1,7 +1,7 @@
 import { copy, getLocale, formatTime } from './i18n.js';
 import { readLocal, writeLocal } from './ux-state.js';
 import { createAppearance } from './appearance.js';
-import { WORKSPACE_MODES, taskState, stateGroup, isFinished, taskSources, taskSteps, activityEntries } from './workspace-model.js';
+import { WORKSPACE_MODES, taskState, stateGroup, isFinished, taskSources, taskSteps, activityEntries, nextQueueId } from './workspace-model.js';
 
 const t = (zh, en) => getLocale() === 'en' ? en : zh;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -33,13 +33,13 @@ const shortMoment = value => {
   return `${date.getMonth() + 1}/${date.getDate()}`;
 };
 const stateLabel = state => ({
-  needs_user: t('待你确认', 'Awaiting review'), working: t('正在处理', 'Working'), waiting_external: t('等待外部变化', 'Waiting externally'),
-  observing: t('观察中', 'Observing'), paused_by_user: t('已暂停', 'Paused'), source_disconnected: t('来源已断开', 'Source disconnected'),
+  needs_user: t('需要你', 'Needs you'), working: t('正在处理', 'Working'), waiting_external: t('等待外部变化', 'Waiting externally'),
+  observing: t('观察中', 'Observing'), paused_by_user: t('已暂停', 'Paused'), paused_by_policy: t('因规则暂停', 'Paused by a rule'), source_disconnected: t('来源已断开', 'Source disconnected'),
   failed: t('处理失败', 'Failed'), result_unverified: t('结果待核实', 'Result unverified'), verified: t('已核验', 'Verified'),
-  closed: t('已停止跟进', 'Stopped following'), unknown: t('状态待确认', 'State unknown')
+  closed: t('已停止跟进', 'Stopped following'), user_accepted: t('你已接受', 'Accepted by you'), unknown: t('状态待确认', 'State unknown')
 })[state];
-const groupLabel = group => ({ attention: t('待你处理', 'To review'), working: t('正在处理', 'In progress'), waiting: t('等待回复或资料', 'Waiting for input'), quiet: t('其他事项', 'Other tasks') })[group];
-const stepLabel = key => ({ source: t('读取来源', 'Read sources'), evidence: t('核对要求', 'Check requirements'), prepare: t('准备结果', 'Prepare result'), verify: t('核实结果', 'Verify result'), verified: t('结果已核验', 'Result verified'), observe: t('跟进来源状态', 'Observe source state'), source_change: t('等待来源变化', 'Wait for a change') })[key];
+const groupLabel = group => ({ attention: t('需要你', 'Needs you'), working: t('进行中', 'In motion'), waiting: t('等待中', 'Waiting'), quiet: t('观察 · 暂停 · 已结束', 'Watching · paused · done') })[group];
+const stepLabel = key => ({ review: t('等待你审阅', 'Awaiting your review'), reviewed: t('你已接受', 'Accepted by you'), source: t('读取来源', 'Read sources'), evidence: t('核对要求', 'Check requirements'), prepare: t('准备结果', 'Prepare result'), verify: t('核实结果', 'Verify result'), verified: t('结果已核验', 'Result verified'), observe: t('跟进来源状态', 'Observe source state'), source_change: t('等待来源变化', 'Wait for a change') })[key];
 const safeURL = value => { try { const url = new URL(value, location.origin); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; } };
 
 export function createWorkspace({ context, update, post, applyState, notify, renderAction, renderManagement, renderDetails, go, refresh }) {
@@ -49,12 +49,6 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   let selected = null, selectedEvent = null, workspace = null, lastRender = null, composing = false;
   let returnMode = mode === 'spotlight' ? 'field' : mode;
   const drafts = new Map(), pending = new Set(), errors = new Map();
-  let editingMemory = null;
-  let memoryQuery = '';
-  let memoryScope = 'all';
-  let memoryView = readLocal('unprompted:memory-view', 'space');
-  if (!['space', 'library'].includes(memoryView)) memoryView = 'space';
-  let selectedMemoryScope = 'all';
   let contextPanel = null, contextTrigger = null, restoreContextFocus = true;
   const byId = id => document.getElementById(id);
 
@@ -89,8 +83,11 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
       const similar = Boolean(task.request?.subjectEntity && task.request?.deliverable);
       html = editable ? `<section class="ws-memory-scope-options"><h3>${t('这次纠偏用于', 'Apply this correction to')}</h3><button class="ws-scope-option" data-memory-scope="task" aria-pressed="${draft.scope === 'task'}"><span><strong>${t('仅这件事', 'This task only')}</strong><small>${t('不创建共享记忆', 'Do not create shared memory')}</small></span><i>${draft.scope === 'task' ? '✓' : ''}</i></button><button class="ws-scope-option" data-memory-scope="similar" aria-pressed="${draft.scope === 'similar'}" ${similar ? '' : 'disabled'}><span><strong>${t('记住，用于同类任务', 'Remember for similar tasks')}</strong><small>${similar ? esc(`${task.request.subjectEntity} · ${task.request.deliverable}`) : t('需要明确的项目与交付物', 'Requires an identified project and deliverable')}</small></span><i>${draft.scope === 'similar' ? '✓' : ''}</i></button></section>` : '';
       const memories = scopedMemories(task);
+      if (editable) html += `<label>${t('如何应用这次要求', 'Apply this direction')}<select data-direction-operation="${esc(task.id)}"><option value="append">${t('补充原要求', 'Add to the original requirements')}</option><option value="replace" ${draft.operation === 'replace' ? 'selected' : ''} ${draft.scope === 'similar' ? 'disabled' : ''}>${t('替换本任务的内容要求', 'Replace this task’s content requirements')}</option></select></label>`;
       const linked = memories.find(memory => memory.id === task.guidance?.memoryId && memory.text === task.guidance?.text);
       const additional = memories.filter(memory => memory.id !== linked?.id);
+      const manifest = task.contextManifest;
+      if (manifest) html += `<section class="ws-context-memories"><h3>${t('本次采用的上下文', 'Context used in this run')}</h3>${manifest.selected.map(item => `<article><small>${item.kind === 'memory' ? t('记忆', 'Memory') : t('经验', 'Experience')} · ${esc(item.scopeKey || '')}</small><p>${esc(item.text || item.instruction)}</p></article>`).join('')}${manifest.deferred.length ? `<p>${t('以下上下文需读取全文：', 'Full reads required: ')}${manifest.deferred.map(item => esc(item.id)).join(', ')}</p>` : ''}${manifest.overridden.length ? `<p>${t('已被更高优先级要求覆盖：', 'Overridden by higher priority guidance: ')}${manifest.overridden.map(item => esc(item.id)).join(', ')}</p>` : ''}${manifest.conflicts.length ? `<p>${t('存在待澄清的冲突', 'Conflicting guidance needs clarification')}</p>` : ''}</section>`;
       html += `<section class="ws-context-memories"><h3>${t('与这件事有关的记忆', 'Related memories')}</h3>${task.guidance ? `<article><small>${linked ? t('当前要求 · 已记住用于同类任务', 'Current direction · remembered for similar tasks') : t('当前任务的要求', 'Current task direction')}</small><p>${esc(task.guidance.text)}</p></article>` : ''}${additional.length ? additional.map(memory => `<article><small>${esc(memory.scope.entity)} · ${esc(memory.scope.deliverable)}</small><p>${esc(memory.text)}</p></article>`).join('') : linked ? '' : `<p class="ws-empty-inline">${t('还没有相关的共享记忆。', 'No related shared memories yet.')}</p>`}</section><button class="text-button ws-context-navigation" data-context-page="memory">${t('管理全部记忆', 'Manage all memories')} ${workspaceIcon('arrow', 14)}</button>`;
     }
     const body = byId('taskContextContent'), scroll = body.scrollTop;
@@ -99,7 +96,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   }
 
   function openContext(kind, id, trigger) {
-    contextPanel = { kind, id, record: Boolean(trigger.closest('#taskDialog')), composer: Boolean(trigger.closest('.ws-composer')) };
+    contextPanel = { kind, id, composer: Boolean(trigger.closest('.ws-composer')) };
     contextTrigger = trigger;
     restoreContextFocus = true;
     renderContextDialog();
@@ -110,11 +107,13 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     const panel = contextPanel, trigger = contextTrigger;
     contextPanel = null; contextTrigger = null;
     if (!restoreContextFocus || !panel) return;
-    const fallback = document.querySelector(`${panel.record ? '#taskDialog' : '#taskContent'} ${panel.composer ? '.ws-composer' : '.ws-sources-bar'} [data-task-context="${panel.kind}"][data-task-id="${CSS.escape(panel.id)}"]`);
+    const fallback = document.querySelector(`#taskContent ${panel.composer ? '.ws-composer' : '.ws-sources-bar'} [data-task-context="${panel.kind}"][data-task-id="${CSS.escape(panel.id)}"]`);
     (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
   });
 
   function summary(task) {
+    if (task.preparedWork?.acceptedAt) return t('你已接受这次准备的内容', 'You accepted this preparation');
+    if (task.preparedWork) return task.preparedWork.kind === 'draft' ? t('草稿已备好 · 请按目标审阅', 'Draft ready · review against your goal') : t('来源简报已备好 · 请按目标审阅', 'Source brief ready · review against your goal');
     const status = taskState(task, context().connections);
     if (status === 'paused_by_user') return t('由你暂停，恢复后继续核对', 'Paused by you. Resume to continue checks.');
     if (status === 'failed') return task.reasoning?.detail || task.reason || t('检查连接后重新核对', 'Check the connection, then recheck.');
@@ -148,29 +147,31 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
 
   function sourceChips(task) {
     const sources = taskSources(task, context().state);
-    const names = [...new Set(sources.map(item => item.provider))];
+    const names = [...new Set(sources.map(item => ['simulation', 'simulated'].includes(String(item.provider).toLowerCase()) ? 'Simulation' : item.provider))];
     return names.map(name => `<span class="ws-source-chip">${esc(name === 'Simulation' ? t('模拟来源', 'Simulation') : name === 'Local files' ? t('本地文件', 'Local files') : name)}</span>`).join('');
   }
 
-  function controls(task, { close = false, record = false } = {}) {
+  function controls(task, { close = false, page = false } = {}) {
     const disabled = isFinished(task);
     const paused = task.control?.paused;
-    return `<div class="ws-task-controls">${!disabled ? `<button class="icon-button" data-task-control="${paused ? 'resume' : 'pause'}" data-task-id="${esc(task.id)}" aria-label="${paused ? t('恢复任务', 'Resume task') : t('暂停任务', 'Pause task')}" title="${paused ? t('恢复任务', 'Resume task') : t('暂停任务', 'Pause task')}" ${pending.has(task.id) ? 'disabled' : ''}>${workspaceIcon(paused ? 'resume' : 'pause', 16)}</button>` : ''}${!record ? `<button class="icon-button" data-open-task="${esc(task.id)}" aria-label="${t('完整记录与等待设置', 'Full history and wait settings')}" title="${t('完整记录与等待设置', 'Full history and wait settings')}">${workspaceIcon('source', 16)}</button>` : ''}${mode !== 'spotlight' && !record ? `<button class="icon-button" data-focus-task="${esc(task.id)}" aria-label="${t('专注这件事', 'Focus this task')}" title="${t('专注这件事', 'Focus this task')}">${workspaceIcon('spotlight', 16)}</button>` : ''}${close ? `<button class="icon-button" data-close-inspector aria-label="${t('收起任务', 'Collapse task')}">${workspaceIcon('close', 16)}</button>` : ''}</div>`;
+    return `<div class="ws-task-controls">${!disabled && !(page && paused) ? `<button class="icon-button" data-task-control="${paused ? 'resume' : 'pause'}" data-task-id="${esc(task.id)}" aria-label="${paused ? t('恢复任务', 'Resume task') : t('暂停任务', 'Pause task')}" title="${paused ? t('恢复任务', 'Resume task') : t('暂停任务', 'Pause task')}" ${pending.has(task.id) ? 'disabled' : ''}>${workspaceIcon(paused ? 'resume' : 'pause', 16)}</button>` : ''}${mode !== 'spotlight' && !page ? `<button class="icon-button" data-focus-task="${esc(task.id)}" aria-label="${t('专注这件事', 'Focus this task')}" title="${t('专注这件事', 'Focus this task')}">${workspaceIcon('spotlight', 16)}</button>` : ''}${close ? `<button class="icon-button" data-close-inspector aria-label="${t('收起任务', 'Collapse task')}">${workspaceIcon('close', 16)}</button>` : ''}</div>`;
   }
 
-  function composer(task, record = false) {
+  function composer(task, page = false) {
     if (isFinished(task) || task.action || task.status === 'verifying') return '';
     const draft = drafts.get(task.id) || { text: '', scope: 'task' };
     const busy = pending.has(task.id);
-    const inputId = `direction-${task.id}${record ? '-record' : ''}`;
-    return `<form class="ws-composer" data-task-direction="${esc(task.id)}"><label class="sr-only" for="${esc(inputId)}">${t('纠正这件事的方向', 'Change this task’s direction')}</label><textarea id="${esc(inputId)}" name="direction" data-direction-input="${esc(task.id)}" rows="2" maxlength="2000" placeholder="${t('这件事，换个方向…', 'Steer this task…')}" required ${busy ? 'readonly' : ''}>${esc(draft.text)}</textarea><div class="ws-composer-bottom"><div class="ws-scope"><input type="hidden" name="scope" data-direction-scope="${esc(task.id)}" value="${draft.scope}"><button type="button" class="text-button ws-memory-trigger" data-task-context="memory" data-task-id="${esc(task.id)}" aria-haspopup="dialog" ${busy ? 'disabled' : ''}>${workspaceIcon('memory', 14)}${draft.scope === 'similar' ? t('记住同类', 'Remember similar') : t('仅这件事', 'This task only')}</button></div><button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>${busy ? t('正在更新…', 'Updating…') : t('更新方向', 'Apply direction')}${workspaceIcon('arrow', 14)}</button></div>${errors.has(task.id) ? `<p class="ws-inline-error" role="alert">${esc(errors.get(task.id))}</p>` : ''}</form>`;
+    const inputId = `direction-${task.id}`;
+    const form = `<form class="ws-composer" data-task-direction="${esc(task.id)}"><label class="sr-only" for="${esc(inputId)}">${t('纠正这件事的方向', 'Change this task’s direction')}</label><textarea id="${esc(inputId)}" name="direction" data-direction-input="${esc(task.id)}" rows="2" maxlength="2000" placeholder="${t('这件事，换个方向…', 'Steer this task…')}" required ${busy ? 'readonly' : ''}>${esc(draft.text)}</textarea><div class="ws-composer-bottom"><div class="ws-scope"><input type="hidden" name="scope" data-direction-scope="${esc(task.id)}" value="${draft.scope}"><button type="button" class="text-button ws-memory-trigger" data-task-context="memory" data-task-id="${esc(task.id)}" aria-haspopup="dialog" ${busy ? 'disabled' : ''}>${workspaceIcon('memory', 14)}${draft.scope === 'similar' ? t('记住同类', 'Remember similar') : t('仅这件事', 'This task only')}</button></div><button class="primary-button" type="submit" ${busy ? 'disabled' : ''}>${busy ? t('正在更新…', 'Updating…') : t('更新方向', 'Apply direction')}${workspaceIcon('arrow', 14)}</button></div>${errors.has(task.id) ? `<p class="ws-inline-error" role="alert">${esc(errors.get(task.id))}</p>` : ''}</form>`;
+    if (!page || task.status === 'ready_for_approval' || task.preparedWork || draft.text || errors.has(task.id)) return form;
+    return `<details class="ws-direction-disclosure" data-direction-disclosure data-preserve="direction-${esc(task.id)}"><summary>${t('调整方向', 'Adjust direction')}</summary>${form}</details>`;
   }
 
   function receipt(task) {
     if (!task.guidance || isFinished(task)) return '';
     const canUndo = !isFinished(task) && !task.action;
     const remembered = context().state.taskMemories?.some(memory => memory.id === task.guidance.memoryId && !memory.deletedAt);
-    return `<div class="ws-direction-receipt" role="status"><div>${workspaceIcon('check', 15)}<span>${t('要求已更新，按新计划核对', 'Requirements updated; checking the new plan')}<small>${remembered ? t('已记住：同一项目与交付物', 'Remembered for the same project and deliverable') : t('仅当前任务 · 未保存为记忆', 'This task only · no memory saved')}</small></span></div>${canUndo ? `<button class="text-button" data-undo-direction="${esc(task.guidance.id)}" data-task-id="${esc(task.id)}" ${pending.has(task.id) ? 'disabled' : ''}>${t('撤销', 'Undo')}</button>` : ''}</div>`;
+    return `<div class="ws-direction-receipt" role="status"><div>${workspaceIcon('check', 15)}<span>${t('要求已更新，按新计划核对', 'Requirements updated; checking the new plan')}<small>${remembered ? t('已记住：同一项目与交付物', 'Remembered for the same project and deliverable') : t('仅当前任务 · 未保存为记忆', 'This task only · no memory saved')}</small></span></div>${canUndo ? `<button class="text-button" data-undo-direction="${esc(task.guidance.id)}" data-task-id="${esc(task.id)}" ${pending.has(task.id) ? 'disabled' : ''}>${t('撤销方向', 'Undo direction')}</button>` : ''}</div>`;
   }
 
   function sources(task) {
@@ -184,23 +185,49 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     return `${saved}<div class="ws-sources-bar"><button class="text-button ws-source-trigger" data-task-context="sources" data-task-id="${esc(task.id)}" aria-haspopup="dialog">${workspaceIcon('source', 14)}${t('来源', 'Sources')}<span>${refs.length + (task.mcpCalls?.length || 0)}</span></button><div class="ws-source-chips">${sourceChips(task)}</div><button class="text-button ws-linked-memory" data-task-context="memory" data-task-id="${esc(task.id)}" aria-haspopup="dialog">${workspaceIcon('memory', 14)}${t('记忆', 'Memory')}${memories.length ? ` ${memories.length}` : ''}</button></div>`;
   }
 
-  function inspector(task, { record = false, inline = false, compact = false } = {}) {
+  function inspector(task, { inline = false, compact = false, page = false } = {}) {
     if (!task) return '';
     const heading = compact
-      ? `<header class="ws-inspector-heading ws-compact-heading"><span class="ws-compact-label">${t('任务详情', 'Task details')}</span><h2 class="sr-only" tabindex="-1">${esc(task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up'))}</h2>${controls(task, { close: !record, record })}</header>`
-      : `<header class="ws-inspector-heading"><div>${badge(task)}<h2 tabindex="-1">${esc(task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up'))}</h2></div>${controls(task, { close: !record, record })}</header><p class="ws-task-update">${esc(summary(task))}</p>`;
-    return `<section class="ws-inspector${inline ? ' inline' : ''}" data-inspector-task="${esc(task.id)}" aria-label="${t('任务详情', 'Task details')}">${heading}${task.guidance && summary(task) !== task.guidance.text ? `<blockquote class="ws-direction-quote">${esc(task.guidance.text)}</blockquote>` : ''}<div class="ws-inspector-body"><div class="ws-inspector-context">${steps(task)}${task.control?.paused ? `<div class="ws-paused-note">${workspaceIcon('pause', 15)}<span>${task.action ? t('已停止后续动作，已经发出的请求仍需核验。', 'Further actions stopped. Already dispatched requests still need verification.') : task.control.pauseReason === 'state_delta_uncertain' ? t('新信息需要你核对。查看后可恢复跟进。', 'New evidence needs your review. Resume after checking it.') : t('你已暂停这件事。恢复后会重新核对最新来源。', 'You paused this task. Resume to check the latest sources.')}</span><button class="text-button" data-task-control="resume" data-task-id="${esc(task.id)}">${t('恢复', 'Resume')}</button></div>` : renderAction(task)}${receipt(task)}${checklist(task)}${sources(task)}${timeline(task)}${record ? `<details class="ws-execution-details" data-preserve="ws-management-${esc(task.id)}" open><summary>${t('跟进设置', 'Follow-up settings')}</summary>${renderManagement(task)}</details><details class="ws-execution-details" data-preserve="full-evidence-${esc(task.id)}"><summary>${t('完整来源、证据与行动记录', 'Full sources, evidence and action history')}</summary>${renderDetails(task)}</details>` : `<div class="ws-detail-links">${task.evidence?.criteria?.length ? `<button class="text-button" data-proof="${esc(task.id)}">${t('核对依据', 'Check evidence')} ↗</button>` : ''}<button class="text-button" data-open-task="${esc(task.id)}">${t('记录与跟进设置', 'History & follow-up settings')} ↗</button></div>`}</div>${composer(task, record)}</div></section>`;
+      ? `<header class="ws-inspector-heading ws-compact-heading"><span class="ws-compact-label">${t('任务详情', 'Task details')}</span><h2 class="sr-only" tabindex="-1">${esc(task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up'))}</h2>${controls(task, { close: !page, page })}</header>`
+      : `<header class="ws-inspector-heading"><div>${badge(task)}<${page ? 'h1' : 'h2'} tabindex="-1">${esc(task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up'))}</${page ? 'h1' : 'h2'}></div>${controls(task, { close: !page, page })}</header><p class="ws-task-update">${esc(summary(task))}</p>`;
+    return `<section class="ws-inspector${inline ? ' inline' : ''}" data-inspector-task="${esc(task.id)}" aria-label="${t('任务详情', 'Task details')}">${heading}${task.guidance && summary(task) !== task.guidance.text ? `<blockquote class="ws-direction-quote">${esc(task.guidance.text)}</blockquote>` : ''}<div class="ws-inspector-body"><div class="ws-inspector-context">${steps(task)}<div class="ws-detail-columns"><div class="ws-detail-main">${stateNotice(task)}${task.control?.paused ? `<div class="ws-paused-note">${workspaceIcon('pause', 15)}<span>${task.action ? t('已停止后续动作，已经发出的请求仍需核验。', 'Further actions stopped. Already dispatched requests still need verification.') : task.control.pauseReason === 'state_delta_uncertain' ? t('新信息需要你核对。查看后可恢复跟进。', 'New evidence needs your review. Resume after checking it.') : t('你已暂停这件事。恢复后会重新核对最新来源。', 'You paused this task. Resume to check the latest sources.')}</span><button class="text-button" data-task-control="resume" data-task-id="${esc(task.id)}">${t('恢复', 'Resume')}</button></div>` : task.preparedWork ? preparedWork(task) : renderAction(task)}${receipt(task)}${composer(task, page)}</div><div class="ws-detail-side">${checklist(task, { collapseSatisfied: page && task.status !== 'ready_for_approval' && !task.preparedWork })}${sources(task)}${timeline(task)}${page ? `<details class="ws-execution-details" data-preserve="ws-management-${esc(task.id)}"><summary>${t('跟进设置', 'Follow-up settings')}</summary>${renderManagement(task)}</details><details class="ws-execution-details" data-preserve="full-evidence-${esc(task.id)}"><summary>${t('要求与来源依据', 'Requirements and source evidence')}</summary><p class="ws-evidence-explanation">${t('原始请求的要求，以及来源中的对应内容，用来解释 Agent 为什么准备或执行下一步。', 'The original requirements and matching source excerpts explain why the agent prepared or took the next step.')}</p>${renderDetails(task)}</details>` : ''}</div></div></div></div></section>`;
+  }
+
+  // States where the visible result is not final say so first, in words.
+  function stateNotice(task) {
+    const status = taskState(task, context().connections);
+    if (status === 'paused_by_policy') {
+      const policyId = task.activationHold?.policyIds?.[0] || '';
+      return `<div class="ws-state-notice" role="status"><span><strong>${t('因规则暂停', 'Paused by a rule')}</strong>${t('修改或停用对应规则后，会重新核对来源并继续准备。', 'Update or disable the matching rule to recheck sources and continue preparation.')}</span><button type="button" class="text-button" data-open-rules="${esc(policyId)}">${t('查看这条规则', 'Open this rule')}</button></div>`;
+    }
+    if (status === 'result_unverified') return `<div class="ws-state-notice" role="status"><span><strong>${t('结果尚未确认', 'Result not confirmed')}</strong>${t('行动已发起，提供方还没确认结果。不会自动重试，也不会显示为完成。', 'The action started; the provider has not confirmed it. It will not be retried or shown as done until confirmed.')}</span></div>`;
+    if (status === 'failed') return `<div class="ws-state-notice" data-tone="error" role="status"><span><strong>${t('处理失败', 'Failed')}</strong>${esc(task.reason || t('没有执行任何对外操作。', 'No external action was taken.'))}</span>${task.kind === 'standing_intent' ? `<button class="secondary-button" data-retry-prepared="${esc(task.id)}" ${pending.has(task.id) ? 'disabled' : ''}>${t('重试准备', 'Retry preparation')}</button>` : ''}</div>`;
+    if (status === 'source_disconnected') return `<div class="ws-state-notice" data-tone="error" role="status"><span><strong>${t('来源已断开', 'Source disconnected')}</strong>${t('重新连接前，这件事不会继续更新。', 'This task will not update until the source is reconnected.')}</span></div>`;
+    if (status === 'unknown') return `<div class="ws-state-notice" role="status"><span><strong>${t('状态待确认', 'State unknown')}</strong>${t('记录不足以判断当前状态，未执行对外操作。', 'The record is not enough to determine the state. No external action was taken.')}</span></div>`;
+    return '';
+  }
+
+  function preparedWork(task) {
+    if (!task.preparedWork) return '';
+    const accepted = Boolean(task.preparedWork.acceptedAt);
+    return `<section class="ws-context-memories"><h3>${accepted ? t('已接受的内容', 'Accepted preparation') : task.preparedWork.kind === 'draft' ? t('草稿 · 待审阅', 'Draft · review required') : t('来源简报 · 待审阅', 'Source brief · review required')}</h3><p>${t('请按目标核对内容与来源。', 'Review the content and sources against your goal.')}</p><pre style="white-space:pre-wrap;font:inherit">${esc(task.preparedWork.body)}</pre>${!accepted && !task.activationHold ? `<button class="primary-button" data-accept-prepared="${esc(task.id)}" ${pending.has(task.id) ? 'disabled' : ''}>${t('接受内容并结束这次跟进', 'Accept and finish this follow-up')}</button>` : ''}${errors.has(task.id) ? `<p class="ws-inline-error" role="alert">${esc(errors.get(task.id))}</p>` : ''}</section>`;
   }
 
   // Requirements and their evidence, visible in place: what was asked, what was
   // found and where. Missing items are never hidden behind a disclosure.
-  function checklist(task) {
+  function checklist(task, { collapseSatisfied = false } = {}) {
     const criteria = task.evidence?.criteria || [];
     if (!criteria.length) return '';
     const met = criteria.filter(item => item.status === 'satisfied').length;
     const mark = item => item.status === 'satisfied' ? 'met' : item.status === 'unverifiable' ? 'unknown' : 'missing';
     const label = { met: t('已满足', 'Met'), missing: t('缺少', 'Missing'), unknown: t('无法确认', 'Unverifiable') };
-    return `<section class="ws-checklist" aria-label="${t('要求核对', 'Requirement check')}"><h3>${t('要求', 'Requirements')}<span>${met}/${criteria.length}</span></h3><ul>${criteria.map(item => { const state = mark(item); const proof = item.evidence?.find(entry => entry.excerpt); return `<li data-check="${state}"><span class="ws-check-mark" aria-hidden="true">${state === 'met' ? workspaceIcon('check', 11) : state === 'missing' ? '—' : '?'}</span><span class="ws-check-copy"><strong>${esc(item.label || item.id)}</strong>${proof ? `<q>${esc(proof.excerpt)}</q>` : `<small>${label[state]}</small>`}</span></li>`; }).join('')}</ul></section>`;
+    const row = item => { const state = mark(item); const proof = item.evidence?.find(entry => entry.excerpt); return `<li data-check="${state}"><span class="ws-check-mark" aria-hidden="true">${state === 'met' ? workspaceIcon('check', 11) : state === 'missing' ? '—' : '?'}</span><span class="ws-check-copy"><strong>${esc(item.label || item.id)}</strong>${proof ? `<q>${esc(proof.excerpt)}</q>` : `<small>${label[state]}</small>`}</span></li>`; };
+    const satisfied = criteria.filter(item => item.status === 'satisfied');
+    const outstanding = criteria.filter(item => item.status !== 'satisfied');
+    const collapse = collapseSatisfied && satisfied.length && outstanding.length;
+    const visible = collapse ? outstanding : criteria;
+    const completed = collapse ? `<details class="ws-satisfied-evidence" data-satisfied-evidence data-preserve="satisfied-${esc(task.id)}"><summary>${t(`已满足 ${satisfied.length} 项`, `${satisfied.length} satisfied`)}</summary><ul>${satisfied.map(row).join('')}</ul></details>` : '';
+    return `<section class="ws-checklist" aria-label="${t('要求核对', 'Requirement check')}"><h3>${t('要求', 'Requirements')}<span>${met}/${criteria.length}</span></h3><ul>${visible.map(row).join('')}</ul>${completed}</section>`;
   }
 
   // This task's own history, newest first, so the drawer explains how the
@@ -217,21 +244,57 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     return `<article class="ws-recovery-card"><div>${badge(task)}<h3>${esc(task.subject)}</h3><p>${esc(summary(task))}</p></div><div class="action-row">${renderAction(task)}<button class="text-button" data-open-task="${esc(task.id)}">${t('调整这件事', 'Adjust task')} ↗</button></div></article>`;
   }
 
+  function sharedWaitBadge(task) {
+    const shared = (task.management?.dependencies || []).filter(dep => dep.taskIds?.length > 1);
+    if (!shared.length) return '';
+    const dep = shared[0];
+    const key = dep.condition || dep.label || 'shared-wait';
+    const others = dep.taskIds.length - 1;
+    const label = others === 1
+      ? t('与1个任务共享等待', 'Shared wait with 1 task')
+      : t(`与${others}个任务共享等待`, `Shared wait with ${others} tasks`);
+    return `<button type="button" class="ws-shared-dep-badge" data-shared-dep-group="${esc(key)}" aria-pressed="false" title="${esc(dep.label || key)}">${label}</button>`;
+  }
+
   function row(task, lanes = false) {
     const status = taskState(task, context().connections);
     const title = task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up');
     const active = task.id === selected;
     const moment = shortMoment(task.updatedAt || task.createdAt || task.action?.at);
-    // One row answers: what, which state, what changed or comes next, where it came from.
-    return `<article class="ws-task-row${active ? ' selected' : ''}" data-task-card="${esc(task.id)}" data-state="${status}"><div class="ws-row-main"><button class="ws-task-select" data-select-task="${esc(task.id)}" aria-expanded="${active}"><span class="ws-status-mark" data-state="${status}" aria-hidden="true"></span><span class="ws-row-copy"><strong>${esc(title)}</strong><span>${esc(summary(task))}</span></span></button>${steps(task, true)}<div class="ws-row-meta">${lanes ? badge(task) : `<span class="ws-row-state" data-state="${status}">${esc(stateLabel(status))}</span>`}${sourceChips(task)}${moment ? `<time datetime="${esc(task.updatedAt || task.createdAt || '')}">${esc(moment)}</time>` : ''}</div></div></article>`;
+    const depBadge = sharedWaitBadge(task);
+    if (mode === 'field') {
+      // A field node answers two things: what it is and what is happening now.
+      const mixed = ['attention', 'quiet'].includes(stateGroup(status));
+      return `<article class="ws-task-row${active ? ' selected' : ''}" data-task-card="${esc(task.id)}" data-state="${status}"><button class="ws-task-select" data-select-task="${esc(task.id)}" aria-expanded="${active}"><span class="ws-node-head"><span class="ws-status-mark" data-state="${status}" aria-hidden="true"></span><strong>${esc(title)}</strong>${mixed ? `<span class="ws-node-state" data-state="${status}">${esc(stateLabel(status))}</span>` : `<span class="sr-only">${esc(stateLabel(status))}</span>`}</span><span class="ws-node-sub">${esc(summary(task))}</span></button>${depBadge}</article>`;
+    }
+    return `<article class="ws-task-row${active ? ' selected' : ''}" data-task-card="${esc(task.id)}" data-state="${status}"><div class="ws-row-main"><div class="ws-row-title"><button class="ws-task-select" data-select-task="${esc(task.id)}" aria-expanded="${active}"><span class="ws-status-mark" data-state="${status}" aria-hidden="true"></span><span class="ws-row-copy"><strong>${esc(title)}</strong><span>${esc(summary(task))}</span></span></button>${depBadge}</div>${steps(task, true)}<div class="ws-row-meta">${lanes ? badge(task) : `<span class="ws-row-state" data-state="${status}">${esc(stateLabel(status))}</span>`}${sourceChips(task)}${moment ? `<time datetime="${esc(task.updatedAt || task.createdAt || '')}">${esc(moment)}</time>` : ''}</div></div></article>`;
+  }
+
+  // The order matches the field: needs you, in motion, waiting, then the quiet
+  // end of the workspace. Arrow keys and page steppers use the same order.
+  function orderedTasks(tasks) {
+    const connections = context().connections;
+    return ['attention', 'working', 'waiting', 'quiet'].flatMap(group =>
+      tasks.filter(task => stateGroup(taskState(task, connections)) === group));
+  }
+
+  function taskPage(task, tasks) {
+    const order = orderedTasks(tasks);
+    const index = order.findIndex(item => item.id === task.id);
+    const position = index >= 0 ? t(`第 ${index + 1} / ${order.length} 件`, `${index + 1} of ${order.length}`) : '';
+    const prev = index > 0 ? order[index - 1] : null;
+    const next = index >= 0 && index + 1 < order.length ? order[index + 1] : null;
+    const step = (delta, target, label, icon) => `<button class="icon-button ws-task-step" data-task-step="${delta}" aria-label="${esc(label)}" title="${esc(label)}" ${target ? '' : 'disabled'}>${workspaceIcon(icon, 16)}</button>`;
+    return `<div class="ws-task-page"><article class="ws-detail-drawer is-page" tabindex="-1" aria-label="${t('任务详情', 'Task details')}" aria-keyshortcuts="ArrowLeft ArrowRight"><div class="ws-task-page-bar"><button class="text-button ws-task-back" data-close-inspector>${workspaceIcon('back', 14)}${t('返回工作台', 'Back to workspace')}</button><span class="ws-task-position" aria-live="polite">${esc(position)}</span><div class="ws-task-stepper" role="group" aria-label="${t('切换任务', 'Switch task')}">${step(-1, prev, t('上一个任务', 'Previous task'), 'back')}${step(1, next, t('下一个任务', 'Next task'), 'arrow')}</div></div>${inspector(task, { page: true })}</article></div>`;
   }
 
   function grouped(tasks) {
+    // The actionable shared-wait card lives above the workspace. Task badges
+    // retain the related-task highlighting without a second dependency panel.
     return ['attention', 'working', 'waiting', 'quiet'].map(group => {
       const matches = tasks.filter(task => stateGroup(taskState(task, context().connections)) === group);
-      // Empty groups are omitted; the status line already reports zero counts.
-      if (!matches.length) return '';
-      return `<section class="ws-task-group" data-group="${group}"><h3><i aria-hidden="true"></i>${groupLabel(group)}<span>${matches.length}</span></h3><div>${matches.map(task => row(task)).join('')}</div></section>`;
+      if (!matches.length && mode !== 'field') return '';
+      return `<section class="ws-task-group" data-group="${group}" data-empty="${!matches.length}"><h3><i aria-hidden="true"></i>${groupLabel(group)}<span>${matches.length}</span></h3><div>${matches.map(task => row(task)).join('') || '<p class="ws-group-empty" aria-label="' + t('暂无', 'None') + '">—</p>'}</div></section>`;
     }).join('');
   }
 
@@ -255,7 +318,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     if (composing) return;
     lastRender = { tasks, emptyHTML, allTasks };
     const ctx = context();
-    if (workspace !== ctx.workspace) { workspace = ctx.workspace; selected = null; selectedMemoryScope = 'all'; editingMemory = null; drafts.clear(); errors.clear(); }
+    if (workspace !== ctx.workspace) { workspace = ctx.workspace; selected = null; drafts.clear(); errors.clear(); }
     if (selected && !allTasks.some(task => task.id === selected)) selected = null;
     const task = tasks.find(item => item.id === selected);
     const storedMode = readLocal('unprompted:workspace-default', 'field');
@@ -266,17 +329,18 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     if (filter) filter.value = context().filter || 'all';
     byId('taskContent').dataset.mode = mode;
     byId('taskContent').dataset.taskCount = String(tasks.length);
+    if (!byId('viewHome').hidden) byId('pageCrumb').textContent = task ? t('任务详情', 'Task details') : t('工作台', 'Overview');
+    byId('viewHome').querySelector('.home-heading').hidden = Boolean(task);
     let html = '';
     if (!tasks.length) html = emptyHTML;
-    else if (mode === 'field') html = `<div class="ws-workbench"><div class="ws-workbench-list"><div class="ws-field">${grouped(tasks)}</div></div></div>`;
+    else if (task) html = taskPage(task, tasks);
+    else if (mode === 'field') html = `<div class="ws-field">${grouped(tasks)}</div>`;
     else if (mode === 'index') html = `<div class="ws-index">${grouped(tasks)}</div>`;
     else if (mode === 'lanes') html = `<div class="ws-lanes"><div class="ws-lanes-header"><span>${t('任务', 'Task')}</span><span>${t('执行路径', 'Execution path')}</span><span>${t('状态', 'State')}</span></div>${tasks.map(task => row(task, true)).join('')}</div>`;
-    else if (mode === 'spotlight') html = `<div class="ws-focus"><button class="text-button ws-back" data-workspace-return>${workspaceIcon('back', 14)}${t('回到工作台', 'Back to workspace')}</button>${task ? inspector(task) : `<div class="ws-focus-index">${grouped(tasks)}</div>`}${task && tasks.length > 1 ? `<div class="ws-other-tasks"><span>${t('其他任务', 'Other tasks')}</span><div>${tasks.filter(item => item.id !== selected).map(item => `<button data-select-task="${esc(item.id)}">${badge(item)}<strong>${esc(item.subject)}</strong>${workspaceIcon('arrow', 12)}</button>`).join('')}</div></div>` : ''}</div>`;
+    else if (mode === 'spotlight') html = `<div class="ws-focus"><button class="text-button ws-back" data-workspace-return>${workspaceIcon('back', 14)}${t('回到工作台', 'Back to workspace')}</button><div class="ws-focus-index">${grouped(tasks)}</div></div>`;
     else html = `<div class="ws-pulse">${pulse(tasks, ctx.state)}</div>`;
-    if (task && mode !== 'spotlight') html += `<aside class="ws-detail-drawer" aria-label="${t('任务详情', 'Task details')}">${inspector(task)}</aside>`;
     update('taskContent', html);
     update('workspaceSuggestion', '');
-    renderMemories();
     renderContextDialog();
     appearance.refresh();
   }
@@ -284,7 +348,58 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   function select(id, { focus = false, toggle = true } = {}) {
     selected = toggle && selected === id ? null : id;
     if (lastRender) render(lastRender);
-    if (focus) byId('taskContent').querySelector('.ws-inspector h2')?.focus({ preventScroll: true });
+    if (focus) {
+      const drawer = byId('taskContent').querySelector('.ws-detail-drawer');
+      if (drawer) {
+        drawer.tabIndex = -1;
+        drawer.focus({ preventScroll: true });
+        window.scrollTo({ top: 0, behavior: 'auto' });
+      } else byId('taskContent').querySelector('.ws-inspector h2')?.focus({ preventScroll: true });
+    }
+  }
+
+  // ← and → move between the cards in the same order the workspace shows
+  // them, without returning to the overview.
+  function stepTask(delta, { focus = true } = {}) {
+    const order = orderedTasks(lastRender?.tasks || []);
+    const index = order.findIndex(item => item.id === selected);
+    const next = order[index + delta];
+    if (!next) return false;
+    select(next.id, { toggle: false, focus });
+    return true;
+  }
+
+  const NEEDS_YOU = new Set(['needs_user', 'failed', 'source_disconnected', 'result_unverified', 'unknown']);
+  const needsIds = () => [...new Set([...byId('taskContent').querySelectorAll('[data-task-card]')].filter(row => NEEDS_YOU.has(row.dataset.state)).map(row => row.dataset.taskCard))];
+  function queueIds() { return needsIds(); }
+  function selection() { return selected; }
+
+  function focusDecision(id) {
+    select(id, { focus: true, toggle: false });
+    return true;
+  }
+
+  // The status button always opens the first remaining item. N uses openRelative.
+  function openFirstDecision() {
+    const ids = needsIds();
+    if (!ids.length) return false;
+    return focusDecision(ids[0]);
+  }
+
+  function openAfter(before, finishedId) {
+    const next = nextQueueId(before, needsIds(), finishedId);
+    if (!next) return false;
+    return focusDecision(next);
+  }
+
+  // N moves to the following item and stays on the last one. It does not wrap.
+  function openRelative(currentId) {
+    const ids = needsIds();
+    if (!ids.length) return false;
+    const index = currentId == null ? -1 : ids.indexOf(currentId);
+    if (index >= 0 && index + 1 < ids.length) return focusDecision(ids[index + 1]);
+    if (index >= 0) return focusDecision(ids[index]);
+    return focusDecision(ids[0]);
   }
 
   function setMode(next, { persist = true } = {}) {
@@ -295,192 +410,120 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     if (lastRender) render(lastRender);
   }
 
-  async function command(taskId, operation, payload = {}) {
+  async function command(taskId, operation, payload = {}, advanceQueue = false) {
     if (pending.has(taskId)) return;
+    const before = advanceQueue ? queueIds() : null;
     pending.add(taskId); errors.delete(taskId);
     refresh();
+    let advance = false;
     try {
       const result = await post(`/api/tasks/${encodeURIComponent(taskId)}/${operation}`, payload);
       if (operation === 'direction') drafts.delete(taskId);
       applyState(result.state);
-      notify(operation === 'pause' ? t('已暂停', 'Task paused') : operation === 'resume' ? t('已恢复，正在核对最新来源', 'Resumed; checking the latest sources') : operation === 'undo-direction' ? t('已恢复之前的要求', 'Previous requirements restored') : t('要求已更新，尚未执行对外操作', 'Requirements updated. No external action taken.'));
+      advance = advanceQueue;
+      notify(operation === 'prepared-work/accept' ? t('已接受内容，本次跟进已结束', 'Preparation accepted; this follow-up is complete') : operation === 'prepared-work/retry' ? t('正在重新准备内容', 'Retrying preparation') : operation === 'pause' ? t('已暂停', 'Task paused') : operation === 'resume' ? t('已恢复，正在核对最新来源', 'Resumed; checking the latest sources') : operation === 'undo-direction' ? t('已恢复之前的要求', 'Previous requirements restored') : t('要求已更新，尚未执行对外操作', 'Requirements updated. No external action taken.'));
     } catch (error) { errors.set(taskId, copy(error.message)); notify(error.message, true); }
-    finally { pending.delete(taskId); refresh(); }
-  }
-
-  function renderMemories() {
-    const state = context().state;
-    if (!state) return;
-    const memories = state.taskMemories || [];
-    const active = memories.filter(memory => !memory.deletedAt);
-    const deleted = memories.filter(memory => memory.deletedAt);
-    const scopes = [...new Set(active.map(memory => memory.scope?.entity).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    if (memoryScope !== 'all' && !scopes.includes(memoryScope)) memoryScope = 'all';
-    const query = memoryQuery.trim().toLocaleLowerCase();
-    const visible = active.filter(memory => (memoryScope === 'all' || memory.scope?.entity === memoryScope) &&
-      (!query || [memory.text, memory.scope?.entity, memory.scope?.deliverable].join(' ').toLocaleLowerCase().includes(query)));
-    const groups = new Map();
-    for (const memory of visible) {
-      const entity = memory.scope?.entity || t('未指定范围', 'Unscoped');
-      if (!groups.has(entity)) groups.set(entity, []);
-      groups.get(entity).push(memory);
+    finally {
+      pending.delete(taskId);
+      refresh();
+      if (advance) openAfter(before, taskId);
     }
-    const scopeEntries = [...groups.entries()];
-    const focusedScope = selectedMemoryScope !== 'all' && groups.has(selectedMemoryScope) ? selectedMemoryScope : null;
-    const focusedMemories = focusedScope ? groups.get(focusedScope) || [] : [];
-
-    const memoryAction = (memory, operation, icon, label, { danger = false, forget = false } = {}) => {
-      const labelled = memoryView === 'library';
-      const attrs = forget
-        ? `data-forget-kind="task_memory" data-forget-id="${esc(memory.id)}"`
-        : `data-memory-operation="${operation}" data-memory-id="${esc(memory.id)}"`;
-      return `<button class="${labelled ? `text-button memory-row-action${danger ? ' is-danger' : ''}` : 'icon-button'}" ${attrs} aria-label="${label}" title="${label}">${workspaceIcon(icon, labelled ? 13 : 14)}${labelled ? `<span>${label}</span>` : ''}</button>`;
-    };
-    const memoryRow = memory => `<article class="ws-memory" data-memory-id="${esc(memory.id)}"><div class="ws-memory-content"><small>${esc(memory.scope?.deliverable || t('全部交付物', 'All deliverables'))}${memory.updatedAt ? ` · ${esc(shortMoment(memory.updatedAt))}` : ''}</small>${editingMemory?.id === memory.id ? `<form class="memory-edit-form" data-memory-edit="${esc(memory.id)}" aria-busy="${pending.has(memory.id)}"><label class="sr-only" for="memory-edit-${esc(memory.id)}">${t('编辑记忆', 'Edit memory')}</label><textarea id="memory-edit-${esc(memory.id)}" name="text" maxlength="2000" required ${pending.has(memory.id) ? 'readonly' : ''}>${esc(editingMemory.text)}</textarea><div class="actions"><button class="text-button" type="button" data-memory-cancel>${t('取消', 'Cancel')}</button><button class="primary-button" type="submit" ${pending.has(memory.id) ? 'disabled' : ''}>${t('保存', 'Save')}</button></div></form>` : `<p>${esc(memory.text)}</p>`}${memory.taskId ? `<button class="text-button" data-open-task="${esc(memory.taskId)}">${t('来源任务', 'Source task')} ↗</button>` : `<span class="memory-origin-label">${t('示例记忆', 'Sample memory')}</span>`}</div><div class="ws-memory-actions">${memoryAction(memory, 'edit', 'edit', t('编辑', 'Edit'))}${memoryAction(memory, 'delete', 'trash', t('删除', 'Delete'), { danger: true })}${state.durable ? memoryAction(memory, '', 'back', t('永久忘记', 'Forget'), { forget: true }) : ''}</div></article>`;
-
-    const stats = `<div class="memory-summary" aria-label="${t('记忆概览', 'Memory overview')}">
-      <button class="memory-stat${!query && memoryScope === 'all' ? ' is-active' : ''}" data-memory-clear><strong>${active.length}</strong><span><b>${t('全部记忆', 'All memories')}</b><small>${t('清除筛选', 'Clear filters')}</small></span></button>
-      <div class="memory-stat memory-stat-fact"><strong>${scopes.length}</strong><span><b>${t('工作范围', 'Work scopes')}</b><small>${t('按已保存的范围分组', 'Grouped by saved scope')}</small></span></div>
-      <button class="memory-stat" data-memory-stat="deleted" ${deleted.length ? '' : 'disabled aria-disabled="true"'}><strong>${deleted.length}</strong><span><b>${t('已删除', 'Deleted')}</b><small>${deleted.length ? t('可恢复', 'Recoverable') : t('没有已删除项', 'Nothing deleted')}</small></span></button>
-    </div>`;
-
-    const toolbar = `<div class="memory-toolbar">
-      <label class="collection-search"><span class="sr-only">${t('搜索记忆', 'Search memories')}</span>${workspaceIcon('search', 15)}<input type="search" data-memory-search value="${esc(memoryQuery)}" placeholder="${t('搜索内容、项目或交付物', 'Search content, project or deliverable')}"></label>
-      <label class="memory-scope-label"><span class="sr-only">${t('筛选工作范围', 'Filter work scope')}</span><select class="memory-scope-select" data-memory-scope-filter><option value="all">${t('全部范围', 'All scopes')}</option>${scopes.map(scope => `<option value="${esc(scope)}" ${scope === memoryScope ? 'selected' : ''}>${esc(scope)}</option>`).join('')}</select></label>
-      ${query || memoryScope !== 'all' ? `<button class="text-button memory-clear" data-memory-clear>${t('清除筛选', 'Clear filters')}</button>` : ''}
-      <div class="memory-view-toggle" role="group" aria-label="${t('记忆视图', 'Memory view')}">${[['space', t('空间', 'Space')], ['library', t('资料库', 'Library')]].map(([view, label]) => `<button type="button" data-memory-view="${view}" aria-pressed="${memoryView === view}">${label}</button>`).join('')}</div>
-    </div>`;
-
-    const noMatches = `<div class="empty-state"><span class="empty-mark" aria-hidden="true">${workspaceIcon('search', 22)}</span><h2>${t('没有相符的记忆', 'No matching memories')}</h2><p>${t('换个关键词，或清除范围筛选。', 'Try another search or clear the scope filter.')}</p><button class="secondary-button" data-memory-clear>${t('清除筛选', 'Clear filters')}</button></div>`;
-
-    const clusterMarkup = scopeEntries.map(([entity, items]) => {
-      const deliverables = [...new Set(items.map(memory => memory.scope?.deliverable).filter(Boolean))].slice(0, 3);
-      const latest = items.map(memory => memory.updatedAt).filter(Boolean).sort().at(-1);
-      return `<button class="memory-cluster${entity === focusedScope ? ' is-selected' : ''}" data-memory-cluster="${esc(entity)}" aria-pressed="${entity === focusedScope}"><span class="memory-node-icon" aria-hidden="true">${workspaceIcon('memory', 18)}</span><span><h3>${esc(entity)}</h3><span class="memory-cluster-meta">${items.length} ${t('条记忆', items.length === 1 ? 'memory' : 'memories')}${latest ? ` · ${esc(shortMoment(latest))}` : ''}</span></span><span class="memory-cluster-preview">${items.slice(0, 3).map(memory => `<span>${esc(memory.text)}</span>`).join('')}${items.length > 3 ? `<small>${t(`还有 ${items.length - 3} 条`, `${items.length - 3} more`)}</small>` : ''}</span><span class="memory-cluster-scopes">${deliverables.map(item => `<span>${esc(item)}</span>`).join('')}</span></button>`;
-    }).join('');
-
-    const space = `<div class="memory-browser">
-      <section class="memory-space" aria-label="${t('按工作范围查看记忆', 'Memories by work scope')}">
-        <header class="memory-space-header"><div><h2>${t('记忆空间', 'Memory space')}</h2><p>${t('项目与交付物', 'Projects and deliverables')}</p></div><span>${visible.length} ${t('条', visible.length === 1 ? 'memory' : 'memories')}</span></header>
-        ${scopeEntries.length ? `<div class="memory-clusters">${clusterMarkup}</div>` : noMatches}
-        
-      </section>
-      ${focusedScope ? `<aside class="memory-inspector" aria-label="${t('记忆范围详情', 'Scope details')}"><header><div class="memory-inspector-top"><span class="memory-kicker">${t('记忆范围', 'Memory scope')}</span><button type="button" class="icon-button" data-memory-close aria-label="${t('收起记忆详情', 'Close memory details')}">${workspaceIcon('close', 16)}</button></div><h2 tabindex="-1">${esc(focusedScope)}</h2><p>${focusedMemories.length} ${t('条记忆', focusedMemories.length === 1 ? 'memory' : 'memories')} · ${t('只在这些交付物中生效', 'Applies only to these deliverables')}</p><div class="memory-scope-chips">${[...new Set(focusedMemories.map(memory => memory.scope?.deliverable).filter(Boolean))].map(item => `<span class="ws-source-chip">${esc(item)}</span>`).join('')}</div></header><div class="memory-inspector-list">${focusedMemories.map(memoryRow).join('')}</div></aside>` : ''}
-    </div>`;
-
-    const library = `<div class="memory-library active">${scopeEntries.length ? scopeEntries.map(([entity, items]) => `<section class="memory-group"><h3>${esc(entity)}<span>${items.length}</span></h3><div>${items.map(memory => `<details class="memory-record" data-preserve="memory-record-${esc(memory.id)}"><summary><span>${esc(memory.text)}</span><small>${esc(memory.scope?.deliverable || '')}</small></summary>${memoryRow(memory)}</details>`).join('')}</div></section>`).join('') : noMatches}</div>`;
-
-    const empty = `<div class="empty-state memory-empty"><span class="empty-mark" aria-hidden="true">${workspaceIcon('memory', 22)}</span><h2>${t('还没有保存的记忆', 'No saved memories yet')}</h2><p>${t('纠偏一件事时选择“记住”，并限定项目与交付物，记忆才会出现在这里。', 'Choose “Remember” while steering a task, with a project and deliverable, and it will appear here.')}</p><button class="secondary-button" data-memory-empty-action="home">${t('去看看需要你的事', 'See what needs you')}</button></div>`;
-
-    const demoNote = active.some(memory => memory.origin === 'demo_preview') ? `<p class="memory-demo-note">${t('示例记忆 · 仅用于演示预览', 'Sample memories · preview data only')}</p>` : '';
-    update('memoryContent', active.length ? demoNote + stats + toolbar + (memoryView === 'library' ? library : space) : empty);
-    update('memoryDeleted', deleted.length ? `<details><summary>${t('已删除', 'Deleted')} · ${deleted.length}</summary><div class="memory-deleted-list">${deleted.map(memory => `<div class="ws-memory-deleted memory-deleted-row"><p>${esc(memory.text)}</p><small>${esc(memory.scope?.entity || '')}</small><button class="text-button" data-memory-operation="restore" data-memory-id="${esc(memory.id)}">${t('恢复', 'Restore')}</button>${state.durable ? `<button class="text-button" data-forget-kind="task_memory" data-forget-id="${esc(memory.id)}">${t('永久忘记', 'Forget permanently')}</button>` : ''}</div>`).join('')}</div></details>` : '');
-  }
-
-  async function memoryCommand(id, operation, text) {
-    if (pending.has(id)) return;
-    const memory = context().state.taskMemories?.find(item => item.id === id);
-    if (!memory) return;
-    pending.add(id);
-    renderMemories();
-    try {
-      const result = await post(`/api/memories/${encodeURIComponent(id)}`, { operation, text, version: operation === 'edit' ? editingMemory?.version : memory.updatedAt });
-      editingMemory = null; applyState(result.state);
-      notify(operation === 'delete' ? t('记忆已删除，可在“已删除”中恢复', 'Memory deleted. Restore it under Deleted.') : t('记忆已更新', 'Memory updated'));
-    } catch (error) { notify(error.message, true); }
-    finally { pending.delete(id); renderMemories(); }
   }
 
   document.addEventListener('click', event => {
     const target = event.target.closest('button');
     if (!target) return;
-    if (target.dataset.taskContext) openContext(target.dataset.taskContext, target.dataset.taskId, target);
+    if (target.dataset.retryPrepared) { const task = context().state.tasks.find(item => item.id === target.dataset.retryPrepared); if (task) void command(task.id, 'prepared-work/retry', { inputVersion: task.inputVersion }); return; }
+    if (target.dataset.acceptPrepared) { const task = context().state.tasks.find(item => item.id === target.dataset.acceptPrepared); if (task) void command(task.id, 'prepared-work/accept', { reviewToken: task.preparedWorkReviewToken }, Boolean(target.closest('#taskContent'))); return; }
+    if (target.dataset.sharedDepGroup) {
+      const groupKey = target.dataset.sharedDepGroup;
+      const badges = [...document.querySelectorAll(`#taskContent [data-shared-dep-group="${CSS.escape(groupKey)}"]`)];
+      const rows = badges.map(badge => badge.closest('.ws-task-row')).filter(Boolean);
+      const already = rows.length > 0 && rows.every(row => row.classList.contains('is-dep-highlighted'));
+      document.querySelectorAll('#taskContent .ws-task-row.is-dep-highlighted').forEach(row => row.classList.remove('is-dep-highlighted'));
+      document.querySelectorAll('#taskContent .ws-shared-dep-badge').forEach(badge => badge.setAttribute('aria-pressed', 'false'));
+      if (!already) {
+        rows.forEach(row => row.classList.add('is-dep-highlighted'));
+        badges.forEach(badge => badge.setAttribute('aria-pressed', 'true'));
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (target.dataset.taskContext) openContext(target.dataset.taskContext, target.dataset.taskId, target);
     else if (target.hasAttribute('data-context-close')) byId('taskContextDialog').close();
     else if (target.dataset.memoryScope && contextPanel) {
       const taskId = contextPanel.id;
       const original = drafts.get(taskId) || { text: '', scope: 'task' };
-      drafts.set(taskId, { ...original, scope: target.dataset.memoryScope });
+      drafts.set(taskId, { ...original, scope: target.dataset.memoryScope, operation: target.dataset.memoryScope === 'similar' ? 'append' : original.operation || 'append' });
       refresh();
       byId('taskContextDialog').close();
     } else if (target.dataset.contextPage) {
       restoreContextFocus = false;
       byId('taskContextDialog').close();
-      if (byId('taskDialog').open) byId('taskDialog').close();
       go(target.dataset.contextPage);
     } else if (target.dataset.workspaceMode) setMode(target.dataset.workspaceMode);
+    else if (target.dataset.taskStep) { event.preventDefault(); stepTask(Number(target.dataset.taskStep)); }
     else if (target.dataset.selectTask) { selectedEvent = target.dataset.selectEvent || null; select(target.dataset.selectTask, { focus: true, toggle: !target.dataset.selectEvent }); }
     else if (target.dataset.focusTask) { selected = target.dataset.focusTask; setMode('spotlight', { persist: false }); }
     else if (target.hasAttribute('data-workspace-return')) setMode(returnMode, { persist: false });
     else if (target.hasAttribute('data-close-inspector')) { const previous = selected; selected = null; byId('taskContent').dataset.collapsed = 'true'; if (lastRender) render(lastRender); byId('taskContent').querySelector(`[data-select-task="${CSS.escape(previous)}"]`)?.focus({ preventScroll: true }); }
     else if (target.dataset.taskControl) void command(target.dataset.taskId, target.dataset.taskControl);
     else if (target.dataset.undoDirection) void command(target.dataset.taskId, 'undo-direction', { id: target.dataset.undoDirection });
-    else if (target.dataset.memoryOperation) {
-      if (target.dataset.memoryOperation === 'edit') { const memory = context().state.taskMemories.find(item => item.id === target.dataset.memoryId); if (!memory) return; editingMemory = { id: memory.id, version: memory.updatedAt, text: memory.text }; renderMemories(); byId(`memory-edit-${editingMemory.id}`)?.focus(); }
-      else void memoryCommand(target.dataset.memoryId, target.dataset.memoryOperation);
-    } else if (target.dataset.memoryView) {
-      memoryView = target.dataset.memoryView;
-      writeLocal('unprompted:memory-view', memoryView);
-      renderMemories();
-    } else if (target.dataset.memoryStat === 'deleted') {
-      const details = byId('memoryDeleted').querySelector('details');
-      if (details) { details.open = true; details.scrollIntoView({ block: 'nearest' }); }
-    } else if (target.dataset.memoryCluster) {
-      selectedMemoryScope = selectedMemoryScope === target.dataset.memoryCluster ? 'all' : target.dataset.memoryCluster;
-      renderMemories();
-      byId('memoryContent').querySelector('.memory-inspector h2')?.focus({ preventScroll: true });
-    } else if (target.hasAttribute('data-memory-close')) {
-      const previous = selectedMemoryScope;
-      selectedMemoryScope = 'all'; renderMemories();
-      byId('memoryContent').querySelector(`[data-memory-cluster="${CSS.escape(previous)}"]`)?.focus({ preventScroll: true });
-    } else if (target.dataset.memoryEmptyAction) go(target.dataset.memoryEmptyAction);
-    else if (target.hasAttribute('data-memory-cancel')) { editingMemory = null; renderMemories(); }
-    else if (target.hasAttribute('data-memory-clear')) { memoryQuery = ''; memoryScope = 'all'; selectedMemoryScope = 'all'; renderMemories(); }
+  });
+  // Keep drafts in memory, but let the browser warn before discarding them.
+  window.addEventListener('beforeunload', event => {
+    if ([...drafts.values()].some(draft => draft.text?.trim())) event.preventDefault();
   });
   document.addEventListener('input', event => {
-    if (event.target.hasAttribute('data-memory-search')) { memoryQuery = event.target.value; if (!composing && !event.isComposing) renderMemories(); return; }
     const id = event.target.dataset.directionInput;
     if (id) {
-      drafts.set(id, { text: event.target.value, scope: event.target.closest('form').elements.scope.value });
-      // The inspector and record dialog edit one draft. Keep their DOM values
-      // in sync before native dialog focus/close events or live preservation
-      // can restore an older visible copy over the current draft.
+      drafts.set(id, { ...drafts.get(id), text: event.target.value, scope: event.target.closest('form').elements.scope.value });
+      // Live rendering preserves the draft and caret through the same state map.
       for (const input of document.querySelectorAll('[data-direction-input]')) {
         if (input !== event.target && input.dataset.directionInput === id) input.value = event.target.value;
       }
     }
   });
   document.addEventListener('change', event => {
+    if (event.target.dataset.directionOperation) { const id = event.target.dataset.directionOperation; drafts.set(id, { text: '', scope: 'task', ...drafts.get(id), operation: event.target.value }); return; }
     if (event.target.id === 'workspaceViewOptions') { setMode(event.target.value); return; }
-    if (event.target.hasAttribute('data-memory-scope-filter')) { memoryScope = event.target.value; renderMemories(); return; }
   });
   document.addEventListener('submit', event => {
-    const direction = event.target.dataset.taskDirection, memory = event.target.dataset.memoryEdit;
-    if (!direction && !memory) return;
+    const direction = event.target.dataset.taskDirection;
+    if (!direction) return;
     event.preventDefault();
-    if (direction) void command(direction, 'direction', { text: event.target.elements.direction.value, scope: event.target.elements.scope.value });
-    if (memory) void memoryCommand(memory, 'edit', event.target.elements.text.value);
+    void command(direction, 'direction', { text: event.target.elements.direction.value, scope: event.target.elements.scope.value, operation: drafts.get(direction)?.operation || 'append' });
   });
   document.addEventListener('compositionstart', () => { composing = true; });
-  document.addEventListener('compositionend', event => {
-    composing = false;
-    if (event.target.hasAttribute('data-memory-search')) {
-      memoryQuery = event.target.value;
-      renderMemories();
-    }
-  });
+  document.addEventListener('compositionend', () => { composing = false; });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing && !document.querySelector('dialog[open]') && !document.querySelector('.evidence-peek:not([hidden])')) {
-      const memoryClose = byId('memoryContent').querySelector('[data-memory-close]');
-      if (memoryClose && !byId('viewMemory').hidden) { event.preventDefault(); memoryClose.click(); return; }
       const close = byId('taskContent').querySelector('[data-close-inspector]');
       if (close && !byId('viewHome').hidden) { event.preventDefault(); close.click(); }
     }
     if (event.altKey && !event.ctrlKey && !event.metaKey && /^Digit[1-5]$/.test(event.code) && !event.target.closest('input,textarea,select,[contenteditable="true"]')) {
       event.preventDefault(); go('home'); setMode(WORKSPACE_MODES[Number(event.code.slice(-1)) - 1]);
     }
+    // On an open task page, ← and → move between cards without leaving it.
+    if (['ArrowLeft', 'ArrowRight'].includes(event.key) && selected && !event.defaultPrevented && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && !byId('viewHome').hidden && byId('taskContent').querySelector('.ws-task-page') && !document.querySelector('dialog[open]') && !document.querySelector('.evidence-peek:not([hidden])') && !event.target.closest('input,textarea,select,[contenteditable="true"]')) {
+      event.preventDefault();
+      stepTask(event.key === 'ArrowRight' ? 1 : -1);
+      return;
+    }
+    // J/K step through tasks that need the user, in on-screen order. Only an
+    // explicit keypress moves the selection; updates never do.
+    if (['j', 'k'].includes(event.key.toLowerCase()) && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && !byId('viewHome').hidden && !document.querySelector('dialog[open]') && !event.target.closest('input,textarea,select,[contenteditable="true"]')) {
+      const ids = needsIds();
+      if (ids.length) {
+        event.preventDefault();
+        const index = ids.indexOf(selected);
+        const next = index < 0 ? (event.key.toLowerCase() === 'j' ? 0 : ids.length - 1) : Math.max(0, Math.min(index + (event.key.toLowerCase() === 'j' ? 1 : -1), ids.length - 1));
+        select(ids[next], { focus: true, toggle: false });
+        byId('taskContent').querySelector(`[data-task-card="${CSS.escape(ids[next])}"]`)?.scrollIntoView({ block: 'nearest' });
+      }
+    }
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && event.target.dataset.directionInput && !event.isComposing) {
       event.preventDefault(); event.target.closest('form').requestSubmit();
     }
   });
-  return { render, select, setMode, inspector, recoveryCard, renderMemories, getMode: () => mode };
+  return { render, select, stepTask, openFirstDecision, openAfter, openRelative, queueIds, selection, setMode, inspector, recoveryCard, getMode: () => mode };
 }

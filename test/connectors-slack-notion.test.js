@@ -87,3 +87,51 @@ test('Notion reads selected pages as documents and does not advance past a faile
   assert.equal(failed.cursor.since, cursor.since);
   assert.doesNotMatch(JSON.stringify(failed), /secret body/);
 });
+
+test('Slack follows history pages and reports a deleted direct message as email.unavailable', async () => {
+  let clock = Date.parse('2026-10-28T00:00:00.000Z');
+  const deleted = new Set();
+  const fetchImpl = async url => {
+    const target = new URL(url), p = target.searchParams;
+    if (target.pathname === '/api/conversations.list') return json({ ok: true, channels: [{ id: 'D111AAAAA', is_im: true, updated: 1 }] });
+    if (target.pathname === '/api/users.info') return json({ ok: true, user: { real_name: 'Grace' } });
+    if (p.get('latest') === p.get('oldest')) return json({ ok: true, messages: deleted.has(p.get('latest')) ? [] : [{ type: 'message', user: 'UOTHER123', text: 'x', ts: p.get('latest') }] });
+    const after = message => Number(message.ts) >= Number(p.get('oldest'));
+    if (p.get('cursor') === 'page-2') return json({ ok: true, messages: [{ type: 'message', user: 'UOTHER123', text: 'Older request', ts: '1793130000.000100' }].filter(after), has_more: false });
+    const newer = [{ type: 'message', user: 'UOTHER123', text: 'Newer request', ts: '1793140000.000100' }].filter(after);
+    return json({ ok: true, messages: newer, ...(newer.length ? { has_more: true, response_metadata: { next_cursor: 'page-2' } } : {}) });
+  };
+  const connector = new SlackConnector({ auth, account: slackAccount, fetchImpl, now: () => clock });
+  const first = await connector.pull();
+  assert.equal(first.partial, false);
+  assert.equal(first.events.length, 2, 'both history pages were read');
+  assert.equal(Object.keys(first.cursor.messages).length, 2);
+  deleted.add('1793130000.000100');
+  clock += 60_000;
+  const second = await connector.pull({ cursor: first.cursor });
+  const removed = second.events.filter(event => event.type === 'email.unavailable');
+  assert.deepEqual(removed.map(event => event.payload.id), ['slack:T123ABC:D111AAAAA:1793130000.000100']);
+  assert.equal(Object.keys(second.cursor.messages).length, 1);
+});
+
+test('Notion reports archived pages and pages that stop being shared as document.unavailable', async () => {
+  const pageA = { object: 'page', id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', last_edited_time: '2026-10-27T12:00:00.000Z', properties: { Name: { type: 'title', title: [{ plain_text: 'Plan A' }] } } };
+  const pageB = { object: 'page', id: 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee', last_edited_time: '2026-10-27T11:00:00.000Z', properties: { Name: { type: 'title', title: [{ plain_text: 'Plan B' }] } } };
+  let results = [pageA, pageB];
+  const fetchImpl = async url => {
+    const target = new URL(url);
+    if (target.pathname === '/v1/search') return json({ results, has_more: false, next_cursor: null });
+    if (target.pathname === `/v1/pages/${pageB.id}`) return json({ object: 'error', code: 'object_not_found' }, 404);
+    return json({ results: [{ type: 'paragraph', paragraph: { rich_text: [{ plain_text: 'Body' }] } }] });
+  };
+  const connector = new NotionConnector({ auth, account: { id: 'workspace:user', label: 'Ada · Notes' }, fetchImpl, now });
+  const first = await connector.pull();
+  assert.deepEqual(Object.keys(first.cursor.pages).sort(), [pageA.id, pageB.id]);
+  results = [{ ...pageA, archived: true, last_edited_time: '2026-10-27T13:00:00.000Z' }];
+  const second = await connector.pull({ cursor: { ...first.cursor, since: '2026-10-27T00:00:00.000Z' } });
+  assert.deepEqual(second.events.map(event => [event.type, event.payload.id, event.payload.reason]).sort(), [
+    ['document.unavailable', `notion:${pageA.id}`, 'archived'],
+    ['document.unavailable', `notion:${pageB.id}`, 'removed_or_unshared']
+  ]);
+  assert.deepEqual(second.cursor.pages, {});
+});

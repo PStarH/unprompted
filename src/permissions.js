@@ -58,6 +58,12 @@ export class PermissionPolicy {
       throw new PermissionDeniedError('Shadow mode is read-only. External writes are refused.');
     }
     if (!rule.requiresApproval) return { allowed: true, actionClass, reason: 'No approval required for this class.' };
+    if (approval?.permission === 'temporary_yolo') {
+      if (!this.temporaryAuthorization?.(approval, taskId)) throw Object.assign(
+        new PermissionDeniedError('The YOLO authorization expired, was revoked, or belongs to a different task.'),
+        { code: 'AUTHORIZATION_REQUIRED', status: 403, definitiveNoEffect: true });
+      return { allowed: true, actionClass, reason: 'Active temporary user authorization.', grantId: approval.grantId };
+    }
     if (approval?.permission === 'user_approved') {
       if (taskId && approval.taskId && approval.taskId !== taskId) {
         throw new PermissionDeniedError('Approval was granted for a different task.');

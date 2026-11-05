@@ -10,6 +10,7 @@ developers as `npm run demo`.
 | Start using my real workspace | [Quick start](QUICKSTART.md) |
 | Connect accounts and recover authorization | [Account setup](ONBOARDING.md) |
 | Understand each connector and build another | [Connectors](CONNECTORS.md) |
+| Provision apps once and onboard every user | [完整连接配置教程（中文）](CONNECTOR_SETUP.zh-CN.md) |
 | Configure connectors in Chinese | [连接器配置](CONNECTORS.zh-CN.md) |
 | Configure a model, permissions or local storage | [Configuration](CONFIGURATION.md) |
 | Configure Google Workspace in detail | [Google integration](LIVE_INTEGRATION.md) |

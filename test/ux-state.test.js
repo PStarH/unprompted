@@ -1,17 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isSnoozed, taskFingerprint, workspaceSnapshot, changesSince, sortTasks, stableTaskOrder, matchesTask, readLocal, evidenceFacts, evidenceDelta, decisionQueue, decisionCursor, visibleAttentionItems } from '../public/ux-state.js';
+import { workspaceSnapshot, changesSince, sortTasks, stableTaskOrder, matchesTask, readLocal, evidenceFacts, evidenceDelta, decisionQueue, decisionCursor, visibleAttentionItems } from '../public/ux-state.js';
 import { copy, ui, setLocale } from '../public/i18n.js';
-
-test('snoozing expires and fresh evidence brings a decision back immediately', () => {
-  const task = { id: 'task:1', status: 'ready_for_approval', updatedAt: '2026-10-25T01:00:00Z', draft: { documentVersion: 3 } };
-  const entries = { [task.id]: { until: 2000, fingerprint: taskFingerprint(task) } };
-  assert.equal(isSnoozed(task, entries, 1000), true);
-  assert.equal(isSnoozed(task, entries, 2000), false);
-  assert.equal(isSnoozed({ ...task, updatedAt: '2026-10-25T01:05:00Z' }, entries, 1000), false);
-  assert.equal(isSnoozed({ ...task, draft: { documentVersion: 4 } }, entries, 1000), false);
-  assert.equal(isSnoozed(task, { [task.id]: { until: 'tomorrow' } }, 1000), false);
-});
 
 test('the return digest counts actual new work and completions without inventing saved time', () => {
   const previous = workspaceSnapshot({ tasks: [{ id: 'a', status: 'waiting_for_information' }, { id: 'b', status: 'completed' }] }, 1000);
@@ -39,6 +29,11 @@ test('both languages translate authored copy while preserving interpolated sourc
   assert.equal(ui`<p>需要你 ${original}</p>`, `<p>Needs you ${original}</p>`);
   setLocale('zh-CN');
   assert.equal(ui`<p>Verified complete ${original}</p>`, `<p>已核验完成 ${original}</p>`);
+  assert.equal(copy('这台 Mac 可以直接连接本地文件夹和备忘录，都不需要账号。'), '这台 Mac 可以直接连接本地文件夹和备忘录，都不需要账号。');
+  assert.equal(copy('回执 {id} · {kind} · {time}', { id: 'sim-1', kind: '模拟发送', time: '14:19' }), '回执 sim-1 · 模拟发送 · 14:19');
+  setLocale('en');
+  assert.equal(copy('这台 Mac 可以直接连接本地文件夹和备忘录，都不需要账号。'), 'This Mac can connect local folders and Notes directly, with no account.');
+  assert.equal(copy('回执 {id} · {kind} · {time}', { id: 'sim-1', kind: copy('模拟发送'), time: '14:19' }), 'Receipt sim-1 · simulated delivery · 14:19');
   assert.equal(copy('not a supported translation'), 'not a supported translation');
   assert.equal(setLocale('fr'), false);
   setLocale('en');

@@ -4,6 +4,26 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { durableError, iso, json, parse } from './database.js';
 
 const keyFor = (kind, id) => `${kind}\0${id}`;
+const hasTable = (db, table) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
+const tableColumns = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map(column => column.name);
+const MEMORY_ENDPOINT = /^(?:memory_id|memory_[a-z]+_id|(?:from|to|source|target|left|right|related)_memory(?:_id)?)$/;
+/** Memory history and relations point at a memory by one or more columns. Use
+ * declared foreign keys when the migration provides them and fall back to the
+ * documented endpoint names otherwise. Only the columns are discovered; a
+ * relation never widens Forget traversal beyond the explicit memory ids. */
+function memoryEndpointColumns(db, table) {
+  const foreign = db.prepare(`PRAGMA foreign_key_list(${table})`).all().filter(row => row.table === 'user_memories').map(row => row.from);
+  const fallback = tableColumns(db, table).filter(name => MEMORY_ENDPOINT.test(name)
+    || (table === 'memory_relations' && ['from_id', 'to_id', 'source_id', 'target_id', 'left_id', 'right_id', 'related_id'].includes(name)));
+  return [...new Set(foreign.length ? foreign : fallback)];
+}
+function deleteMemoryRows(db, table, ids) {
+  if (!ids.length || !hasTable(db, table)) return 0;
+  const columns = memoryEndpointColumns(db, table);
+  if (!columns.length) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  return db.prepare(`DELETE FROM ${table} WHERE ${columns.map(name => `"${name}" IN (${placeholders})`).join(' OR ')}`).run(...columns.flatMap(() => ids)).changes;
+}
 const minimalTask = row => ({ id: row.id, status: 'cancelled', userDismissed: true, privacyInvalidated: true,
   inputVersion: row.input_version, processedInputVersion: row.processed_input_version, runGeneration: row.run_generation + 1, privacyEpoch: row.privacy_epoch + 1,
   stateVersion: row.version + 1, control: { paused: true } });
@@ -18,6 +38,21 @@ export class ForgetService {
   }
   digest(kind, id) { return createHmac('sha256', this.database.get('privacy_salt')).update(keyFor(kind, id)).digest('hex'); }
   forgotten(kind, id) { return Boolean(this.db.prepare('SELECT 1 FROM forgotten_sources WHERE kind=? AND id_digest=?').get(kind, this.digest(kind, id))); }
+  /** Remove memory history and every relation incident to the forgotten ids.
+   * Deleting an edge never deletes or traverses to the neighboring memory. */
+  pruneMemoryGraph(memoryIds) {
+    const ids = [...new Set(memoryIds)];
+    deleteMemoryRows(this.db, 'memory_relations', ids);
+    deleteMemoryRows(this.db, 'memory_versions', ids);
+  }
+  countMemoryRows(table, memoryIds) {
+    const ids = [...new Set(memoryIds)];
+    if (!ids.length || !hasTable(this.db, table)) return 0;
+    const columns = memoryEndpointColumns(this.db, table);
+    if (!columns.length) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return this.db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${columns.map(name => `"${name}" IN (${placeholders})`).join(' OR ')}`).get(...columns.flatMap(() => ids)).n;
+  }
   permissionRevoked(connectorId) { return (parse(this.database.get('revoked_connectors', '[]')) || []).includes(connectorId); }
   restorePermission(connectorId) {
     if (typeof connectorId !== 'string' || !connectorId) throw durableError('INVALID_REVOCATION', 'A connector id is required.', 400);
@@ -85,10 +120,17 @@ export class ForgetService {
         for (const taskId of touchedTasks) this.db.prepare("DELETE FROM hot_context_items WHERE origin_kind='task' AND origin_id=?").run(taskId);
         for (const memory of this.db.prepare("SELECT id,source_kind,source_id FROM user_memories WHERE source_kind IN ('event','task')").all()) {
           if (memory.source_kind === 'event' ? !touchedEvents.has(memory.source_id) : !touchedTasks.has(memory.source_id)) continue;
+          this.pruneMemoryGraph([memory.id]);
           this.db.prepare('DELETE FROM memory_fts WHERE id=?').run(memory.id);
           this.db.prepare('DELETE FROM memory_embeddings WHERE memory_id=?').run(memory.id);
           this.db.prepare("DELETE FROM hot_context_items WHERE origin_kind='memory' AND origin_id=?").run(memory.id);
           this.db.prepare('DELETE FROM user_memories WHERE id=?').run(memory.id);
+        }
+        // Manifest selections are derived context and may contain facts from a
+        // different source connector than the task itself. Clear them on purge.
+        for (const row of this.db.prepare('SELECT id,data_json FROM tasks').all()) {
+          const data = parse(row.data_json);
+          if (data.contextManifest) { delete data.contextManifest; delete data.contextReadRequired; this.db.prepare('UPDATE tasks SET data_json=? WHERE id=?').run(json(data), row.id); }
         }
         for (const delivery of this.db.prepare('SELECT id,notification_json FROM notification_deliveries').all()) {
           const notice = parse(delivery.notification_json);
@@ -98,6 +140,7 @@ export class ForgetService {
         const snapshot = this.db.prepare('SELECT state_json,version FROM workspace_state WHERE id=1').get();
         if (snapshot) {
           const state = parse(snapshot.state_json);
+          for (const task of Object.values(state.tasks || {})) { delete task.contextManifest; delete task.contextReadRequired; }
           const fromConnector = item => item?.connectorId === connectorId || item?.source === connectorId;
           state.events = (state.events || []).filter(event => !fromConnector(event) && !touchedEvents.has(event.id));
           state.inbox = (state.inbox || []).filter(message => !fromConnector(message) && !messageIds.has(message.id));
@@ -159,6 +202,13 @@ export class ForgetService {
     if (dependencies.size > 10000) throw durableError('FORGET_SCOPE_LIMIT', 'This deletion requires a larger explicit maintenance pass. No partial deletion was started.');
     const records = [...dependencies.values()];
     const counts = Object.fromEntries([...new Set(records.map(row => row.kind))].map(type => [type, records.filter(row => row.kind === type).length]));
+    // History and relation rows are incident metadata rather than lineage
+    // descendants, so report them when present without adding traversal edges.
+    const memoryIds = records.filter(row => row.kind === 'memory' || row.kind === 'task_memory').map(row => row.id);
+    const versionCount = this.countMemoryRows('memory_versions', memoryIds);
+    if (versionCount) counts.memory_version = versionCount;
+    const relationCount = this.countMemoryRows('memory_relations', memoryIds);
+    if (relationCount) counts.memory_relation = relationCount;
     return { roots, records, counts };
   }
   get(id) { const row = this.db.prepare('SELECT * FROM privacy_requests WHERE id=?').get(id); return row && { id: row.id, state: row.state, status: parse(row.status_json), createdAt: row.created_at, updatedAt: row.updated_at }; }
@@ -211,6 +261,7 @@ export class ForgetService {
           } else if (execution.status === 'intent') this.db.prepare("UPDATE resource_claims SET claim_state='free',lease_owner=NULL,lease_until=NULL,current_execution_id=NULL,owner_task_run_id=NULL WHERE current_execution_id=?").run(execution.id);
         }
       }
+      this.pruneMemoryGraph(memoryIds);
       for (const memoryId of memoryIds) {
         this.db.prepare('DELETE FROM memory_fts WHERE id=?').run(memoryId);
         this.db.prepare('DELETE FROM memory_embeddings WHERE memory_id=?').run(memoryId);

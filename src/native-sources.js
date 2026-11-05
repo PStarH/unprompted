@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 export class NativeAccessError extends Error {
   constructor(code) {
     const messages = { UNSUPPORTED: 'Apple Notes and the native folder picker require macOS.', CANCELLED: 'Selection was cancelled.',
-      AUTOMATION_DENIED: 'Allow this application to access Notes in macOS Privacy & Security → Automation, then retry.',
+      AUTOMATION_DENIED: 'Allow this application to access Notes or Reminders in macOS Privacy & Security → Automation, then retry.',
       NO_FOLDERS: 'No readable Notes folders are available.', NATIVE_ACCESS_FAILED: 'The native source could not be read. Check its permission and try again.',
       TIMEOUT: 'The native source did not respond in time. Try again.', TOO_LARGE: 'The native response exceeded the read limit.' };
     super(messages[code] || messages.NATIVE_ACCESS_FAILED); this.name = 'NativeAccessError'; this.code = code;
@@ -15,7 +15,7 @@ export class NativeSourceBridge {
   constructor({ platform = process.platform, spawnImpl = spawn } = {}) { Object.assign(this, { platform, spawnImpl }); }
   async run(operation, payload = {}, { signal, timeoutMs = operation.startsWith('choose-') ? 120_000 : 30_000 } = {}) {
     if (this.platform !== 'darwin') throw new NativeAccessError('UNSUPPORTED');
-    if (!['choose-files', 'choose-notes', 'read-notes', 'create-note'].includes(operation)) throw new NativeAccessError('NATIVE_ACCESS_FAILED');
+    if (!['choose-files', 'choose-notes', 'read-notes', 'create-note', 'choose-reminders', 'read-reminders', 'create-reminder', 'change-reminder', 'delete-reminder'].includes(operation)) throw new NativeAccessError('NATIVE_ACCESS_FAILED');
     if (signal?.aborted) throw new NativeAccessError('CANCELLED');
     return new Promise((resolve, reject) => {
       let child;
@@ -46,6 +46,11 @@ export class NativeSourceBridge {
       if (!settled) child.stdin.end(JSON.stringify(payload));
     });
   }
+  chooseReminders(options = {}) { return this.run('choose-reminders', { locale: options.locale }, options); }
+  readReminders(folders, options = {}) { return this.run('read-reminders', { folders }, options); }
+  createReminder(folder, content, options = {}) { return this.run('create-reminder', { folder, ...content }, options); }
+  changeReminder(folder, reminderId, changes, expectedUpdatedAt, options = {}) { return this.run('change-reminder', { folder, reminderId, changes, expectedUpdatedAt }, options); }
+  deleteReminder(folder, reminderId, expectedUpdatedAt, options = {}) { return this.run('delete-reminder', { folder, reminderId, expectedUpdatedAt }, options); }
   chooseFiles(options = {}) { return this.run('choose-files', { locale: options.locale }, options); }
   chooseNotes(options = {}) { return this.run('choose-notes', { locale: options.locale }, options); }
   readNotes(folders, known, options = {}) { return this.run('read-notes', { folders, known }, options); }

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en" data-root="../" data-copy="Copy" data-copied="Copied" data-no-results="No matches" data-search-start="Type to search the documentation." data-close="Close">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Development and testing · Unprompted Docs</title>
+  <meta name="description" content="Commands for a first change, the test suites, and how this documentation site is built.">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/development/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/development/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/development/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/development/">
+  <meta property="og:title" content="Development and testing · Unprompted Docs">
+  <meta property="og:description" content="Commands for a first change, the test suites, and how this documentation site is built.">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/development/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../sitemap.xml">
+  <link rel="stylesheet" href="../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Development and testing","description":"Commands for a first change, the test suites, and how this documentation site is built.","inLanguage":"en","url":"https://pstarh.github.io/unprompted/docs/development/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Docs","item":"https://pstarh.github.io/unprompted/docs/"},{"@type":"ListItem","position":2,"name":"Reference"},{"@type":"ListItem","position":3,"name":"Development and testing","item":"https://pstarh.github.io/unprompted/docs/development/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">Docs</span></a>
+    <button class="search-button" type="button" data-search><span>Search documentation</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="Language"><a href="../development/" hreflang="en" aria-current="true">EN</a><a href="../zh/development/" hreflang="zh-CN">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>Documentation menu</summary><section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/">Architecture</a></li><li><a href="../development/" aria-current="page">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/">Security</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/">Architecture</a></li><li><a href="../development/" aria-current="page">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/">Security</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="Breadcrumb"><a href="../">Docs</a><span class="crumb-sep" aria-hidden="true">/</span><span>Reference</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">Development and testing</span></nav>
+      <p class="page-kicker">Reference</p><h1 class="page-title">Development and testing</h1>
+      <details class="mobile-toc"><summary>On this page</summary><ol><li><a class="" href="#a-small-loop">A small loop</a></li><li><a class="" href="#checks">Checks</a></li><li><a class="" href="#this-site">This site</a></li><li><a class="" href="#where-to-edit">Where to edit</a></li></ol></details>
+      <article class="prose"><p>Issues and pull requests in English or Chinese are welcome. Node.js 20+ runs the base suite. Node.js 22.19+ is needed for the Pi checks.</p>
+<h2 id="a-small-loop">A small loop<a class="heading-link" href="#a-small-loop" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm run example
+npm run example -- --approve</code></pre><button type="button" class="code-copy">Copy</button></div>
+<p>Both use invented data and the simulated provider. No account or model is required. Reports, pull requests, and review expectations are in <a href="../contributing/">Contributing</a>.</p>
+<h2 id="checks">Checks<a class="heading-link" href="#checks" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm test
+npm run test:fast
+npm run check:syntax
+npm run check:public</code></pre><button type="button" class="code-copy">Copy</button></div>
+<p><code>npm test</code> runs the behavioral, HTTP, connector, permission, storage, UI, and launcher tests. <code>test:fast</code> skips the long API, framework-eval, and generalization files. <code>check:syntax</code> parses the JavaScript Git already tracks. <code>check:public</code> checks publishable paths, Markdown links, and credential-shaped strings.</p>
+<p>One file at a time:</p>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm test -- --file=test/workflow.test.js
+npm run test:workflow</code></pre><button type="button" class="code-copy">Copy</button></div>
+<p>Browser contracts include <code>npm run test:model-onboarding</code>, <code>npm run test:google-onboarding</code>, and <code>npm run test:connections</code>. They use scripted local servers and scripted connectors. Do not point them at a personal workspace.</p>
+<p>Optional evaluations: <code>npm run eval</code>, <code>npm run eval:framework</code>, <code>npm run eval:resilience</code>, <code>npm run eval:lifecycle</code>, <code>npm run eval:pi</code>, and <code>npm run eval:value</code>. A passing eval is evidence about its fixtures, not a production claim. Pi needs the optional install and Node.js 22.19+.</p>
+<p>The macOS bundle is a local unsigned build:</p>
+<div class="code-block"><span class="code-label">sh</span><pre><code>npm run build:macos-app
+npm run smoke:macos-app</code></pre><button type="button" class="code-copy">Copy</button></div>
+<h2 id="this-site">This site<a class="heading-link" href="#this-site" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">sh</span><pre><code>node docs-site/build.mjs
+node docs-site/check-links.mjs</code></pre><button type="button" class="code-copy">Copy</button></div>
+<p>Markdown lives in <code>docs-site/content/en/</code> and <code>docs-site/content/zh/</code>. Navigation labels live in <code>docs-site/nav.json</code>. The build writes <code>website/docs/</code>, which is the GitHub Pages path <code>/unprompted/docs/</code>.</p>
+<h2 id="where-to-edit">Where to edit<a class="heading-link" href="#where-to-edit" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<div class="table-wrap"><table><thead><tr><th>Change</th><th>Start</th></tr></thead><tbody><tr><td>A connector</td><td><code>src/connectors/</code> and <code>docs/CONNECTORS.md</code></td></tr><tr><td>Permissions or evidence</td><td><code>src/permissions.js</code>, <code>src/evidence.js</code></td></tr><tr><td>The workspace</td><td><code>public/</code> and <code>test/browser/</code></td></tr><tr><td>MCP</td><td><code>src/mcp.js</code>, <code>src/tool-loop.js</code></td></tr><tr><td>These pages</td><td><code>docs-site/content/</code></td></tr></tbody></table></div>
+<p>Stage files by path. Do not use <code>git add -A</code> in this checkout. Other agents may have uncommitted work.</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>Copy page</button><script type="application/json" id="page-markdown">"# Development and testing\n\n> Commands for a first change, the test suites, and how this documentation site is built.\n\nIssues and pull requests in English or Chinese are welcome. Node.js 20+ runs the base suite. Node.js 22.19+ is needed for the Pi checks.\n\n## A small loop\n\n```sh\nnpm run example\nnpm run example -- --approve\n```\n\nBoth use invented data and the simulated provider. No account or model is required. Reports, pull requests, and review expectations are in [Contributing](https://pstarh.github.io/unprompted/docs/contributing/).\n\n## Checks\n\n```sh\nnpm test\nnpm run test:fast\nnpm run check:syntax\nnpm run check:public\n```\n\n`npm test` runs the behavioral, HTTP, connector, permission, storage, UI, and launcher tests. `test:fast` skips the long API, framework-eval, and generalization files. `check:syntax` parses the JavaScript Git already tracks. `check:public` checks publishable paths, Markdown links, and credential-shaped strings.\n\nOne file at a time:\n\n```sh\nnpm test -- --file=test/workflow.test.js\nnpm run test:workflow\n```\n\nBrowser contracts include `npm run test:model-onboarding`, `npm run test:google-onboarding`, and `npm run test:connections`. They use scripted local servers and scripted connectors. Do not point them at a personal workspace.\n\nOptional evaluations: `npm run eval`, `npm run eval:framework`, `npm run eval:resilience`, `npm run eval:lifecycle`, `npm run eval:pi`, and `npm run eval:value`. A passing eval is evidence about its fixtures, not a production claim. Pi needs the optional install and Node.js 22.19+.\n\nThe macOS bundle is a local unsigned build:\n\n```sh\nnpm run build:macos-app\nnpm run smoke:macos-app\n```\n\n## This site\n\n```sh\nnode docs-site/build.mjs\nnode docs-site/check-links.mjs\n```\n\nMarkdown lives in `docs-site/content/en/` and `docs-site/content/zh/`. Navigation labels live in `docs-site/nav.json`. The build writes `website/docs/`, which is the GitHub Pages path `/unprompted/docs/`.\n\n## Where to edit\n\n| Change | Start |\n| --- | --- |\n| A connector | `src/connectors/` and `docs/CONNECTORS.md` |\n| Permissions or evidence | `src/permissions.js`, `src/evidence.js` |\n| The workspace | `public/` and `test/browser/` |\n| MCP | `src/mcp.js`, `src/tool-loop.js` |\n| These pages | `docs-site/content/` |\n\nStage files by path. Do not use `git add -A` in this checkout. Other agents may have uncommitted work.\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=Docs%3A%20Development%20and%20testing&amp;body=Page%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fdevelopment%2F%0A%0AWhat%20is%20wrong%3A%0A%0A" rel="noreferrer">Report a problem with this page</a><span>Version 0.3.0 · Current main branch</span></div>
+      <nav class="pager" aria-label="Previous"><a href="../architecture/"><span>Previous</span><strong>Architecture</strong></a><a class="next" href="../glossary/"><span>Next</span><strong>Glossary</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="On this page"><h2>On this page</h2><ol><li><a class="" href="#a-small-loop">A small loop</a></li><li><a class="" href="#checks">Checks</a></li><li><a class="" href="#this-site">This site</a></li><li><a class="" href="#where-to-edit">Where to edit</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../">Website</a><a href="../">Docs</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="Open menu">
+    <div class="drawer-head"><strong>Docs</strong><button class="icon-button" type="button" data-menu-close aria-label="Close">×</button></div>
+    <section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/">Architecture</a></li><li><a href="../development/" aria-current="page">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/">Security</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="Search">
+    <div class="search-head"><strong>Search</strong><button class="icon-button" type="button" data-search-close aria-label="Close">×</button></div>
+    <input type="search" placeholder="Search documentation" aria-label="Search">
+    <p class="search-status">Type to search the documentation.</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

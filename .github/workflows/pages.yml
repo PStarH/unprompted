@@ -40,14 +40,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node website/update-repo-stats.mjs
-      - name: Prepare site artifact
-        run: |
-          mkdir -p "$RUNNER_TEMP/pages"
-          rsync -a --exclude='README.md' --exclude='site.test.mjs' --exclude='update-repo-stats.mjs' website/ "$RUNNER_TEMP/pages/"
       - name: Upload website only
         uses: actions/upload-pages-artifact@v4
         with:
-          path: ${{ runner.temp }}/pages
+          path: website
 
   deploy:
     if: github.event_name != 'pull_request'

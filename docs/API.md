@@ -37,6 +37,39 @@ checks permissions and current evidence on every action.
 | GET | `/api/trace?taskId=TASK_ID` | One task's decision chain; omit `taskId` for recent entries |
 | GET | `/documents/DOCUMENT_ID` | Built-in simulated document view |
 
+## Memory Space
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/memory-space` | Filter by `q`, `kind`, `scope`, `status`; optional `focus` and `limit` (maximum 500). Returns records, total/truncation and recorded relationships. Each search result includes `match:{reasons,excerpt,score,query}`. Search covers the collection before limiting the response. `status=remembered` includes historical/disabled content but excludes recoverable deletes. |
+| GET | `/api/memory-space/:id` | Content, lifecycle, versions, origin, recorded usage and `context:{memories,entities,sources,relations,centerId}`. Optional `depth=1` (default) or `2` reads a bounded local neighborhood, independent of current search filters. |
+| POST | `/api/memory-space` | Save `text`/`content`, `memoryKind` (`fact` or `preference`), `scopeType`, `scopeKey` and optional `validUntil`. Requires the persistent workspace. |
+| POST | `/api/memory-space/:id` | Version-checked `edit`, `disable`, `reactivate`, `archive`, `restore`, `delete`, `restore-delete`, `supersede`, `restore-version` or `validity`. |
+| POST | `/api/memory-space/:id/relations` | `operation: add/remove`, `targetId`, supported `kind`, `expectedVersion`; optional evidence and `status`. Supersession is created only by the correction operation. |
+
+Direct memories use numeric `expectedVersion`. Legacy task-memory mutations use
+`expectedVersion`/`version` from the returned record; relationship mutations use
+the numeric `version`. Stale writes return 409 `MEMORY_CHANGED`. Deleted and
+archived records stay traceable and recoverable. Permanent removal uses the
+existing privacy preview/Forget endpoints. Associations never change retrieval
+scope or authorize external actions. The disposable demonstration is read-only.
+
+Both Standard and Pi expose task-scoped `search_memories`, `read_memory` and
+`update_memory` tools against this same store. Updates require a current task
+lease, a version token, and an exact quotation from its recorded source or
+current user direction. Changing user-owned memories or lifecycle requires the
+user direction; global and unrelated writes and permanent Forget are unavailable
+to the model. A successful change returns `requiresReplan:true` and invalidates
+the previous context before work continues. Source provenance, version history
+and a verified local write receipt are retained together.
+
+Memory detail includes `provenance.usage` for recorded task reads and
+`provenance.activationUsage` for context supplied to semantic activation jobs.
+These records show consultation, not proof that the memory caused a decision.
+Applicable active preferences enter planning independently of keyword overlap.
+Activation uses bounded saved context alongside independently grounded current
+source evidence; memories do not override explicit policies or grant permission.
+
 ## Durable workspace (v0.3)
 
 These operations require the persistent SQLite workspace (409
@@ -51,7 +84,17 @@ permissions.
 | POST | `/api/artifact-grants` | `connectorId` (`google`, `microsoft`, `notion`, `apple_notes`), exact `targetId`, `confirmed:true`, optional `project`, `taskId`, `automatic` (default true); authorizes creation in that account and destination |
 | POST | `/api/artifact-grants/:id/revoke` | Stop future creation under that grant; dispatched outcomes still require reconciliation |
 | POST | `/api/tasks/:id/artifacts` | `grantId`, exact `reviewToken`, plus `title` and `body` for pages/notes; mail uses the task's prepared reply. Returns 202 and a queued request, not a verified write |
+| POST | `/api/tasks/:id/prepared-work/accept` | Exact `preparedWorkReviewToken` as `reviewToken`; accept the current local standing-goal draft/brief and finish this follow-up. Records one explicit acceptance; performs no provider write |
+| POST | `/api/tasks/:id/prepared-work/retry` | Current `inputVersion`; retry an active standing-goal preparation. Returns 202 with `jobId` and `state`; paused, stale or closed work returns 409 |
 | GET | `/api/situations` | Bounded list of active evidence-backed Situations; tasks expose their `situationId` when linked |
+| GET | `/api/standing-intents` | Saved standing goals and their versions |
+| POST | `/api/standing-intents` | `confirmed:true`, `description`, `desiredOutcome`, bounded `prefilter`, optional `predicate`, `scope`, `autonomy`, `budget`, `expiresAt`; external writes remain prohibited |
+| POST | `/api/standing-intents/:id` | Complete updated goal plus `expectedVersion`; invalidates prepared work for that goal |
+| POST | `/api/standing-intents/:id/pause`, `/resume`, `/disable` | `expectedVersion`; preserves independent user pauses and already dispatched actions |
+| POST | `/api/activation/flags` | Known boolean feature switches; queued and in-flight forward work rechecks the relevant generation |
+| POST | `/api/activation/rsi/evaluate` | `parameter`, `value`, `datasetVersion`, labeled `cases`; returns a local policy comparison, with no external actions |
+| POST | `/api/activation/rsi/propose` | `parameter`, `value`, nonempty `evidence`, exact improving comparison `replayId`; only global scope is supported |
+| POST | `/api/activation/rsi/:id/apply`, `/rollback` | `expectedVersion`; rejects stale configurations and rollbacks that would overwrite later settings |
 | POST | `/api/situations/:id/probe` | Schedule a scoped Gmail reply check with `sourceEventId` and `scheduledAt`. The source must already be linked to the Situation; existing connector permissions and fresh sync coverage still apply. |
 | GET | `/api/policies` | Explicit rules, status and optimistic `version` |
 | POST | `/api/policies` | `instruction`, typed `predicate`, structured `effect`, optional scope/identities. Updates require `id` and `expectedVersion`. Unresolved identities remain draft. |
@@ -65,7 +108,7 @@ permissions.
 | POST | `/api/experiences/attention-policy` | Bounded interruption limits and `quietHours:{startHour,endHour,timeZone}` (or null) |
 | POST | `/api/experiences/context-policy` | Bounded clustering windows, event and association limits |
 | POST | `/api/experiences/retrieval-policy` | `expectedVersion` and bounded retrieval ranking weights |
-| POST | `/api/experiences/replay` | Up to 100 labeled `cases:[{query,relevantIds,scopes?}]`, optional options; retain aggregate offline metrics, execute no tools |
+| POST | `/api/experiences/replay` | Default kind `retrieval`: up to 100 labeled `cases:[{query,relevantIds,scopes?}]`, optional options. Kind `arbitration_shadow` replays experience cases through the local arbiter. Retain aggregate offline metrics; execute no tools |
 | POST | `/api/tasks/:id/draft` | `body`, exact `reviewToken`; capture a minimal artifact revision and invalidate old review tokens |
 | POST | `/api/executions/:id/reconcile` | Read the provider to resolve a prior intent; an inconclusive result never enables a write |
 | POST | `/api/privacy/preview` | `kind`, `id`; return dependency counts before deletion |
@@ -80,19 +123,60 @@ operations. It does not erase independent connector/model-provider copies.
 “Do not do this again” belongs in an explicit suppression policy, separately
 from Forget. See [the requirements](PRD.md) and [storage boundaries](ARCHITECTURE.md#storage-and-process-model).
 
+Standing goals support `observe` and `prepare`. With a configured model,
+preparation uses the Standard or Pi harness to read the actual source and prepare
+a local draft with checked source quotations. Without a model, it prepares a
+source brief. Both require review and prohibit external writes, including when
+an unrelated destination grant exists. The Memory page provides goal creation,
+editing and lifecycle controls; the workspace shows preparation, retry and review.
+
+Reviewable tasks expose `preparedWorkReviewToken`. Send that value as `reviewToken`
+to the acceptance endpoint. Changed inputs, directions, paused goals, unavailable
+sources or stale artifacts return 409. Repeating the accepted token is idempotent.
+Acceptance records `completion.kind:"user_accepted_preparation"` and
+`completion.external:false`; the UI displays “Accepted by you”. The standing goal
+remains active for future events. Updates to the same active source/thread reuse
+the follow-up; unchanged input/context/model versions reuse the preparation.
+An explicit suppression rule holds existing preparation visibly in the workspace.
+Updating or disabling the rule revalidates it before review resumes.
+
+Tasks expose `contextManifest`: complete selected memory/experience entries,
+deferred items, overridden guidance, conflicts and input/context/privacy versions.
+Both harnesses receive the same selection. `read_context_item` reads oversized
+entries in chunks under the current task lease; unread deferred context prevents
+automatic actions. Task-local directions take precedence. `search_workspace` and
+`read_workspace_record` use that same lease to read eligible memories, other
+observed documents and messages, and other tasks already stored from connected
+sources. `observe_failures` uses that lease to reread failure statements in
+authorized mail already stored locally. These reads do not contact a provider,
+create a task or notification, or authorize a write.
+
+RSI currently tunes `pairWindowMs`, `maxPairCandidates`,
+`maxInteractivePerHour` and `minIntervalMs`. Pair eligibility cases have
+`{rank,ageMs,expected}`; pacing cases have chronological `{at,expected}` entries
+with millisecond timestamps. Reports compare the current and candidate settings
+against a versioned label set. They measure bounded policy eligibility/pacing,
+not overall task usefulness. Unrelated activation replays cannot qualify a
+proposal. The Settings page shows evaluated proposals and guarded apply/rollback
+controls; intervening user edits invalidate old proposals.
+
 ## External MCP client
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/mcp` | Redacted server status, discovered tools and read grants |
-| POST | `/api/mcp/import` | Save and connect `config` (`mcpServers` object or JSON string); optional `allowDeclaredRead` grants server-declared read tools |
+| GET | `/api/mcp` | Redacted server status, built-in presets, discovered tools and read grants |
+| POST | `/api/mcp/import` | Save and connect `config` (`mcpServers` object or JSON string); optional `allowDeclaredRead` grants server-declared read tools. OAuth state cannot be imported |
 | POST | `/api/mcp/servers/:id` | Update `enabled`, `allowDeclaredRead`, `readTools` (array), `reconnect:true` or `remove:true` |
+| POST | `/api/mcp/oauth/:id` | Start sign-in for a built-in hosted preset (`notion`, `linear`, `atlassian`, `todoist`). Send `{}` to start, or `{"cancel":true}` to cancel. The body cannot choose a server URL |
 
-`GET /api/setup` also includes `mcp`. Import/update returns `{mcp, setup}`.
+`GET /api/setup` also includes `mcp`. Import, update, and sign-in return `{mcp, setup}`.
+Sign-in also returns `oauth`. `authorizeUrl` is included only while sign-in is in
+progress. An unknown preset is 404. A body that contains `serverUrl` is 400.
 A failed connection is saved with `status:"failed"` and a sanitized `lastError`,
 so the user can correct or reconnect it. Invalid config fails with 400; concurrent
-MCP updates fail with 409. Secrets are never echoed. These routes are refused in
-the disposable demo. Configuration is private to the local installation, while
+MCP updates fail with 409. Commands, arguments, environment values, headers, and
+tokens are never echoed. These routes are refused in the disposable demo
+(`409`, `DISPOSABLE_DEMO`). Configuration is private to the local installation, while
 call records (`task.mcpCalls`, at most 20) belong to the task's workspace.
 Native follow-up tasks may also retain a bounded `mcpInvestigation` suggestion;
 it is not verified completion or an external action. Known write tools are blocked.
@@ -212,7 +296,7 @@ and receive-timeout failures 408. See [transport limits](CONFIGURATION.md#http-t
 | POST | `/api/tasks/TASK_ID/reopen` | Restore a declined or closed request and recheck current evidence, without sending |
 | POST | `/api/tasks/TASK_ID/pause` | Persist a user pause; stop task assessment and new external execution |
 | POST | `/api/tasks/TASK_ID/resume` | Resume and recheck current sources without sending |
-| POST | `/api/tasks/TASK_ID/direction` | Add user requirements with `{text,scope}`; scope is `task` (default) or `similar` |
+| POST | `/api/tasks/TASK_ID/direction` | `{text,scope,operation?}`; scope is `task` (default) or `similar`. `operation:"append"` is default; `"replace"` replaces this task's content requirements and is restricted to task scope |
 | POST | `/api/tasks/TASK_ID/undo-direction` | Undo the current direction with `{id}` and recheck current evidence |
 | POST | `/api/memories/MEMORY_ID` | Edit, delete or restore scoped memory with `{operation,text?,version}`; version is its `updatedAt` |
 | POST | `/api/tasks/TASK_ID/feedback` | Record `label` and optional `reason` |

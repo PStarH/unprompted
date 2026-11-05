@@ -1,3 +1,4 @@
+import { oauthScopes } from './oauth-scopes.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +13,7 @@ const MAX_INTERVAL_MS = 24 * 60 * 60_000;
 const DEFAULT_STATE = Object.freeze({
   version: 1,
   restartRequired: false,
-  model: { baseUrl: null, model: null, apiKey: null, harness: 'classic', role: 'primary', lastValidation: null },
+  model: { baseUrl: null, model: null, apiKey: null, harness: 'classic', protocol: 'chat-completions', role: 'primary', lastValidation: null },
   connections: {},
   nativeSources: {},
   monitoring: {
@@ -32,7 +33,7 @@ const DEFAULT_STATE = Object.freeze({
     refreshToken: null,
     accountEmail: null,
     accountId: null,
-    scopes: { readGmail: true, readDrive: true, docsWrite: false, gmailSend: false, gmailDrafts: false },
+    scopes: { readGmail: true, readDrive: true, readCalendar: false, docsWrite: false, gmailSend: false, gmailDrafts: false },
     grantedScopes: [],
     authorizationState: 'not_configured',
     authorizedAt: null,
@@ -61,13 +62,17 @@ function normalise(state) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) return result;
   result.version = 1;
   result.restartRequired = state.restartRequired === true;
-  if (state.model && typeof state.model === 'object') result.model = { ...result.model, ...state.model };
-  for (const id of ['github', 'microsoft', 'slack', 'notion']) {
+  if (state.model && typeof state.model === 'object') {
+    result.model = { ...result.model, ...state.model };
+    result.model.protocol = ['chat-completions', 'responses', 'messages'].includes(result.model.protocol)
+      ? result.model.protocol : 'chat-completions';
+  }
+  for (const id of ['github', 'microsoft', 'slack', 'notion', 'todoist']) {
     const saved = state.connections?.[id];
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.connections[id] = { ...saved };
   }
   if (state.nativeSources && typeof state.nativeSources === 'object') {
-    for (const id of ['local_files', 'apple_notes']) {
+    for (const id of ['local_files', 'apple_notes', 'apple_reminders']) {
       const saved = state.nativeSources[id];
       if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.nativeSources[id] = {
         scopeId: typeof saved.scopeId === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(saved.scopeId) ? saved.scopeId : null,
@@ -87,8 +92,10 @@ function normalise(state) {
   if (state.google && typeof state.google === 'object') result.google = { ...result.google, ...state.google };
   if (state.google?.scopes && typeof state.google.scopes === 'object') {
     result.google.scopes = {
+      ...(Array.isArray(state.google.scopes.additionalScopes) && state.google.scopes.additionalScopes.length ? { additionalScopes: oauthScopes(state.google.scopes.additionalScopes) } : {}),
       readGmail: state.google.scopes.readGmail === true,
       readDrive: state.google.scopes.readDrive === true,
+      readCalendar: state.google.scopes.readCalendar === true,
       docsWrite: state.google.scopes.docsWrite === true,
       gmailSend: state.google.scopes.gmailSend === true,
       gmailDrafts: state.google.scopes.gmailDrafts === true
@@ -146,7 +153,7 @@ export class LocalSetupStore {
   getConnection(id) { connectionProvider(id); return { ...(this.get().connections[id] || {}) }; }
 
   getNativeSource(id) {
-    if (!['local_files', 'apple_notes'].includes(id)) throw new Error('Unknown native source.');
+    if (!['local_files', 'apple_notes', 'apple_reminders'].includes(id)) throw new Error('Unknown native source.');
     return clone(this.get().nativeSources[id] || { scopeId: null, roots: [], folders: [] });
   }
   saveNativeSource(id, selection) {
@@ -170,7 +177,7 @@ export class LocalSetupStore {
   saveConnectionCredentials(id, { clientId, clientSecret } = {}) {
     const provider = connectionProvider(id);
     if (provider.flow !== 'code') throw new Error('This provider does not use a client secret.');
-    if (!validPublicClientId(clientId) || !validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
+    if (!validPublicClientId(clientId) || (id !== 'slack' || clientSecret != null) && !validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
     const state = this.get();
     const old = state.connections[id] || {};
     if (old.clientId === clientId && old.clientSecret === clientSecret) return state;
@@ -191,7 +198,7 @@ export class LocalSetupStore {
     };
     if (provider.flow === 'code') {
       const clientSecret = authorization.clientSecret || previous.clientSecret;
-      if (!validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
+      if ((id !== 'slack' || clientSecret != null) && !validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
       record.clientSecret = clientSecret;
     }
     return this.#write({ ...state, connections: { ...state.connections, [id]: record } });
@@ -221,7 +228,7 @@ export class LocalSetupStore {
     }
     const authUri = client.auth_uri || 'https://accounts.google.com/o/oauth2/v2/auth';
     const tokenUri = client.token_uri || 'https://oauth2.googleapis.com/token';
-    if (authUri !== 'https://accounts.google.com/o/oauth2/v2/auth' || tokenUri !== 'https://oauth2.googleapis.com/token') {
+    if (!['https://accounts.google.com/o/oauth2/v2/auth', 'https://accounts.google.com/o/oauth2/auth'].includes(authUri) || tokenUri !== 'https://oauth2.googleapis.com/token') {
       throw new Error('The OAuth endpoints must be Google’s official authorization and token endpoints.');
     }
     const current = this.get();
@@ -281,9 +288,12 @@ export class LocalSetupStore {
   }
 
   setGoogleScopes(scopes = {}) {
+    const additionalScopes = oauthScopes(scopes.additionalScopes || []);
     const selected = {
+      ...(additionalScopes.length ? { additionalScopes } : {}),
       readGmail: scopes.readGmail === true,
       readDrive: scopes.readDrive === true,
+      readCalendar: scopes.readCalendar === true,
       docsWrite: scopes.docsWrite === true,
       gmailSend: scopes.gmailSend === true,
       gmailDrafts: scopes.gmailDrafts === true
@@ -305,9 +315,11 @@ export class LocalSetupStore {
     const missingGrant = [
       scopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
       scopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
+      scopes.readCalendar ? 'https://www.googleapis.com/auth/calendar.events.readonly' : null,
       scopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
       scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
-      scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
+      scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null,
+      ...(scopes.additionalScopes || [])
     ].filter(Boolean).some(scope => !granted.has(scope));
     if (missingGrant) {
       return this.#write({
@@ -365,6 +377,7 @@ export class LocalSetupStore {
       delete output.UNPROMPTED_MODEL_API_KEY;
       if (model.apiKey) output.UNPROMPTED_MODEL_API_KEY = model.apiKey;
       output.UNPROMPTED_AGENT_HARNESS = model.harness;
+      output.UNPROMPTED_MODEL_PROTOCOL = model.protocol || 'chat-completions';
       output.UNPROMPTED_MODEL_ROLE = model.role;
     }
     const google = this.get().google;
@@ -372,7 +385,9 @@ export class LocalSetupStore {
       GOOGLE_CLIENT_ID: google.clientId,
       GOOGLE_CLIENT_SECRET: google.clientSecret,
       GOOGLE_REFRESH_TOKEN: google.refreshToken,
-      GOOGLE_ACCOUNT_EMAIL: google.accountEmail
+      GOOGLE_ACCOUNT_EMAIL: google.accountEmail,
+      GOOGLE_ACCOUNT_ID: google.accountId,
+      GOOGLE_GRANTED_SCOPES: JSON.stringify(google.grantedScopes || [])
     })) {
       // Explicit process configuration remains authoritative.
       if (!env.GOOGLE_REFRESH_TOKEN && output[key] == null && value) output[key] = value;
@@ -380,6 +395,7 @@ export class LocalSetupStore {
     const granted = new Set(google.grantedScopes || []);
     const scopes = google.scopes || {};
     const requestedGmailRead = scopes.readGmail === true && granted.has('https://www.googleapis.com/auth/gmail.readonly');
+    const requestedCalendarRead = scopes.readCalendar === true && granted.has('https://www.googleapis.com/auth/calendar.events.readonly');
     const requestedDriveRead = scopes.readDrive === true && granted.has('https://www.googleapis.com/auth/drive.readonly');
     const requestedSend = scopes.gmailSend === true && granted.has('https://www.googleapis.com/auth/gmail.send');
     const requestedDocsWrite = scopes.docsWrite === true && granted.has('https://www.googleapis.com/auth/documents');
@@ -393,6 +409,7 @@ export class LocalSetupStore {
       // For accounts connected in the UI, launch settings may restrict access
       // but cannot expand the account's selected/granted permissions.
       output.GOOGLE_READ_GMAIL = requestedGmailRead && env.GOOGLE_READ_GMAIL !== 'false' ? 'true' : 'false';
+      output.GOOGLE_READ_CALENDAR = requestedCalendarRead && env.GOOGLE_READ_CALENDAR !== 'false' ? 'true' : 'false';
       output.GOOGLE_READ_DRIVE = requestedDriveRead && env.GOOGLE_READ_DRIVE !== 'false' ? 'true' : 'false';
       output.GOOGLE_SEND_ENABLED = requestedSend && env.GOOGLE_SEND_ENABLED !== 'false' ? 'true' : 'false';
       output.GOOGLE_DOCS_WRITE_ENABLED = requestedDocsWrite && env.GOOGLE_DOCS_WRITE_ENABLED !== 'false' ? 'true' : 'false';
@@ -419,9 +436,11 @@ export class LocalSetupStore {
     const missingRequestedScope = hasRefreshToken && [
       selectedScopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
       selectedScopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
+      selectedScopes.readCalendar ? 'https://www.googleapis.com/auth/calendar.events.readonly' : null,
       selectedScopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
       selectedScopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
-      selectedScopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
+      selectedScopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null,
+      ...(selectedScopes.additionalScopes || [])
     ].filter(Boolean).some(scope => !granted.has(scope));
     const connectionStatus = missingRequestedScope ? 'reauthorization_required'
       : hasRefreshToken && restartRequired ? 'restart_required'
@@ -430,7 +449,7 @@ export class LocalSetupStore {
         : google.lastValidation?.status === 'validated' ? 'validated' : 'configured_unverified';
     return {
       fileProtection: '0600',
-      model: { baseUrl: state.model.baseUrl, model: state.model.model, hasApiKey: Boolean(state.model.apiKey), harness: state.model.harness, role: state.model.role, lastValidation: state.model.lastValidation },
+      model: { baseUrl: state.model.baseUrl, model: state.model.model, hasApiKey: Boolean(state.model.apiKey), harness: state.model.harness, protocol: state.model.protocol || 'chat-completions', role: state.model.role, lastValidation: state.model.lastValidation },
       monitoring: monitoring || { ...state.monitoring },
       google: {
         hasClient,
@@ -531,9 +550,11 @@ export class GoogleOAuthSetup {
       'openid', 'email',
       scopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
       scopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
+      scopes.readCalendar ? 'https://www.googleapis.com/auth/calendar.events.readonly' : null,
       scopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
       scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
-      scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
+      scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null,
+      ...(scopes.additionalScopes || [])
     ].filter(Boolean);
     authUri.searchParams.set('scope', scopeUris.join(' '));
     authUri.searchParams.set('access_type', 'offline');
@@ -607,9 +628,11 @@ export class GoogleOAuthSetup {
       const requiredScopes = [
         active.scopes.readGmail ? 'https://www.googleapis.com/auth/gmail.readonly' : null,
         active.scopes.readDrive ? 'https://www.googleapis.com/auth/drive.readonly' : null,
+        active.scopes.readCalendar ? 'https://www.googleapis.com/auth/calendar.events.readonly' : null,
         active.scopes.docsWrite ? 'https://www.googleapis.com/auth/documents' : null,
         active.scopes.gmailSend ? 'https://www.googleapis.com/auth/gmail.send' : null,
-        active.scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null
+        active.scopes.gmailDrafts ? 'https://www.googleapis.com/auth/gmail.compose' : null,
+        ...(active.scopes.additionalScopes || [])
       ].filter(Boolean);
       if (requiredScopes.some(scope => !granted.has(scope))) {
         throw new Error('Google did not grant every requested scope.');

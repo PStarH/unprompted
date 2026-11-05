@@ -1,0 +1,272 @@
+{
+  "en": {
+    "title": "Unprompted documentation",
+    "groups": [
+      {
+        "title": "Start here",
+        "links": [
+          {
+            "slug": "",
+            "title": "Overview"
+          },
+          {
+            "slug": "quickstart",
+            "title": "Install & first run"
+          },
+          {
+            "slug": "models",
+            "title": "Models"
+          },
+          {
+            "slug": "connectors",
+            "title": "Connectors"
+          },
+          {
+            "slug": "google",
+            "title": "Google Workspace"
+          }
+        ]
+      },
+      {
+        "title": "Use Unprompted",
+        "links": [
+          {
+            "slug": "workspace",
+            "title": "Workspace"
+          },
+          {
+            "slug": "workflows",
+            "title": "Workflows"
+          },
+          {
+            "slug": "permissions",
+            "title": "Permissions & privacy"
+          }
+        ]
+      },
+      {
+        "title": "Help",
+        "links": [
+          {
+            "slug": "troubleshooting",
+            "title": "Troubleshooting"
+          }
+        ]
+      },
+      {
+        "title": "Reference",
+        "links": [
+          {
+            "slug": "configuration",
+            "title": "Configuration"
+          },
+          {
+            "slug": "api",
+            "title": "Local API"
+          },
+          {
+            "slug": "architecture",
+            "title": "Architecture"
+          }
+        ]
+      },
+      {
+        "title": "Project",
+        "links": [
+          {
+            "slug": "development",
+            "title": "Development & testing"
+          }
+        ]
+      }
+    ],
+    "labels": {
+      "docs": "Docs",
+      "search": "Search",
+      "searchPlaceholder": "Search the documentation…",
+      "searchHint": "Search titles, headings and page text",
+      "searchShortcut": "Press ⌘K to search",
+      "noResults": "No results for",
+      "searchUnavailable": "Search is unavailable. You can still browse the sidebar.",
+      "searchStart": "Type to search the documentation.",
+      "results": "results",
+      "onThisPage": "On this page",
+      "previous": "Previous",
+      "next": "Next",
+      "edit": "Edit this page",
+      "source": "Source",
+      "menu": "Open navigation",
+      "close": "Close",
+      "skip": "Skip to content",
+      "language": "Language",
+      "copy": "Copy",
+      "copied": "Copied",
+      "home": "Documentation home",
+      "getStarted": "Get started",
+      "github": "GitHub",
+      "version": "v0.3.0",
+      "updated": "Docs for the current main branch",
+      "footerNote": "Local-first. Open source under Apache-2.0.",
+      "notFoundTitle": "Page not found",
+      "notFoundBody": "The page may have moved. Search the documentation or return to the overview.",
+      "backHome": "Back to documentation",
+      "homeEyebrow": "Unprompted documentation",
+      "homeTitle": "Work without<br>the prompt<span class=\"green\">.</span>",
+      "homeLead": "A local-first work partner that notices work, checks the evidence, prepares the next step, and asks before acting.",
+      "homeStart": "Start with installation",
+      "homeSearch": "Search the docs",
+      "homeMeta": "Node.js 20+ · Local-first · Open source",
+      "quickStart": "Quick start",
+      "quickStartNote": "Open the address after <strong>Ready</strong>.",
+      "startCardsTitle": "Choose a path",
+      "startCardsLead": "Read the short path first. The reference is here when you need the details.",
+      "cardInstallTitle": "Install and connect",
+      "cardInstallBody": "Run the app with npm start, connect a model, then choose one source.",
+      "cardConnectorsTitle": "Connect your work",
+      "cardConnectorsBody": "Local folders, Google, GitHub, Outlook, Slack, Notion, and MCP.",
+      "cardControlTitle": "Keep control",
+      "cardControlBody": "Read-only defaults, separate write permissions, and local data handling.",
+      "cardReferenceTitle": "Build on it",
+      "cardReferenceBody": "Configuration, the local API, architecture, and test commands.",
+      "linkSection": "Link to this section",
+      "loading": "Loading search…",
+      "searchType": "Type to search the documentation.",
+      "searchNavigate": "Use ↑ ↓ to navigate, Enter to open"
+    }
+  },
+  "zh": {
+    "title": "Unprompted 文档",
+    "groups": [
+      {
+        "title": "开始使用",
+        "links": [
+          {
+            "slug": "",
+            "title": "概览"
+          },
+          {
+            "slug": "quickstart",
+            "title": "安装与首次运行"
+          },
+          {
+            "slug": "models",
+            "title": "模型"
+          },
+          {
+            "slug": "connectors",
+            "title": "连接器"
+          },
+          {
+            "slug": "google",
+            "title": "Google Workspace"
+          }
+        ]
+      },
+      {
+        "title": "使用指南",
+        "links": [
+          {
+            "slug": "workspace",
+            "title": "工作区"
+          },
+          {
+            "slug": "workflows",
+            "title": "工作流"
+          },
+          {
+            "slug": "permissions",
+            "title": "权限与隐私"
+          }
+        ]
+      },
+      {
+        "title": "帮助",
+        "links": [
+          {
+            "slug": "troubleshooting",
+            "title": "故障排查"
+          }
+        ]
+      },
+      {
+        "title": "参考",
+        "links": [
+          {
+            "slug": "configuration",
+            "title": "配置"
+          },
+          {
+            "slug": "api",
+            "title": "本地 API"
+          },
+          {
+            "slug": "architecture",
+            "title": "架构"
+          }
+        ]
+      },
+      {
+        "title": "项目",
+        "links": [
+          {
+            "slug": "development",
+            "title": "开发与测试"
+          }
+        ]
+      }
+    ],
+    "labels": {
+      "docs": "文档",
+      "search": "搜索",
+      "searchPlaceholder": "搜索文档…",
+      "searchHint": "搜索标题、小节与正文",
+      "searchShortcut": "按 ⌘K 搜索",
+      "noResults": "没有找到",
+      "searchUnavailable": "搜索暂不可用，仍可通过侧栏浏览文档。",
+      "searchStart": "输入关键词开始搜索。",
+      "results": "条结果",
+      "onThisPage": "本页内容",
+      "previous": "上一篇",
+      "next": "下一篇",
+      "edit": "编辑此页",
+      "source": "源文件",
+      "menu": "打开导航",
+      "close": "关闭",
+      "skip": "跳到正文",
+      "language": "语言",
+      "copy": "复制",
+      "copied": "已复制",
+      "home": "文档首页",
+      "getStarted": "开始使用",
+      "github": "GitHub",
+      "version": "v0.3.0",
+      "updated": "文档对应当前 main 分支",
+      "footerNote": "本地优先，Apache-2.0 开源。",
+      "notFoundTitle": "页面不存在",
+      "notFoundBody": "页面可能已移动。可以搜索文档，或返回概览。",
+      "backHome": "返回文档首页",
+      "homeEyebrow": "Unprompted 文档",
+      "homeTitle": "不必写提示词<span class=\"green\">。</span>",
+      "homeLead": "本地优先的工作伙伴：留意工作、核对证据、准备下一步，并在行动前询问你。",
+      "homeStart": "从安装开始",
+      "homeSearch": "搜索文档",
+      "homeMeta": "Node.js 20+ · 本地优先 · 开源",
+      "quickStart": "快速开始",
+      "quickStartNote": "看到 <strong>Ready</strong> 后打开地址。",
+      "startCardsTitle": "选择一条路径",
+      "startCardsLead": "先读最短的路径；需要细节时再看参考。",
+      "cardInstallTitle": "安装并连接",
+      "cardInstallBody": "用 npm start 运行，连接模型，再选择一个来源。",
+      "cardConnectorsTitle": "连接你的工作",
+      "cardConnectorsBody": "本地文件夹、Google、GitHub、Outlook、Slack、Notion 与 MCP。",
+      "cardControlTitle": "保持控制",
+      "cardControlBody": "默认只读、写入单独授权，并了解本机数据如何处理。",
+      "cardReferenceTitle": "基于它开发",
+      "cardReferenceBody": "配置项、本地 API、架构与测试命令。",
+      "linkSection": "链接到本节",
+      "loading": "正在加载搜索…",
+      "searchType": "输入关键词开始搜索。",
+      "searchNavigate": "用 ↑ ↓ 移动，Enter 打开"
+    }
+  }
+}

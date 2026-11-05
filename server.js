@@ -1,3 +1,4 @@
+import { todoistIdentity } from './src/connectors/todoist.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import { JsonStore, hasRealEvents } from './src/store.js';
 import { WorkEngine } from './src/engine.js';
 import { SimulationController } from './src/simulation.js';
 import { seedDemoMemories } from './src/demo-memories.js';
+import { demoMemorySpace, demoMemoryDetail } from './src/demo-memory-space.js';
 import { buildRuntime } from './src/connectors/index.js';
 import { ConnectorSync } from './src/connectors/sync.js';
 import { createReasoner } from './src/reasoning.js';
@@ -29,6 +31,7 @@ import { nativeSnapshot } from './src/connectors/local-snapshot.js';
 import { bindConnectionAccount } from './src/external-work.js';
 import { readRegularFile } from './src/local-files.js';
 import { McpManager, McpConfigStore } from './src/mcp.js';
+import { McpOAuthBroker } from './src/mcp-oauth.js';
 import { SqliteStore } from './src/durable/store.js';
 import { DurableRuntime } from './src/durable/runtime.js';
 
@@ -58,7 +61,7 @@ const artifactConnectionFor = id => {
       accountLabel: process.env.GOOGLE_REFRESH_TOKEN ? runtimeEnv.GOOGLE_ACCOUNT_EMAIL : saved.accountEmail, scopes: process.env.GOOGLE_REFRESH_TOKEN
         ? (runtimeEnv.GOOGLE_DRAFTS_ENABLED === 'true' ? ['https://www.googleapis.com/auth/gmail.compose'] : []) : saved.grantedScopes };
   }
-  if (id === 'apple_notes') return { connector, accountId: connector.scopeId, accountLabel: 'Apple Notes', scopes: [] };
+  if (id === 'apple_notes' || id === 'apple_reminders') return { connector, accountId: connector.scopeId, accountLabel: id === 'apple_notes' ? 'Apple Notes' : 'Apple Reminders', scopes: [] };
   const saved = localSetup.getConnection(id);
   return { connector, accountId: saved.account?.id, accountLabel: saved.account?.label, scopes: saved.scopes || [] };
 };
@@ -70,15 +73,16 @@ let provisionedConnections = {};
 try { provisionedConnections = publicClientConfiguration(JSON.parse(readRegularFile(connectionClientFile, { maxBytes: 64 * 1024 }))); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
 for (const provider of Object.values(CONNECTION_PROVIDERS)) {
+  if (provider.flow === 'token') continue;
   const saved = localSetup.getConnection(provider.id);
   const fromFile = provisionedConnections[provider.id] || {};
   const fromEnvId = process.env[provider.clientEnv];
   const fromEnvSecret = provider.secretEnv ? process.env[provider.secretEnv] : null;
   if (provider.flow === 'code') {
-    const paired = Boolean(fromEnvId && fromEnvSecret);
+    const paired = Boolean(fromEnvId && (provider.id === 'slack' || fromEnvSecret));
     const clientId = paired ? fromEnvId : fromFile.clientId;
     const clientSecret = paired ? fromEnvSecret : fromFile.clientSecret;
-    if (clientId && clientSecret && !(saved.clientId && saved.clientSecret)) localSetup.saveConnectionCredentials(provider.id, { clientId, clientSecret });
+    if (clientId && (provider.id === 'slack' || clientSecret) && !(saved.clientId && (provider.id === 'slack' || saved.clientSecret))) localSetup.saveConnectionCredentials(provider.id, { clientId, clientSecret });
   } else {
     const clientId = fromEnvId || fromFile.clientId;
     if (clientId && !saved.clientId) localSetup.saveConnectionClient(provider.id, clientId);
@@ -161,7 +165,7 @@ let engine = new WorkEngine(store, {
   provider: runtime.provider,
   policy: runtime.policy,
   reasoner: productReasoner,
-  externalTools: scope => [...mcp.tools(scope), ...(engine?.durableRuntime?.tools(scope) || [])],
+  externalTools: scope => [...mcp.tools({ ...scope, executeWrite: input => engine.durableRuntime.connectorActions.mcpWrite(input) }), ...(engine?.durableRuntime?.tools(scope) || [])],
   documentProvider,
   mode: runtime.mode,
   dateLocale,
@@ -243,8 +247,12 @@ const onConnectionAuthorized = (id, options) => {
   connectionActivationQueue = activation; return activation;
 };
 const deviceOAuth = new DeviceOAuth(localSetup, { onConnected: onConnectionAuthorized });
-const codeOAuth = new CodeOAuth(localSetup, { onConnected: onConnectionAuthorized });
-const connectionOAuth = id => connectionProvider(id).flow === 'code' ? codeOAuth : deviceOAuth;
+const codeOAuth = new CodeOAuth(localSetup, { onConnected: onConnectionAuthorized,
+  slackPublicClient: provisionedConnections.slack?.redirectUri ? provisionedConnections.slack : null });
+const microsoftOAuth = new CodeOAuth(localSetup, { onConnected: onConnectionAuthorized, port: 0 });
+const mcpOAuth = new McpOAuthBroker({ manager: mcp, onAuthorized: () => { if (!shutdownPromise) engine.investigateWithTools(); } });
+mcp.attachOAuth(mcpOAuth);
+const connectionOAuth = id => id === 'microsoft' ? microsoftOAuth : connectionProvider(id).flow === 'code' ? codeOAuth : deviceOAuth;
 const publicSetupStatus = () => {
   const status = localSetup.publicStatus({
     runtime,
@@ -255,6 +263,7 @@ const publicSetupStatus = () => {
   status.model = { ...status.model, active: modelRuntime.available === true,
     runtime: modelRuntime, externallyConfigured: Boolean(process.env.UNPROMPTED_MODEL_BASE_URL || process.env.UNPROMPTED_MODEL_NAME) };
   status.mcp = mcp.describe();
+  status.connectorActions = durableRuntime?.connectorActions.describe() || { available: false, platforms: [], grants: [] };
   status.artifacts = durableRuntime?.artifacts.describe() || { available: false, grants: [], targets: [] };
   const canCreateArtifact = id => status.artifacts.enabled && status.artifacts.grants.some(grant => grant.connectorId === id && grant.status === 'active' && grant.available);
   if (durableRuntime) status.durable = durableRuntime.describe();
@@ -262,18 +271,19 @@ const publicSetupStatus = () => {
     const saved = localSetup.getConnection(provider.id), connector = runtime.connectors.find(connector => connector.id === provider.id && connector.live);
     const recorded = store.state.connectorStatus?.[provider.id];
     return [provider.id, { id: provider.id, name: provider.name, flow: provider.flow, clientId: saved.pendingClientId || saved.clientId || null,
-      configured: provider.flow === 'code' ? Boolean(saved.clientId && saved.clientSecret) : Boolean(saved.clientId),
+      configured: provider.flow === 'token' ? true : provider.flow === 'code' ? Boolean(saved.clientId && (provider.id === 'slack' || saved.clientSecret)) : Boolean(saved.clientId),
       authorized: Boolean(saved.accessToken), connected: Boolean(connector && connector.account?.id === saved.account?.id),
-      account: saved.account ? { label: saved.account.label } : null, readOnly: !canCreateArtifact(provider.id), capabilities: connector?.capabilities() || null,
-      oauth: connectionOAuth(provider.id).describe(provider.id), lastSyncAt: recorded?.lastSyncAt || null,
+      account: saved.account ? { label: saved.account.label } : null, readOnly: !canCreateArtifact(provider.id) && !(status.connectorActions.enabled && status.connectorActions.grants.some(grant => grant.connectorId === provider.id && grant.status === 'active' && grant.available)), capabilities: connector?.capabilities() || null,
+      oauth: provider.flow === 'token' ? { phase: 'idle' } : connectionOAuth(provider.id).describe(provider.id), lastSyncAt: recorded?.lastSyncAt || null,
       lastError: recorded?.lastError || null, healthy: recorded ? recorded.ok === true : null,
       counts: sourceCounts(store.state, provider.id) }];
   }));
-  status.localSources = Object.fromEntries(['local_files', 'apple_notes'].map(id => {
+  status.platform = nativeBridge.platform === 'darwin' ? 'macos' : nativeBridge.platform === 'win32' ? 'windows' : nativeBridge.platform === 'linux' ? 'linux' : 'other';
+  status.localSources = Object.fromEntries(['local_files', 'apple_notes', 'apple_reminders'].map(id => {
     const saved = localSetup.getNativeSource(id), entries = id === 'local_files' ? saved.roots : saved.folders;
     const recorded = store.state.connectorStatus?.[id];
     return [id, { id, available: id === 'local_files' || nativeBridge.platform === 'darwin', nativePicker: nativeBridge.platform === 'darwin',
-      connected: runtime.connectors.some(connector => connector.id === id && connector.live), readOnly: !canCreateArtifact(id),
+      connected: runtime.connectors.some(connector => connector.id === id && connector.live), readOnly: !canCreateArtifact(id) && !(status.connectorActions.enabled && status.connectorActions.grants.some(grant => grant.connectorId === id && grant.status === 'active' && grant.available)),
       capabilities: runtime.connectors.find(connector => connector.id === id && connector.live)?.capabilities() || null,
       scopes: entries.map((item, index) => ({ id: publicScopeId(item), index, label: item.label, ...(item.accountLabel ? { account: item.accountLabel } : {}) })),
       healthy: recorded ? recorded.ok === true : null, lastSyncAt: recorded?.lastSyncAt || null, lastError: recorded?.lastError || null,
@@ -348,7 +358,7 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
     const nextEngine = new WorkEngine(nextStore, {
       baseUrl: `http://${host}:${port}`, provider: nextRuntime.provider, policy: nextRuntime.policy,
       reasoner: previous.engine.reasoner, documentProvider: nextDocumentProvider, mode: 'live', dateLocale,
-      externalTools: scope => [...mcp.tools(scope), ...(engine?.durableRuntime?.tools(scope) || [])],
+      externalTools: scope => [...mcp.tools({ ...scope, executeWrite: input => engine.durableRuntime.connectorActions.mcpWrite(input) }), ...(engine?.durableRuntime?.tools(scope) || [])],
       stallAfterMs: previous.engine.stallAfterMs,
       onChange(state) { if (applied) sseHub.publish(state); }
     });
@@ -364,6 +374,7 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
     localSetup.markGoogleRuntimeActive();
     if (nextStore !== previous.store) previous.store.close();
     applied = true;
+    if (durableRuntime?.privacy.permissionRevoked('google')) durableRuntime.privacy.restorePermission('google');
     durableRuntime?.start();
     sseHub.publish(engine.publicState());
     await monitoring.setSettings({ enabled: observe === true });
@@ -388,7 +399,7 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     await monitoring.whenIdle(); await engine.whenSettled();
     if (shutdownPromise) throw new Error('The application is shutting down.');
     // Remove revoked local evidence before rebuilding the active sources.
-    for (const id of ['local_files', 'apple_notes']) {
+    for (const id of ['local_files', 'apple_notes', 'apple_reminders']) {
       const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
       if (!cursor) continue;
       const allowed = new Set((id === 'local_files' ? saved.roots : saved.folders).map(item => item.id || item.folderId));
@@ -399,11 +410,34 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
       store.mutate(state => { state.cursors[id] = result.cursor; });
     }
     for (const [id, account] of Object.entries(sourceAccountBindings(localSetup))) if (account || store.state.connectionAccounts?.[id]) bindConnectionAccount(store, id, account);
+    // A fresh authorization ends an earlier revocation; otherwise every event
+    // from the reconnected account would still be dropped as revoked.
+    if (refreshSource && durableRuntime?.privacy.permissionRevoked(refreshSource)) durableRuntime.privacy.restorePermission(refreshSource);
     if (refreshSource) store.mutate(state => {
       const previous = state.cursors?.[refreshSource];
       if (refreshSource === 'github' && previous?.tracked) state.cursors[refreshSource] = { tracked: previous.tracked };
       else delete state.cursors?.[refreshSource];
       delete state.connectorStatus?.[refreshSource];
+      // A wiped cursor restarts observation revisions at 1. Any task still marked
+      // permission_revoked, including a non-purge revoke that only paused it, would
+      // then treat the same item and its mirror document as stale. Restore only that
+      // disconnection, and only un-cancel the forget path's exact dismissal.
+      const disconnected = 'This source account was disconnected or changed. Its historical work is no longer actively observed.';
+      for (const task of Object.values(state.tasks || {})) {
+        if (task.sourceConnectorId !== refreshSource || task.privacyInvalidated || task.privacyRedacted || task.action) continue;
+        const revoked = task.control?.pauseReason === 'permission_revoked';
+        const unbound = task.userDismissed === true && task.reason === disconnected;
+        if (!revoked) continue;
+        if (task.externalSource) task.externalSource.sourceObservationRevision = 0;
+        const mirrored = task.documentId ? state.documents?.[task.documentId] : null;
+        if (mirrored) mirrored.sourceObservationRevision = 0;
+        if (unbound) {
+          task.userDismissed = false;
+          if (task.status === 'cancelled') task.status = 'waiting_for_information';
+          task.reason = 'Following an explicit to-do in a selected local source.';
+        }
+        task.control = { ...(task.control || {}), paused: false, pauseReason: null, updatedAt: new Date().toISOString() };
+      }
     });
     const nextEnv = localSetup.runtimeEnv(process.env);
     if (googleDisconnectedThisRun) for (const key of ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']) delete nextEnv[key];
@@ -519,12 +553,32 @@ async function handleHttpRequest(req, res) {
       });
     }
     if (req.method === 'GET' && url.pathname === '/api/mcp') return json(res, 200, mcp.describe());
+    if (req.method === 'GET' && url.pathname === '/api/connector-grants') return json(res, 200, durableRuntime?.connectorActions.describe() || { available: false, platforms: [], grants: [] });
     if (req.method === 'GET' && url.pathname === '/api/artifact-grants') return json(res, 200, durableRuntime?.artifacts.describe() || { available: false, grants: [], targets: [] });
     if (req.method === 'GET' && url.pathname === '/api/durable') return json(res, 200, durableRuntime?.describe() || { version: 'legacy-demo', available: false });
     if (req.method === 'GET' && url.pathname === '/api/situations') return json(res, 200, { situations: durableRuntime?.tasks.situations.listActive() || [], available: Boolean(durableRuntime) });
     if (req.method === 'GET' && url.pathname === '/api/standing-intents') return json(res, 200, { intents: durableRuntime?.intents.list() || [], available: Boolean(durableRuntime) });
     if (req.method === 'GET' && url.pathname === '/api/activation/metrics') return json(res, 200, durableRuntime ? durableRuntime.activationMetrics() : { available: false });
     if (req.method === 'GET' && url.pathname === '/api/experiences') return json(res, 200, { experiences: durableRuntime?.experiences.list() || [] });
+    if (req.method === 'GET' && url.pathname === '/api/memory-space') {
+      const options = Object.fromEntries(url.searchParams);
+      return json(res, 200, durableRuntime ? await durableRuntime.memorySpace.browse(options) : demoMemorySpace(store.state, options));
+    }
+    const memorySpaceDetail = url.pathname.match(/^\/api\/memory-space\/([^/]+)$/);
+    if (req.method === 'GET' && memorySpaceDetail) {
+      const id = decodeURIComponent(memorySpaceDetail[1]);
+      if (!durableRuntime) {
+        const detail = demoMemoryDetail(store.state, id);
+        return json(res, detail ? 200 : 404, detail || { error: 'This memory no longer exists.' });
+      }
+      return json(res, 200, durableRuntime.memorySpace.get(id, { depth: url.searchParams.get('depth') }));
+    }
+    const artifactLifecycle = url.pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts$/);
+    if (req.method === 'GET' && artifactLifecycle) {
+      if (!durableRuntime) return json(res, 409, { error: 'Open the persistent workspace to view artifact history.', code: 'DURABLE_WORKSPACE_REQUIRED' });
+      try { return json(res, 200, durableRuntime.artifactLifecycle(decodeURIComponent(artifactLifecycle[1]))); }
+      catch (error) { return json(res, error.status || 500, { error: error.status ? error.message : 'Artifact history is unavailable.', code: error.code }); }
+    }
     if (req.method === 'GET' && url.pathname === '/api/policies') return json(res, 200, { policies: durableRuntime?.policies.list() || [] });
     const privacyStatus = url.pathname.match(/^\/api\/privacy\/requests\/([^/]+)$/);
     if (req.method === 'GET' && privacyStatus) {
@@ -537,8 +591,10 @@ async function handleHttpRequest(req, res) {
       if (workspaceChanging) return json(res, 409, { error: 'The workspace connection is being updated.' });
       const id = decodeURIComponent(localDocumentRoute[1]), doc = store.state.documents[id];
       const source = doc?.source;
-      if (!['local_files', 'apple_notes'].includes(source) || doc.available === false) return json(res, 404, { error: 'This local document is no longer available.' });
-      const grant = localSetup.getNativeSource(source), known = store.state.cursors?.[source]?.documents?.[id];
+      if (!['local_files', 'apple_notes', 'apple_reminders'].includes(source) || doc.available === false) return json(res, 404, { error: 'This local document is no longer available.' });
+      const grant = localSetup.getNativeSource(source);
+      const reminderId = source === 'apple_reminders' ? id.split(':document:')[1] : null;
+      const known = source === 'apple_reminders' ? store.state.cursors?.[source]?.items?.[reminderId] : store.state.cursors?.[source]?.documents?.[id];
       if (!grant.scopeId || !id.startsWith(`${source}:${grant.scopeId}:`) || !known) return json(res, 404, { error: 'This local document is outside the connected scope.' });
       try {
         let content;
@@ -546,6 +602,13 @@ async function handleHttpRequest(req, res) {
           const selected = grant.roots.find(item => item.id === known.rootId);
           if (!selected || canonicalLocalRoot(selected.path) !== selected.path) throw new Error('Unavailable');
           content = readScopedText(selected.path, known.relative);
+        } else if (source === 'apple_reminders') {
+          const selected = grant.folders.find(item => item.folderId === known.folderId && item.accountId === known.accountId);
+          if (!selected) throw new Error('Unavailable');
+          const result = await nativeBridge.readReminders([selected]);
+          const record = result.records?.find(item => item.id === reminderId && item.folderId === selected.folderId && item.accountId === selected.accountId);
+          if (!record) throw new Error('Unavailable');
+          content = `${record.title}\n${record.body || ''}`;
         } else {
           const selected = grant.folders.find(item => item.folderId === known.folderId && item.accountId === known.accountId);
           if (!selected) throw new Error('Unavailable');
@@ -629,6 +692,24 @@ async function handleHttpRequest(req, res) {
         }
       }
 
+      if (url.pathname === '/api/autonomy') {
+        const grant = engine.autonomy.create(body);
+        return json(res, 200, { grant, state: engine.publicState() });
+      }
+      const autonomyRevoke = url.pathname.match(/^\/api\/autonomy\/([^/]+)\/revoke$/);
+      if (autonomyRevoke) {
+        engine.autonomy.revoke(decodeURIComponent(autonomyRevoke[1]));
+        return json(res, 200, { state: engine.publicState() });
+      }
+
+      const artifactUndo = url.pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts\/([^/]+)\/undo$/);
+      if (artifactUndo) {
+        if (!durableRuntime || demoMode) return json(res, 409, { error: 'Open the persistent workspace to undo artifacts.', code: 'DURABLE_WORKSPACE_REQUIRED' });
+        try {
+          const artifact = await durableRuntime.artifacts.undo(decodeURIComponent(artifactUndo[1]), decodeURIComponent(artifactUndo[2]), { actor: 'user' });
+          return json(res, 200, { artifact, state: engine.publicState() });
+        } catch (error) { return json(res, error.status || 409, { error: error.message, code: error.code }); }
+      }
       if (/^\/api\/artifact-grants(?:\/|$)/.test(url.pathname) || /^\/api\/tasks\/[^/]+\/artifacts$/.test(url.pathname)) {
         if (!durableRuntime || demoMode) return json(res, 409, { error: 'Open the persistent workspace to authorize artifact creation.', code: 'DURABLE_WORKSPACE_REQUIRED' });
         if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid artifact request.' });
@@ -656,9 +737,13 @@ async function handleHttpRequest(req, res) {
         return json(res, 404, { error: 'Unknown artifact operation.' });
       }
 
-      if (/^\/api\/(privacy|policies|instructions|experiences|executions|standing-intents|activation)(?:\/|$)/.test(url.pathname) || /^\/api\/tasks\/[^/]+\/(?:draft|resume-yield)$/.test(url.pathname) || /^\/api\/situations\/[^/]+\/probe$/.test(url.pathname)) {
+      if (/^\/api\/(memory-space|privacy|policies|instructions|experiences|executions|standing-intents|activation)(?:\/|$)/.test(url.pathname) || /^\/api\/tasks\/[^/]+\/(?:draft|resume-yield|prepared-work\/(?:accept|retry))$/.test(url.pathname) || /^\/api\/situations\/[^/]+\/probe$/.test(url.pathname)) {
         if (!durableRuntime) return json(res, 409, { error: 'Open the persistent SQLite workspace for this operation.', code: 'DURABLE_WORKSPACE_REQUIRED' });
         if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid request body.' });
+        const preparedAcceptance = url.pathname.match(/^\/api\/tasks\/([^/]+)\/prepared-work\/accept$/);
+        if (preparedAcceptance) { durableRuntime.acceptPreparedWork(decodeURIComponent(preparedAcceptance[1]), body); return json(res, 200, { state: engine.publicState() }); }
+        const preparedRetry = url.pathname.match(/^\/api\/tasks\/([^/]+)\/prepared-work\/retry$/);
+        if (preparedRetry) { const job = durableRuntime.retryPreparedWork(decodeURIComponent(preparedRetry[1]), body); return json(res, 202, { jobId: job.id, state: engine.publicState() }); }
         const situationProbe = url.pathname.match(/^\/api\/situations\/([^/]+)\/probe$/);
         if (situationProbe) {
           if (Object.keys(body).some(key => !['sourceEventId', 'scheduledAt'].includes(key))) return json(res, 400, { error: 'Invalid probe configuration.', code: 'INVALID_PROBE' });
@@ -667,15 +752,25 @@ async function handleHttpRequest(req, res) {
         }
         if (url.pathname === '/api/standing-intents') {
           if (body.confirmed !== true) return json(res, 403, { error: 'An explicit confirmation is required.', code: 'INTENT_CONFIRMATION_REQUIRED' });
-          return json(res, 200, { intent: durableRuntime.intents.create(body, { actor: 'user', confirmed: true }) });
+          const intent = durableRuntime.intents.create(body, { actor: 'user', confirmed: true }); engine.changed();
+          return json(res, 200, { intent });
         }
+        const intentEdit = url.pathname.match(/^\/api\/standing-intents\/([^/]+)$/);
+        if (intentEdit) { const intent = durableRuntime.syncStandingIntent(durableRuntime.intents.update(decodeURIComponent(intentEdit[1]), body.expectedVersion, body)); engine.changed(); return json(res, 200, { intent }); }
         const intentTransition = url.pathname.match(/^\/api\/standing-intents\/([^/]+)\/(pause|resume|disable)$/);
         if (intentTransition) {
           const status = intentTransition[2] === 'resume' ? 'active' : intentTransition[2] === 'pause' ? 'paused' : 'disabled';
-          return json(res, 200, { intent: durableRuntime.intents.transition(decodeURIComponent(intentTransition[1]), body.expectedVersion, status) });
+          const intent = durableRuntime.syncStandingIntent(durableRuntime.intents.transition(decodeURIComponent(intentTransition[1]), body.expectedVersion, status)); engine.changed();
+          return json(res, 200, { intent });
         }
+        if (url.pathname === '/api/activation/rsi/evaluate') return json(res, 200, durableRuntime.rsi.evaluate(body));
+        if (url.pathname === '/api/activation/rsi/propose') { const proposal = durableRuntime.rsi.propose(body); engine.changed(); return json(res, 200, { proposal }); }
+        const rsiOperation = url.pathname.match(/^\/api\/activation\/rsi\/([^/]+)\/(apply|rollback)$/);
+        if (rsiOperation) { const proposal = durableRuntime[rsiOperation[2] === 'apply' ? 'applyRsi' : 'rollbackRsi'](decodeURIComponent(rsiOperation[1]), body.expectedVersion); engine.changed(); return json(res, 200, { proposal }); }
         if (url.pathname === '/api/activation/flags') return json(res, 200, { flags: durableRuntime.setFlags(body) });
         if (url.pathname === '/api/privacy/revoke') {
+          const connector = runtime.connectors.find(item => item.id === body?.connectorId);
+          if (connector) { connector.live = false; if (connector.auth) connector.auth.disabled = true; }
           const revocation = await durableRuntime.privacy.revokePermission({ connectorId: body.connectorId, purgeLocal: body.purgeLocal === true });
           engine.changed();
           return json(res, 200, revocation);
@@ -703,7 +798,7 @@ async function handleHttpRequest(req, res) {
         if (policyDisable) { const policy = durableRuntime.policies.disable(decodeURIComponent(policyDisable[1]), body.expectedVersion); durableRuntime.contextChanged(); engine.changed(); return json(res, 200, { policy, state: engine.publicState() }); }
         if (url.pathname === '/api/experiences/policy') { const policy = durableRuntime.experiences.configurePolicy(body); engine.changed(); return json(res, 200, { policy }); }
         if (url.pathname === '/api/experiences/context-policy') return json(res, 200, { policy: durableRuntime.context.configure(body) });
-        if (url.pathname === '/api/experiences/replay') return json(res, 200, durableRuntime.replay.retrieval(body.cases, body.options));
+        if (url.pathname === '/api/experiences/replay') return json(res, 200, await durableRuntime.replayExperiences(body));
         if (url.pathname === '/api/experiences/retrieval-policy') { const policy = durableRuntime.memory.configure(body); durableRuntime.contextChanged(); return json(res, 200, { policy }); }
         if (url.pathname === '/api/experiences/attention-policy') { const attention = store.attention.configure(body); engine.changed(); return json(res, 200, { attention }); }
         const editDraft = url.pathname.match(/^\/api\/tasks\/([^/]+)\/draft$/);
@@ -716,7 +811,55 @@ async function handleHttpRequest(req, res) {
         if (trial) { const result = await durableRuntime.trial(decodeURIComponent(trial[1]), body); return json(res, 200, { ...result, state: engine.publicState() }); }
         const reconcileExecution = url.pathname.match(/^\/api\/executions\/([^/]+)\/reconcile$/);
         if (reconcileExecution) { await durableRuntime.reconcileExecution(decodeURIComponent(reconcileExecution[1])); return json(res, 200, { state: engine.publicState() }); }
-        if (url.pathname === '/api/instructions') { const result = durableRuntime.ingestInstruction(body); engine.changed(); return json(res, 200, { ...result, state: engine.publicState() }); }
+        if (url.pathname === '/api/instructions') { const result = await durableRuntime.ingestInstruction(body); engine.changed(); return json(res, 200, { ...result, state: engine.publicState() }); }
+        if (url.pathname === '/api/memory-space') {
+          const result = await durableRuntime.memorySpace.create(body); engine.changed();
+          return json(res, 200, { ...result, state: engine.publicState() });
+        }
+        const memorySpaceMutation = url.pathname.match(/^\/api\/memory-space\/([^/]+)$/);
+        if (memorySpaceMutation) {
+          const result = await durableRuntime.memorySpace.update(decodeURIComponent(memorySpaceMutation[1]), body); engine.changed();
+          return json(res, 200, { ...result, state: engine.publicState() });
+        }
+        const memorySpaceRelation = url.pathname.match(/^\/api\/memory-space\/([^/]+)\/relations$/);
+        if (memorySpaceRelation) {
+          const relations = durableRuntime.memorySpace.changeRelation(decodeURIComponent(memorySpaceRelation[1]), body); engine.changed();
+          return json(res, 200, { relations, state: engine.publicState() });
+        }
+      }
+
+      if (url.pathname === '/api/connector-grants' || /^\/api\/connector-grants\/[^/]+\/revoke$/.test(url.pathname) || /^\/api\/tasks\/[^/]+\/platform-actions$/.test(url.pathname)) {
+        if (!durableRuntime || demoMode) return json(res, 409, { error: 'Open the persistent workspace to authorize platform actions.' });
+        try {
+          if (url.pathname === '/api/connector-grants') {
+            if (process.env.UNPROMPTED_SHADOW_MODE === 'true') return json(res, 403, { error: 'The launch environment requires read-only mode.' });
+            const grant = durableRuntime.connectorActions.createGrant(body, { actor: 'user' });
+            localSetup.setArtifactWrites(true);
+            await applyConnectedSources({ request: req, initialRead: false });
+            engine.investigateWithTools();
+            return json(res, 200, { grant, setup: publicSetupStatus() });
+          }
+          const revoke = url.pathname.match(/^\/api\/connector-grants\/([^/]+)\/revoke$/);
+          if (revoke) { durableRuntime.connectorActions.revoke(decodeURIComponent(revoke[1])); return json(res, 200, { setup: publicSetupStatus() }); }
+          const taskId = decodeURIComponent(url.pathname.split('/')[3]);
+          const result = await durableRuntime.connectorActions.request(taskId, body, { actor: 'user' });
+          return json(res, 200, { result, state: engine.publicState() });
+        } catch (error) { return json(res, error.status || 409, { error: error.message, code: error.code || 'PLATFORM_ACTION_FAILED' }); }
+      }
+
+      const mcpOAuthRoute = url.pathname.match(/^\/api\/mcp\/oauth\/([^/]+)$/);
+      if (mcpOAuthRoute) {
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid MCP request body.' });
+        if (demoMode) return json(res, 409, { error: 'Open your persistent workspace to connect MCP services.', code: 'DISPOSABLE_DEMO' });
+        if (Object.hasOwn(body, 'serverUrl')) return json(res, 400, { error: 'MCP sign-in uses the built-in service address.' });
+        const id = decodeURIComponent(mcpOAuthRoute[1]);
+        try {
+          const oauth = body.cancel === true ? await mcpOAuth.cancel(id) : await mcpOAuth.begin(id);
+          return json(res, 200, { oauth, mcp: mcp.describe(), setup: publicSetupStatus() });
+        } catch (error) {
+          const message = error?.code === 'MCP_OAUTH' ? error.message : 'Sign-in could not start.';
+          return json(res, error?.status || 400, { error: message, code: 'MCP_OAUTH' });
+        }
       }
 
       if (url.pathname === '/api/mcp/import' || /^\/api\/mcp\/servers\/[^/]+$/.test(url.pathname)) {
@@ -725,16 +868,19 @@ async function handleHttpRequest(req, res) {
         const result = url.pathname === '/api/mcp/import'
           ? await mcp.import(body.config, { allowDeclaredRead: body.allowDeclaredRead === true })
           : await mcp.update(decodeURIComponent(url.pathname.split('/').pop()), body);
+        if (Array.isArray(body.writeTools) && body.writeTools.length) {
+          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false }); }
+        }
         engine.investigateWithTools();
         return json(res, 200, { mcp: result, setup: publicSetupStatus() });
       }
 
-      const nativeRoute = url.pathname.match(/^\/api\/setup\/local-sources\/(local_files|apple_notes)\/(select|forget|remove-scope)$/);
+      const nativeRoute = url.pathname.match(/^\/api\/setup\/local-sources\/(local_files|apple_notes|apple_reminders)\/(select|forget|remove-scope)$/);
       if (nativeRoute) {
         const [, id, operation] = nativeRoute;
         if (demoMode) return json(res, 409, { error: 'Open your persistent workspace to connect local sources.', code: 'DISPOSABLE_DEMO' });
         if (nativeSelectionBusy || modelSetupBusy) return json(res, 409, { error: 'A source selection or model update is already open.', code: 'SOURCE_BUSY' });
-        if (id === 'apple_notes' && nativeBridge.platform !== 'darwin') return json(res, 400, { error: 'Apple Notes requires macOS.', code: 'UNSUPPORTED' });
+        if (['apple_notes', 'apple_reminders'].includes(id) && nativeBridge.platform !== 'darwin') return json(res, 400, { error: 'Apple Notes requires macOS.', code: 'UNSUPPORTED' });
         const controller = new AbortController();
         const abandon = () => { if (!res.writableFinished) controller.abort(); };
         res.once('close', abandon); nativeSelectionBusy = true;
@@ -760,7 +906,7 @@ async function handleHttpRequest(req, res) {
               catch { return json(res, 400, { error: 'Select up to 10 accessible folders using their absolute paths.', code: 'FOLDER_UNAVAILABLE' }); }
               selection = { ...saved, scopeId: saved.scopeId || randomUUID(), roots };
             } else {
-              const picked = await nativeBridge.chooseNotes({ locale: body?.locale, signal: controller.signal });
+              const picked = await (id === 'apple_reminders' ? nativeBridge.chooseReminders.bind(nativeBridge) : nativeBridge.chooseNotes.bind(nativeBridge))({ locale: body?.locale, signal: controller.signal });
               if (!Array.isArray(picked.folders) || !picked.folders.length) throw new NativeAccessError('NO_FOLDERS');
               const folders = [...saved.folders];
               for (const folder of picked.folders) if (!folders.some(item => item.folderId === folder.folderId && item.accountId === folder.accountId)) folders.push(folder);
@@ -770,6 +916,8 @@ async function handleHttpRequest(req, res) {
             if (controller.signal.aborted) return;
             if (workspaceChanging || modelSetupBusy) return json(res, 409, { error: 'The workspace changed while the picker was open. Select the folder again.', code: 'WORKSPACE_CONNECTING' });
             localSetup.saveNativeSource(id, selection);
+            // Choosing the source again ends an earlier revocation.
+            if (durableRuntime?.privacy.permissionRevoked(id)) durableRuntime.privacy.restorePermission(id);
           }
           await applyConnectedSources({ request: req, initialRead: operation === 'select', observe: operation === 'select' ? body?.observe !== false : localSetup.get().monitoring.enabled });
           return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
@@ -780,16 +928,22 @@ async function handleHttpRequest(req, res) {
         } finally { nativeSelectionBusy = false; res.off('close', abandon); }
       }
 
-      const connectionRoute = url.pathname.match(/^\/api\/setup\/connections\/(github|microsoft|slack|notion)\/(authorize|cancel|activate|forget)$/);
+      const connectionRoute = url.pathname.match(/^\/api\/setup\/connections\/(github|microsoft|slack|notion|todoist)\/(authorize|cancel|activate|forget)$/);
       if (connectionRoute) {
         const [, id, operation] = connectionRoute;
-        const oauth = connectionOAuth(id);
+        const oauth = id === 'todoist' ? { cancel() {} } : connectionOAuth(id);
         if (demoMode) return json(res, 409, { error: 'Open your persistent workspace with npm start to connect accounts.', code: 'DISPOSABLE_DEMO' });
         if (operation === 'authorize') {
           try {
-            const started = connectionProvider(id).flow === 'code'
-              ? await codeOAuth.start(id, { clientId: body?.clientId, clientSecret: body?.clientSecret, observe: body?.observe !== false })
-              : await deviceOAuth.start(id, { clientId: body?.clientId, observe: body?.observe !== false, drafts: body?.drafts === true });
+            if (id === 'todoist') {
+              const account = await todoistIdentity(body?.token);
+              localSetup.saveConnectionAuthorization(id, { accessToken: body.token, account, scopes: [] });
+              await applyConnectedSources({ request: req, initialRead: true, observe: body?.observe !== false, refreshSource: id });
+              return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState(), oauth: { phase: 'connected' } });
+            }
+            const started = id === 'microsoft' || connectionProvider(id).flow === 'code'
+              ? await oauth.start(id, { clientId: body?.clientId, clientSecret: body?.clientSecret, channels: body?.channels === true, drafts: body?.drafts === true, scopes: body?.scopes || [], observe: body?.observe !== false })
+              : await deviceOAuth.start(id, { clientId: body?.clientId, observe: body?.observe !== false, drafts: body?.drafts === true, scopes: body?.scopes || [] });
             return json(res, 200, { oauth: started });
           }
           catch (error) { return json(res, 400, { error: error.message, code: 'AUTH_START_FAILED' }); }
@@ -1046,9 +1200,9 @@ async function handleHttpRequest(req, res) {
       }
       return json(res, 404, { error: 'Endpoint not found' });
     }
-    if (req.method === 'GET' && (url.pathname === '/' || ['/app.js', '/i18n.js', '/ux-state.js', '/dom-state.js', '/interactions.js', '/workspace.js', '/workspace-model.js', '/appearance.js', '/appearance-model.js', '/mcp.js', '/durable.js', '/artifacts.js', '/styles.css', '/interactions.css', '/workspace.css', '/mcp.css', '/durable.css', '/redesign.css', '/workbench.css'].includes(url.pathname))) {
+    if (req.method === 'GET' && (url.pathname === '/' || ['/app.js', '/i18n.js', '/ux-state.js', '/dom-state.js', '/interactions.js', '/workspace.js', '/workspace-model.js', '/memory-space.js', '/memory-space-model.js', '/appearance.js', '/appearance-model.js', '/mcp.js', '/durable.js', '/artifacts.js', '/source-offers.js', '/styles.css', '/interactions.css', '/workspace.css', '/mcp.css', '/durable.css', '/redesign.css', '/workbench.css', '/page-focus.css', '/page-focus.js', '/memory-space.css', '/select-menu.js', '/marks/gmail.svg', '/marks/github.svg', '/marks/slack.svg', '/marks/notion.svg'].includes(url.pathname))) {
       const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-      const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html';
+      const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.svg') ? 'image/svg+xml' : 'text/html';
       res.writeHead(200, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const stream = fs.createReadStream(path.join(root, 'public', file));
       stream.once('error', () => { if (!res.destroyed) res.destroy(); });
@@ -1073,6 +1227,7 @@ async function handleHttpRequest(req, res) {
     }
     if (error instanceof PermissionDeniedError) return json(res, 403, { error: error.message });
     if (error.code && Number.isInteger(error.status)) return json(res, error.status, { error: error.message, code: error.code });
+    if (['MEMORY_CHANGED', 'MEMORY_SUPERSEDED', 'INVALID_MEMORY_OPERATION', 'INVALID_RELATION'].includes(error.code)) return json(res, 409, { error: error.message, code: error.code });
     if (error.code === 'MCP_ERROR') return json(res, error.status || 400, { error: error.message, code: error.code });
     if (error.code === 'REVIEW_CHANGED') return json(res, 409, { error: error.message, code: error.code });
     const status = error instanceof SyntaxError || /Invalid|Incomplete|requires|ready|waiting|closed|changed|no longer current|approval|document|provider|Expected|large|confirmed|event|Unknown task|clarification|opportunity|pre-authoris|pre_authoris/i.test(error.message) ? 400 : 500;
@@ -1090,6 +1245,7 @@ const sweepTimer = setInterval(() => {
   try {
     engine.retryPendingReasoning(null, { dueOnly: true });
     engine.sweepAttention();
+    engine.autonomy.schedule();
   } catch (error) { console.error('Work maintenance failed:', error.message); }
 }, sweepInterval);
 
@@ -1113,6 +1269,8 @@ async function shutdown(exitCode = 0) {
   googleOAuth.cancel('shutdown');
   deviceOAuth.close();
   codeOAuth.close();
+  microsoftOAuth.close();
+  mcpOAuth.close();
   clearInterval(sweepTimer);
   workspaceChanging = true;
   await mcp.close();

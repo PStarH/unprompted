@@ -102,16 +102,49 @@ audited task source, separate from verified document evidence. Native issue and
 local-to-do investigations can read their source document, suggest a next step
 and queue an explicitly authorized work artifact without changing source ownership.
 
-`src/task-tools.js` supplies `read_task_source`, `search_documents` and
-`read_document` to both harnesses. Source text comes from the current task's
-message, provider assignment or explicit to-do. Documents include the direct
-source document and up to eight correlated, available documents, with user
-association corrections applied. Every read rechecks the current task lease,
+`src/task-tools.js` supplies `read_task_source`, `search_documents`,
+`read_document`, `search_workspace`, `read_workspace_record` and `observe_failures`
+to both harnesses.
+Source text comes from the current task's message, provider assignment or explicit
+to-do. `search_documents` stays on the direct source document and up to eight
+correlated, available documents, with user association corrections applied.
+`search_workspace` can also read eligible memories, other observed documents and
+messages, and other tasks already stored from connected sources. It does not call
+a provider. `observe_failures` rereads authorized stored mail for stated failures
+and returns evidence excerpts only. It does not create tasks, notifications or
+records. Every read rechecks the current task lease,
 reasoning fence, activation and connector revocation. Reads are recorded in the
 execution ledger as workspace context; they do not grant write access or prove
 task completion. Pi omits duplicate built-in tools when the shared adapters are
 present. Destination grant and policy changes invalidate tool investigation
 caches, including tasks that already have a prepared reply.
+
+Durable `WorkEngine` instances supply these workspace tools by default; server
+callbacks can add tools without having to reconnect the core source adapters.
+Observed sources retain their event, provider, account and document identity.
+Missing or unavailable observed sources fail the read; user goal text is never
+substituted for an empty observed body. Chunked JSON responses remain valid and
+bounded after escaping, with offsets matching the content actually delivered.
+
+Standing goals pass the same explicit activation policies before matching and
+again before committing work. Situation association and semantic delta routing
+also deliver observations to standing goals. A standing Situation is excluded
+from generic email delta targeting. Matching updates reuse one active follow-up
+per goal/provider/account/thread or document; input, context and model stamps
+prevent spending another model run on unchanged preparation. Standard and Pi
+prepare local drafts through their shared source tools, validate exact evidence
+quotations, and discard results after pause, direction or generation changes.
+`create_work_artifact` is absent from standing-goal tool scopes. Local acceptance
+pins the reviewed preparation and records explicit feedback; provider verification
+remains a separate outcome. Failed preparations have a versioned retry operation.
+Model changes fence in-flight preparations. Local artifact identities include
+input, context and model versions so freshly revalidated content cannot collide
+with an older stale artifact. Suppression holds existing work visibly, and a
+successful revalidation clears that hold before review resumes.
+
+Provider effects/reconciliation and privacy jobs have an independent service
+pump, so a pending model task cannot block their queues. Both pumps clear inherited
+task scope, coalesce wakeups and participate in `whenIdle` and shutdown.
 
 Native creation uses `create_work_artifact` and a separate durable write job.
 It revalidates the task, exact user grant, account, destination, context and
@@ -123,7 +156,7 @@ normalization, SQLite jobs, both model/tool loops and scripted provider readback
 
 The Standard MCP loop allows four provider turns and eight tool calls, sharing
 the existing rate/concurrency budget; Pi retains its existing limits. At most 24
-tools are exposed per run, four MCP calls may execute concurrently, and each
+MCP tools are exposed in addition to task tools; four MCP calls may execute concurrently, and each
 call has a 15-second deadline and a 6,000-character text result. Server catalogs
 are bounded to 64 tools and installation config to 12 servers. Enabled services
 reconnect in the background on startup. Disable/remove aborts the transport and
@@ -131,6 +164,14 @@ closes owned processes. Credentials remain in a separate private `mcp.json`,
 excluded from public projections and task exports. Server read annotations are
 claims trusted through the user's grant, not sandbox enforcement; known writes
 are blocked and arbitrary MCP tool polling is not task discovery.
+
+Both harnesses bound the combined tool catalog to leave space for task context
+and tool results. If needed, remote tool descriptions are shortened while
+parameter schemas and execution checks remain intact. Task source/context tools
+and the authorized artifact tool take priority; a remote tool whose complete
+schema cannot fit is omitted for that run and the model is told that the catalog
+is incomplete. Connector source tools read the current task's locally observed
+and authorized evidence; they do not provide unrestricted live provider search.
 
 ## Attention
 
@@ -178,9 +219,45 @@ providers without reliable reconciliation require manual resolution. Local token
 cannot fence a remote service that does not validate them. The rule-only demo and
 framework `JsonStore` remain explicit compatibility paths, outside v0.3 guarantees.
 
+Memory Space is a read projection over `user_memories`, not a separate knowledge
+store. Schema v7 adds memory kind, lifecycle and optional validity, baseline/version
+snapshots, and a small `memory_relations` table with foreign keys and evidence.
+Existing task directions stay authoritative in the compatibility projection.
+The idempotent migration preserves existing content and repairs the reversed
+correction links written by the intermediate v6 implementation. A correction
+uses `replacement -> supersedes -> original`; only the replacement remains
+eligible. Recoverable delete retains history; permanent Forget prunes incident
+relations without deleting neighboring memories. Search combines explainable field matching with the existing local retrieval
+index as a ranking tie-breaker. It supports natural-language query scaffolding,
+a small English/Chinese concept vocabulary and explicit recent-time constraints;
+it does not claim general semantic understanding. Shared scope buckets and broad
+sources never generate memory-to-memory edges. Optional local graphs use recorded
+relationships and explicitly typed applicability/source references. A relation never grants applicability
+outside a memory's saved scope. Task applicability lineage is distinct from
+actual task-run usage, which requires a recorded run reference.
+
 Memory retrieval combines FTS5 trigram search and in-process lexical n-gram vectors
 through reciprocal-rank fusion. This default is `semantic:false`; `HybridMemory`
 accepts an injected local semantic encoder with an explicit model ID and dimensions.
+Scope and active provenance filters run before candidate limits. FTS candidates
+are independent of the bounded vector scan, so older exact matches remain
+retrievable. Planning admits complete instructions or defers them for a guarded
+full read, and sends arbitration winners rather than overridden experiences.
+The same versioned context manifest is visible in task details.
+Task planning, workspace recall and activation use the same project, exact
+legacy project/deliverable, resource and confirmed person scopes. Active scoped
+preferences are selected independently of lexical similarity. Synchronous and
+asynchronous encoders share eligibility and version checks; embeddings are
+awaited outside write transactions and results are rejected after context,
+privacy or encoder changes. Legacy snapshot projection retains a local lexical
+embedding when an asynchronous encoder cannot run within its transaction.
+
+The harness memory writer is a local atomic mutation, with `is_write` receipts,
+not a provider read tool. Legacy writes commit through the workspace snapshot
+transaction so source history, the memory projection and their receipt either
+all commit or all roll back. Mutations invalidate the old checkpoint and schedule
+a fresh plan. The Inspector exposes recorded origins, task consultation and
+semantic activation consultation without treating these as causal explanations.
 Caches carry context/privacy versions. Hot Context is a projection of grounded
 memories and explicit policies, never a separate editable authority. Unknown or
 stale typed features cannot activate a predicate, including under negation.
@@ -236,7 +313,7 @@ they cannot authorize another send or create a verified completion. See the
 | --- | --- |
 | Event engine, correlation, evidence checks, policy, UI, persistence | Implemented with automated coverage |
 | Built-in email/document/run scenario and outbox | Simulated; exercises the real engine |
-| GitHub issues, pull requests, commits, Actions runs, and Microsoft Outlook inbox | Official device OAuth, bounded read-only sync and source-specific task handling |
+| GitHub issues, pull requests, commits, Actions runs, and Microsoft Outlook inbox | GitHub device OAuth; Outlook browser PKCE; bounded read-only sync and source-specific task handling |
 | Slack direct messages and Notion pages | Browser authorization code, fixed localhost redirect, bounded read-only sync |
 | Native local sources | Selected Markdown/text folders and macOS Notes. Note creation needs a separate folder grant; real Notes account and signed-app permission acceptance remain outstanding |
 | Gmail / Drive / Docs incremental connector | Implemented; read-only setup is available for local testing |

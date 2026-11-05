@@ -34,7 +34,7 @@ export class MonitoringService {
 
   get hasLiveConnector() {
     return this.connectors.some(connector => connector.live && (
-      connector.id !== 'google' || connector.config?.readGmail !== false || connector.config?.readDrive !== false
+      connector.id !== 'google' || connector.config?.readGmail !== false || connector.config?.readDrive !== false || connector.config?.readCalendar === true
     ));
   }
 

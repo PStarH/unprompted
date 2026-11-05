@@ -13,15 +13,6 @@ export function workspaceKey(state) {
   return `unprompted:view:${state.mode || 'unknown'}:${state.runtime?.workspaceId || state.simulation?.startedAt || 'workspace'}`;
 }
 
-export function taskFingerprint(task) {
-  return [task.status, task.updatedAt, task.draft?.documentVersion].join(':');
-}
-
-export function isSnoozed(task, entries, now = Date.now()) {
-  const entry = entries?.[task.id];
-  return Boolean(entry && Number.isFinite(entry.until) && entry.until > now && entry.fingerprint === taskFingerprint(task));
-}
-
 export function workspaceSnapshot(state, now = Date.now()) {
   return {
     at: now,

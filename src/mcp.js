@@ -1,9 +1,21 @@
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readRegularFile } from './local-files.js';
+import { MCP_PRESETS, publicPresetConnection } from './mcp-presets.js';
 
-export const MCP_LIMITS = Object.freeze({ servers: 12, tools: 64, exposedTools: 24, maxConcurrent: 4, timeoutMs: 15000, resultChars: 6000, configBytes: 128 * 1024 });
+export { MCP_PRESETS };
+
+export function stdioEnvironment(defaults = {}, overrides = {}) {
+  const runtime = path.dirname(process.execPath), home = os.homedir();
+  const entries = [runtime, ...(process.env.PATH || defaults.PATH || '').split(path.delimiter), path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
+  return { ...defaults, PATH: [...new Set(entries.filter(Boolean))].join(path.delimiter), ...overrides };
+}
+
+
+export const MCP_LIMITS = Object.freeze({ servers: 12, tools: 1024, exposedTools: 24, maxConcurrent: 4, timeoutMs: 15000, resultChars: 6000, configBytes: 128 * 1024, oauthBytes: 32 * 1024 });
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const fail = (message, status = 400) => Object.assign(new Error(message), { status, code: 'MCP_ERROR' });
 const validId = id => typeof id === 'string' && id === id.trim() && /^[\p{L}\p{N}_][\p{L}\p{N}_. -]{0,63}$/u.test(id) && !['constructor', 'prototype', '__proto__'].includes(id);
@@ -21,17 +33,55 @@ function stringMap(value, headers = false) {
   return result;
 }
 
-export function normalizeMcpConfig(id, value) {
+function plainJson(value) {
+  try {
+    const text = JSON.stringify(value);
+    if (!text || text.length > MCP_LIMITS.oauthBytes) return undefined;
+    const parsed = JSON.parse(text);
+    return object(parsed) ? parsed : undefined;
+  } catch { return undefined; }
+}
+
+/** Keep a previously saved sign-in blob. Drop anything that is not a credential field, or that is too large to store. */
+export function keptOAuth(value) {
+  if (!object(value)) return undefined;
+  const allowed = {};
+  const clientInformation = plainJson(value.clientInformation);
+  if (clientInformation && typeof clientInformation.client_id === 'string' && clientInformation.client_id.length <= 2048) allowed.clientInformation = clientInformation;
+  const tokens = plainJson(value.tokens);
+  if (tokens && typeof tokens.access_token === 'string' && tokens.access_token.length <= 16384 && tokens.access_token.length >= 1) allowed.tokens = tokens;
+  if (typeof value.codeVerifier === 'string' && value.codeVerifier.length >= 32 && value.codeVerifier.length <= 256) allowed.codeVerifier = value.codeVerifier;
+  const discoveryState = plainJson(value.discoveryState);
+  if (discoveryState) allowed.discoveryState = discoveryState;
+  if (typeof value.resourceUrl === 'string' && value.resourceUrl.length <= 2048 && value.resourceUrl.length > 0) allowed.resourceUrl = value.resourceUrl;
+  if (!Object.keys(allowed).length) return undefined;
+  if (JSON.stringify(allowed).length > MCP_LIMITS.oauthBytes) return undefined;
+  return allowed;
+}
+
+function mergeOAuth(current, patch) {
+  const next = { ...(current || {}) };
+  for (const [key, item] of Object.entries(patch)) {
+    if (item == null) delete next[key];
+    else next[key] = item;
+  }
+  return keptOAuth(next);
+}
+
+export function normalizeMcpConfig(id, value, { oauth = 'keep' } = {}) {
   if (!validId(id) || !object(value)) throw fail('Invalid MCP server name or configuration.');
+  if (oauth === 'reject' && Object.hasOwn(value, 'oauth')) throw fail('MCP OAuth state cannot be imported.');
   for (const flag of ['enabled', 'allowDeclaredRead']) if (value[flag] != null && typeof value[flag] !== 'boolean') throw fail('Invalid MCP permission value.');
   const type = value.type || value.transport || (value.url ? 'http' : 'stdio');
   const config = { type: type === 'streamable-http' ? 'http' : type, enabled: value.enabled !== false,
     // The user grants a connection access to declared read tools once. The
     // annotation is a server claim, so this is shown explicitly in the form.
-    allowDeclaredRead: value.allowDeclaredRead === true, readTools: strings(value.readTools) ? [...new Set(value.readTools)] : [],
-    readResources: strings(value.readResources) ? [...new Set(value.readResources)] : [] };
-  if (value.readTools != null && !strings(value.readTools)) throw fail('Invalid MCP read tool permissions.');
-  if (value.readResources != null && (!strings(value.readResources) || value.readResources.some(id => !/^[a-f0-9]{64}$/.test(id)))) throw fail('Invalid MCP resource permissions.');
+    allowDeclaredRead: value.allowDeclaredRead === true, readTools: strings(value.readTools, MCP_LIMITS.tools) ? [...new Set(value.readTools)] : [],
+    writeTools: strings(value.writeTools, MCP_LIMITS.tools) ? [...new Set(value.writeTools)] : [],
+    readResources: strings(value.readResources, MCP_LIMITS.tools) ? [...new Set(value.readResources)] : [] };
+  if (value.writeTools != null && !strings(value.writeTools, MCP_LIMITS.tools)) throw fail('Invalid MCP action tool permissions.');
+  if (value.readTools != null && !strings(value.readTools, MCP_LIMITS.tools)) throw fail('Invalid MCP read tool permissions.');
+  if (value.readResources != null && (!strings(value.readResources, MCP_LIMITS.tools) || value.readResources.some(id => !/^[a-f0-9]{64}$/.test(id)))) throw fail('Invalid MCP resource permissions.');
   if (config.type === 'stdio') {
     if (typeof value.command !== 'string' || !value.command.trim() || value.command.length > 4096 || value.command.includes('\0') || (value.args != null && !strings(value.args))) throw fail('Invalid MCP command or arguments.');
     if (value.cwd != null && (typeof value.cwd !== 'string' || !path.isAbsolute(value.cwd) || value.cwd.includes('\0'))) throw fail('MCP cwd requires an absolute path.');
@@ -42,6 +92,8 @@ export function normalizeMcpConfig(id, value) {
     if (url.username || url.password || url.hash || !(url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))) throw fail('MCP requires HTTPS, or HTTP on localhost. Put credentials in headers.');
     Object.assign(config, { url: url.href, headers: stringMap(value.headers, true) });
   } else throw fail('MCP transport must be http, sse or stdio.');
+  const savedOAuth = oauth === 'keep' ? keptOAuth(value.oauth) : undefined;
+  if (savedOAuth) config.oauth = savedOAuth;
   return config;
 }
 
@@ -50,7 +102,7 @@ export function parseMcpImport(value, { allowDeclaredRead = false } = {}) {
   try { parsed = typeof value === 'string' ? JSON.parse(value) : value; } catch { throw fail('Invalid MCP JSON.'); }
   const servers = parsed?.mcpServers;
   if (!object(servers) || !Object.keys(servers).length || Object.keys(servers).length > MCP_LIMITS.servers || JSON.stringify(parsed).length > MCP_LIMITS.configBytes) throw fail('Expected {"mcpServers":{"name":{...}}}, with at most 12 servers.');
-  return Object.fromEntries(Object.entries(servers).map(([id, config]) => [id, normalizeMcpConfig(id, { ...config, allowDeclaredRead })]));
+  return Object.fromEntries(Object.entries(servers).map(([id, config]) => [id, normalizeMcpConfig(id, { ...config, writeTools: [], allowDeclaredRead }, { oauth: 'reject' })]));
 }
 
 /** Private configuration is deliberately separate from task exports and state. */
@@ -88,6 +140,7 @@ function errorMessage(error) {
   // stderr can contain credentials. Protocol errors remain actionable by type.
   if (error.code === 'MCP_ERROR') return error.message;
   if (error.name === 'AbortError' || /timed out|timeout/i.test(error.message || '')) return 'MCP request timed out. Check the server and reconnect.';
+  if (/sign-in required|sign-in expired/i.test(error.message || '')) return 'Sign-in required. Use Sign in and connect.';
   if (/401|403|unauthoriz|authenticat/i.test(error.message || '')) return 'MCP authentication failed. Check the authorization header or server credentials.';
   if (error.code === 'ENOENT' || /ENOENT/.test(error.message || '')) return 'MCP executable not found. Check the command and installation.';
   return 'MCP request failed. Check the server configuration and reconnect.';
@@ -96,51 +149,147 @@ function errorMessage(error) {
 export class McpManager {
   constructor({ configStore, timeoutMs = MCP_LIMITS.timeoutMs, load = loadSdk, onChange = () => {} } = {}) {
     this.configStore = configStore; this.configs = configStore.get(); this.timeoutMs = timeoutMs;
+    const bundledFetch = MCP_PRESETS.find(preset => preset.id === 'fetch').config;
+    const savedFetch = this.configs.fetch;
+    if (savedFetch?.type === 'stdio' && (savedFetch.command === 'uvx' && JSON.stringify(savedFetch.args) === '["mcp-server-fetch"]' || savedFetch.args?.length === 1 && /[/\\]src[/\\]mcp-fetch-server\.js$/.test(savedFetch.args[0]))) this.configs.fetch = { ...savedFetch, ...bundledFetch };
+    for (const id of ['brave-search', 'firecrawl']) {
+      const saved = this.configs[id], preset = MCP_PRESETS.find(item => item.id === id).config;
+      const legacyArgs = id === 'brave-search' ? ['-y', '@modelcontextprotocol/server-brave-search'] : ['-y', 'firecrawl-mcp'];
+      if (saved?.type === 'stdio' && (saved.command === 'npx' && JSON.stringify(saved.args) === JSON.stringify(legacyArgs) || saved.args?.length === 2 && /[/\\]src[/\\]mcp-key-server\.js$/.test(saved.args[0]) && saved.args[1] === id)) this.configs[id] = { ...saved, ...preset };
+    }
     this.load = load; this.onChange = onChange; this.connections = new Map(); this.busy = false; this.closed = false; this.inFlight = 0;
+    this.lockContext = new AsyncLocalStorage(); this.oauthBroker = null;
+  }
+  attachOAuth(broker) { this.oauthBroker = broker; }
+  oauthStatus(id) {
+    const view = this.oauthBroker?.view(id) || {};
+    const signedIn = Boolean(this.configs[id]?.oauth?.tokens?.access_token);
+    const phase = view.phase || (signedIn ? 'authorized' : 'idle');
+    return { signedIn, oauthPhase: phase,
+      ...(phase === 'authorizing' && view.authorizeUrl ? { authorizeUrl: view.authorizeUrl } : {}),
+      ...(phase === 'failed' && view.error ? { oauthError: view.error } : {}) };
   }
   describe() {
     return { servers: Object.entries(this.configs).map(([id, config]) => {
       const connection = this.connections.get(id);
       return { id, type: config.type, enabled: config.enabled, endpoint: config.url ? new URL(config.url).origin : 'stdio',
+        ...this.oauthStatus(id),
         status: connection?.status || 'disconnected', lastError: connection?.lastError || null,
         allowDeclaredRead: config.allowDeclaredRead,
         tools: (connection?.tools || []).filter(tool => this.redact(String(tool.name)) === tool.name).map(tool => ({ name: tool.name, description: this.redact(String(tool.description || '')).slice(0, 500), inputSchema: this.redactMetadata(tool.inputSchema),
-          declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true, allowed: this.allowed(config, tool) })),
+          declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: this.isWrite(tool), allowed: this.allowed(config, tool) })),
         resources: (connection?.resources || []).map(resource => ({ id: resourceId(resource.uri), name: this.redact(String(resource.name || '').slice(0, 300)), description: this.redact(String(resource.description || '').slice(0, 500)), allowed: config.enabled && config.readResources.includes(resourceId(resource.uri)) })) };
-    }), limits: MCP_LIMITS };
+    }), presets: MCP_PRESETS.map(preset => ({
+      id: preset.id, name: preset.name, category: preset.category, auth: preset.auth || (preset.requiresAuth ? 'key' : 'none'),
+      tagZh: preset.tagZh || '', tagEn: preset.tagEn || '',
+      titleZh: preset.titleZh, titleEn: preset.titleEn,
+      descriptionZh: preset.descriptionZh, descriptionEn: preset.descriptionEn,
+      defaultEnabled: preset.defaultEnabled, requiresAuth: preset.requiresAuth,
+      connection: publicPresetConnection(preset),
+      fields: preset.fields, configured: Object.hasOwn(this.configs, preset.id),
+      enabled: this.configs[preset.id]?.enabled ?? false, ...this.oauthStatus(preset.id)
+    })), limits: MCP_LIMITS };
   }
+  isWrite(tool) { return tool.annotations?.readOnlyHint !== true || tool.annotations?.destructiveHint === true; }
   allowed(config, tool) {
-    return config.enabled && tool.annotations?.readOnlyHint !== false && tool.annotations?.destructiveHint !== true
-      && (config.readTools.includes(tool.name) || (config.allowDeclaredRead && tool.annotations?.readOnlyHint === true));
+    if (!config.enabled) return false;
+    if (this.isWrite(tool)) return (config.writeTools || []).includes(tool.name);
+    return config.readTools.includes(tool.name) || config.allowDeclaredRead === true;
   }
   async exclusive(fn) {
     if (this.closed) throw fail('MCP is shutting down.', 503);
+    // Token saves happen inside auth() and during a 401 refresh. Those calls
+    // are on the same async path as the connection update, so they must re-enter
+    // this lock. A second HTTP request has no store and still receives 409.
+    if (this.lockContext.getStore() === this) return await fn();
     if (this.busy) throw fail('An MCP connection update is already running.', 409);
     this.busy = true;
-    try { return await fn(); } finally { this.busy = false; this.onChange(); }
+    try { return await this.lockContext.run(this, fn); } finally { this.busy = false; this.onChange(); }
   }
   async import(value, options) {
     const incoming = parseMcpImport(value, options);
     return this.exclusive(async () => {
-      const merged = { ...this.configs, ...incoming };
+      const merged = { ...this.configs };
+      for (const [id, config] of Object.entries(incoming)) {
+        const previous = this.configs[id];
+        const next = { ...config };
+        if (previous?.type === 'stdio' && next.type === 'stdio' && !Object.keys(next.env || {}).length && Object.keys(previous.env || {}).length) next.env = previous.env;
+        for (const key of ['writeTools', 'readTools', 'readResources']) {
+          if (previous && previous[key]?.length && !next[key]?.length) next[key] = previous[key];
+        }
+        merged[id] = next;
+      }
       if (Object.keys(merged).length > MCP_LIMITS.servers || JSON.stringify(merged).length > MCP_LIMITS.configBytes) throw fail('Too many MCP servers or configuration too large.');
       this.configStore.write(merged); this.configs = merged;
       await Promise.all(Object.keys(incoming).map(async id => { await this.disconnect(id); if (merged[id].enabled) await this.connect(id); }));
       return this.describe();
     });
   }
-  async update(id, { enabled, readTools, readResources, allowDeclaredRead, remove = false, reconnect = false }) {
+  async update(id, { enabled, readTools, writeTools, readResources, allowDeclaredRead, remove = false, reconnect = false }) {
     if (typeof remove !== 'boolean' || typeof reconnect !== 'boolean') throw fail('Invalid MCP update value.');
     if (!Object.hasOwn(this.configs, id)) throw fail('Unknown MCP server.', 404);
     return this.exclusive(async () => {
       const merged = { ...this.configs };
       if (remove) delete merged[id];
-      else merged[id] = normalizeMcpConfig(id, { ...merged[id], ...(enabled != null ? { enabled } : {}), ...(readTools != null ? { readTools } : {}), ...(readResources != null ? { readResources } : {}), ...(allowDeclaredRead != null ? { allowDeclaredRead } : {}) });
+      else merged[id] = normalizeMcpConfig(id, { ...merged[id], ...(enabled != null ? { enabled } : {}), ...(readTools != null ? { readTools } : {}), ...(writeTools != null ? { writeTools } : {}), ...(readResources != null ? { readResources } : {}), ...(allowDeclaredRead != null ? { allowDeclaredRead } : {}) });
       this.configStore.write(merged); this.configs = merged;
-      if (remove || !merged[id].enabled || reconnect) await this.disconnect(id);
-      if (merged[id]?.enabled && (reconnect || enabled === true)) await this.connect(id);
+      const permissionsChanged = readTools != null || writeTools != null || readResources != null || allowDeclaredRead != null;
+      if (remove || !merged[id].enabled || reconnect || permissionsChanged) await this.disconnect(id);
+      if (merged[id]?.enabled && (reconnect || enabled === true || permissionsChanged)) await this.connect(id);
       return this.describe();
     });
+  }
+  async prepareOAuthServer(id, url) {
+    const base = normalizeMcpConfig(id, { type: 'http', url, enabled: false, allowDeclaredRead: true });
+    return this.exclusive(async () => {
+      const previous = this.configs[id];
+      const next = { ...base };
+      if (previous?.url === base.url && previous.oauth) next.oauth = previous.oauth;
+      const merged = { ...this.configs, [id]: next };
+      if (Object.keys(merged).length > MCP_LIMITS.servers || JSON.stringify(merged).length > MCP_LIMITS.configBytes) throw fail('Too many MCP servers or configuration too large.');
+      this.configStore.write(merged); this.configs = merged;
+      await this.disconnect(id);
+      return next;
+    });
+  }
+  async writeOAuth(id, patch) {
+    return this.exclusive(async () => {
+      const current = this.configs[id];
+      if (!current) throw fail('Unknown MCP server.', 404);
+      const oauth = mergeOAuth(current.oauth, patch);
+      const next = { ...current };
+      if (oauth) next.oauth = oauth; else delete next.oauth;
+      const merged = { ...this.configs, [id]: next };
+      this.configStore.write(merged); this.configs = merged;
+      return oauth;
+    });
+  }
+  async finishOAuth(id) {
+    await this.exclusive(async () => {
+      const current = this.configs[id];
+      if (!current) throw fail('Unknown MCP server.', 404);
+      const oauth = current.oauth ? { ...current.oauth } : undefined;
+      if (oauth) delete oauth.codeVerifier;
+      const next = normalizeMcpConfig(id, { ...current, enabled: true, allowDeclaredRead: true, ...(oauth ? { oauth } : {}) });
+      const merged = { ...this.configs, [id]: next };
+      this.configStore.write(merged); this.configs = merged;
+    });
+    await this.connect(id);
+  }
+  bearerAuth(id) {
+    if (!this.configs[id]?.oauth?.tokens?.access_token || !this.oauthBroker) return null;
+    const manager = this;
+    return {
+      async token() {
+        const token = manager.configs[id]?.oauth?.tokens?.access_token;
+        if (!token) throw new Error('Sign-in required');
+        return token;
+      },
+      async onUnauthorized() {
+        const refreshed = await manager.oauthBroker.refresh(id);
+        if (!refreshed) throw new Error('Sign-in required');
+      }
+    };
   }
   async start() {
     await Promise.allSettled(Object.entries(this.configs).filter(([, config]) => config.enabled).map(([id]) => this.connect(id)));
@@ -156,24 +305,25 @@ export class McpManager {
       const sdk = await this.load();
       entry.schemaValidator = sdk.fromJsonSchema;
       if (this.closed || this.connections.get(id) !== entry) throw fail('MCP connection cancelled.');
-      const client = new sdk.Client({ name: 'unprompted', version: '0.3.0' }, { capabilities: {}, listMaxPages: 8,
+      const client = new sdk.Client({ name: 'unprompted', version: '0.3.0' }, { capabilities: {}, listMaxPages: MCP_LIMITS.tools,
         listChanged: { tools: { onChanged: (error, tools) => {
           if (this.connections.get(id) !== entry) return;
-          if (error || !Array.isArray(tools) || tools.length > MCP_LIMITS.tools || JSON.stringify(tools).length > 64000) {
+          if (error || !Array.isArray(tools) || tools.length > MCP_LIMITS.tools || JSON.stringify(tools).length > 1000000) {
             entry.tools = []; entry.lastError = 'MCP tool catalog changed. Reconnect to refresh tools.';
           } else { entry.tools = tools; entry.lastError = null; }
           this.onChange();
         } }, resources: { onChanged: (error, resources) => {
           if (this.connections.get(id) !== entry) return;
-          if (error || !Array.isArray(resources) || resources.length > MCP_LIMITS.tools || JSON.stringify(resources).length > 64000) {
+          if (error || !Array.isArray(resources) || resources.length > MCP_LIMITS.tools || JSON.stringify(resources).length > 1000000) {
             entry.resources = []; entry.lastError = 'MCP resource catalog changed. Reconnect to refresh resources.';
           } else { entry.resources = resources; entry.lastError = null; }
           this.onChange();
         } } }
       });
+      const authProvider = config.type === 'stdio' ? null : this.bearerAuth(id);
       const transport = config.type === 'stdio'
-        ? new sdk.StdioClientTransport({ command: config.command, args: config.args, env: { ...sdk.getDefaultEnvironment(), ...config.env }, ...(config.cwd ? { cwd: config.cwd } : {}), stderr: 'ignore', maxBufferSize: 1024 * 1024 })
-        : new (config.type === 'sse' ? sdk.SSEClientTransport : sdk.StreamableHTTPClientTransport)(new URL(config.url), { requestInit: { headers: config.headers, redirect: 'error' }, fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([entry.controller.signal, ...(init?.signal ? [init.signal] : [])]), redirect: 'error' }) });
+        ? new sdk.StdioClientTransport({ command: config.command, args: config.args, env: stdioEnvironment(sdk.getDefaultEnvironment(), config.env), ...(config.cwd ? { cwd: config.cwd } : {}), stderr: 'ignore', maxBufferSize: 1024 * 1024 })
+        : new (config.type === 'sse' ? sdk.SSEClientTransport : sdk.StreamableHTTPClientTransport)(new URL(config.url), { requestInit: { headers: config.headers }, ...(authProvider ? { authProvider } : {}), fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([entry.controller.signal, ...(init?.signal ? [init.signal] : [])]) }) });
       entry.client = client; entry.transport = transport;
       client.onclose = () => { if (this.connections.get(id) === entry && entry.status !== 'failed') { entry.status = 'disconnected'; entry.tools = []; entry.resources = []; this.onChange(); } };
       // Remote exceptions and logs are intentionally never printed.
@@ -187,7 +337,10 @@ export class McpManager {
             const page = await client[method](cursor ? { cursor } : {}, { timeout: this.timeoutMs });
             if (!Array.isArray(page[key])) throw fail('Invalid MCP catalog.');
             items.push(...page[key]); cursor = page.nextCursor;
-            if (items.length > MCP_LIMITS.tools || JSON.stringify(items).length > 64000) throw fail('MCP catalog exceeds the supported limit.');
+            if (items.length > MCP_LIMITS.tools || JSON.stringify(items).length > 1000000) {
+              while (items.length && (items.length > MCP_LIMITS.tools || JSON.stringify(items).length > 1000000)) items.pop();
+              return items;
+            }
             if (cursor && (!page[key].length || seen.has(cursor))) throw fail('Invalid MCP catalog pagination.');
             if (cursor) seen.add(cursor);
           } while (cursor);
@@ -209,15 +362,15 @@ export class McpManager {
     this.connections.delete(id);
     if (entry) { entry.controller.abort(); await entry.client?.close().catch(() => {}); }
   }
-  tools({ isCurrent = () => false, onCall = () => {} } = {}) {
+  tools({ taskId = null, isCurrent = () => false, onCall = () => {}, executeWrite = null, exposedLimit = MCP_LIMITS.exposedTools, includeDispatcher = true } = {}) {
     const tools = [];
     for (const [serverId, entry] of this.connections) {
       const config = this.configs[serverId];
       if (!config || entry.status !== 'connected') continue;
       for (const tool of entry.tools) {
-        if (this.redact(String(tool.name)) !== tool.name || !this.allowed(config, tool) || tools.length >= MCP_LIMITS.exposedTools) continue;
+        if (this.redact(String(tool.name)) !== tool.name || !this.allowed(config, tool) || tools.length >= (includeDispatcher ? MCP_LIMITS.tools : exposedLimit)) continue;
         const name = `mcp_${createHash('sha256').update(`${serverId}\0${tool.name}`).digest('hex').slice(0, 16)}`;
-        tools.push({ name, label: `${serverId} · ${tool.name}`, description: this.redact(`${serverId} / ${tool.name}: ${tool.description || ''}`).slice(0, 1000), parameters: this.redactMetadata(tool.inputSchema),
+        tools.push({ name, effect: this.isWrite(tool) ? 'write' : 'read', label: `${serverId} · ${tool.name}`, description: this.redact(`${serverId} / ${tool.name}: ${tool.description || ''}`).slice(0, 1000), parameters: this.redactMetadata(tool.inputSchema),
           execute: async (_id, args, signal) => {
             if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
             if (!object(args) || JSON.stringify(args).length > 8000) throw fail('Invalid MCP tool arguments.');
@@ -227,13 +380,16 @@ export class McpManager {
               if (validation.issues) throw new Error('Invalid arguments');
             } catch { throw fail('MCP tool arguments do not match the advertised schema.'); }
             if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
+            const check = () => !signal?.aborted && !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.tools.includes(tool) && entry.status === 'connected' && this.allowed(this.configs[serverId] || { enabled: false }, tool);
+            const invoke = async dispatchSignal => {
+              if (!check()) throw fail('MCP action permission changed before dispatch.', 409);
             if (this.inFlight >= MCP_LIMITS.maxConcurrent) throw fail('MCP read concurrency limit reached. Retry later.', 429);
             this.inFlight++;
             const startedAt = new Date().toISOString();
             let status = 'failed', text = '', error = null;
             try {
               const result = await entry.client.callTool({ name: tool.name, arguments: args }, {
-                timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs, signal: AbortSignal.any([entry.controller.signal, ...(signal instanceof AbortSignal ? [signal] : [])])
+                timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs, signal: AbortSignal.any([entry.controller.signal, ...(dispatchSignal instanceof AbortSignal ? [dispatchSignal] : [])])
               });
               if (!isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP task or connection changed during the call.', 409);
               if (result.isError) throw fail('MCP tool reported an error.');
@@ -244,12 +400,19 @@ export class McpManager {
               return { content: [{ type: 'text', text: text || '(No text content returned)' }], details: {} };
             } catch (cause) { error = errorMessage(cause); throw fail(error, 502); }
             finally { this.inFlight--; onCall({ id: randomUUID(), serverId, tool: tool.name, status, startedAt, finishedAt: new Date().toISOString(), ...(error ? { error } : { text }) }); }
+            };
+            if (this.isWrite(tool)) {
+              if (!taskId || typeof executeWrite !== 'function') throw fail('MCP actions require an authorized durable task.', 403);
+              const result = await executeWrite({ taskId, serverId, tool: tool.name, args, isCurrent, check, invoke });
+              return { content: [{ type: 'text', text: JSON.stringify(result).slice(0, MCP_LIMITS.resultChars) }], details: {} };
+            }
+            return invoke(signal);
           }
         });
       }
       for (const resource of entry.resources) {
         const id = resourceId(resource.uri);
-        if (!config.readResources.includes(id) || tools.length >= MCP_LIMITS.exposedTools) continue;
+        if (!config.readResources.includes(id) || tools.length >= (includeDispatcher ? MCP_LIMITS.tools : exposedLimit)) continue;
         const current = () => !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.status === 'connected'
           && entry.resources.includes(resource) && this.configs[serverId]?.enabled && this.configs[serverId].readResources.includes(id);
         tools.push({ name: `mcp_${createHash('sha256').update(`${serverId}\0resource\0${id}`).digest('hex').slice(0, 16)}`,
@@ -275,7 +438,23 @@ export class McpManager {
           } });
       }
     }
-    return tools;
+    if (!includeDispatcher || tools.length <= exposedLimit) return tools.slice(0, exposedLimit);
+    const all = () => this.tools({ taskId, isCurrent, onCall, executeWrite, exposedLimit: MCP_LIMITS.tools, includeDispatcher: false });
+    const find = { name: 'find_connected_tools', contextProvider: 'workspace', label: 'Find connected service capabilities',
+      description: 'Find authorized tools beyond the inline tool catalog. Returns exact schemas and whether a tool can change data. Use call_connected_tool with the returned name.',
+      parameters: { type: 'object', properties: { query: { type: 'string', maxLength: 200 } }, additionalProperties: false },
+      execute: async (_id, args, signal) => {
+        signal?.throwIfAborted(); if (!isCurrent() || !object(args) || Object.keys(args).some(key => key !== 'query') || args.query != null && typeof args.query !== 'string') throw fail('Invalid tool search.');
+        const query = (args.query || '').toLowerCase().split(/\s+/).filter(Boolean);
+        const matches = all().filter(tool => query.every(word => `${tool.name} ${tool.label} ${tool.description}`.toLowerCase().includes(word)));
+        const selected = []; for (const tool of matches.slice(0, 10)) { const item = { name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters, effect: tool.effect || 'read' }; if (JSON.stringify([...selected,item]).length <= 12000) selected.push(item); }
+        return { content: [{ type: 'text', text: JSON.stringify({ tools: selected, total: matches.length }) }], details: {} };
+      } };
+    const call = { name: 'call_connected_tool', contextProvider: 'workspace', effect: 'write', label: 'Use an authorized connected service tool',
+      description: 'Execute a tool returned by find_connected_tools using its exact schema. Read tools retain their grants; action tools use the durable write ledger. Acceptance alone is not verified completion.',
+      parameters: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } }, required: ['name','arguments'], additionalProperties: false },
+      execute: async (id, args, signal) => { signal?.throwIfAborted(); if (!isCurrent() || !object(args) || Object.keys(args).some(key => !['name','arguments'].includes(key)) || typeof args.name !== 'string') throw fail('Invalid connected tool call.'); const tool = all().find(item => item.name === args.name); if (!tool) throw fail('This tool is not currently authorized.', 403); return tool.execute(id, args.arguments, signal); } };
+    return [...tools.slice(0, Math.max(0, exposedLimit - 2)), find, call];
   }
   redactMetadata(value, depth = 0) {
     if (depth > 16) return '[truncated]';
@@ -287,8 +466,10 @@ export class McpManager {
   redact(text) {
     let safe = String(text);
     for (const config of Object.values(this.configs)) {
-      const secrets = [...Object.values(config.headers || {}), ...Object.values(config.env || {}), ...(config.url ? [...new URL(config.url).searchParams.values()] : [])];
-      for (const value of secrets) { if (value.length >= 4) safe = safe.replaceAll(value, '[redacted]'); const token = value.replace(/^Bearer\s+/i, ''); if (token.length >= 4) safe = safe.replaceAll(token, '[redacted]'); }
+      const oauth = config.oauth || {};
+      const secrets = [...Object.values(config.headers || {}), ...Object.values(config.env || {}), ...(config.url ? [...new URL(config.url).searchParams.values()] : []),
+        oauth.tokens?.access_token, oauth.tokens?.refresh_token, oauth.tokens?.id_token, oauth.clientInformation?.client_secret, oauth.codeVerifier];
+      for (const value of secrets) { if (typeof value !== 'string' || value.length < 4) continue; safe = safe.replaceAll(value, '[redacted]'); const token = value.replace(/^Bearer\s+/i, ''); if (token.length >= 4 && token !== value) safe = safe.replaceAll(token, '[redacted]'); }
     }
     return safe;
   }

@@ -101,6 +101,12 @@ export class AttentionBudget {
       if (![quiet.startHour, quiet.endHour].every(value => Number.isInteger(value) && value >= 0 && value < 24)) throw durableError('INVALID_ATTENTION_POLICY', 'Quiet hours need clock hours 0–23.', 400);
       try { new Intl.DateTimeFormat('en', { timeZone: quiet.timeZone || 'UTC' }); } catch { throw durableError('INVALID_ATTENTION_POLICY', 'Unknown quiet-hours time zone.', 400); }
     }
-    this.database.atomic(() => this.database.set('attention_policy', json(next))); this.options = next; return this.describe();
+    this.database.atomic(() => {
+      this.database.set('attention_policy', json(next));
+      for (const key of ['maxInteractivePerHour', 'minIntervalMs']) if (Object.hasOwn(options, key)) {
+        const current = parse(this.database.get(`rsi_config:${key}`, 'null')) || { version: 0 };
+        this.database.set(`rsi_config:${key}`, json({ version: current.version + 1, proposalId: null }));
+      }
+    }); this.options = next; return this.describe();
   }
 }

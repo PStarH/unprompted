@@ -8,3 +8,8 @@ export function draftReviewToken(task) {
     ...(task.inputVersion != null ? [task.inputVersion, task.privacyEpoch] : [])
   ])).digest('hex');
 }
+
+export function preparedWorkReviewToken(task) {
+  if (!task.preparedWork?.requiresReview) return null;
+  return createHash('sha256').update(JSON.stringify([task.id, task.inputVersion, task.privacyEpoch, task.guidance?.id || null, task.preparedWork])).digest('hex');
+}

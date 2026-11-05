@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { durableError, iso, json, parse } from './database.js';
+import { eventContext } from '../event-context.js';
 
 const ROLES = ['DIRECT_ACTOR', 'SHARED_GROUP', 'PASSIVE_OBSERVER', 'UNKNOWN'];
 const STATUSES = ['proposed', 'active', 'paused', 'disabled', 'expired'];
@@ -37,6 +38,7 @@ export function validateStandingIntent(input) {
 }
 
 const project = row => row && ({ ...row, prefilter: parse(row.prefilter_json), predicate: row.predicate_json, scope: parse(row.scope_json),
+  desiredOutcome: row.desired_outcome, expiresAt: row.expires_at,
   autonomy: parse(row.autonomy_json), prohibited: parse(row.prohibited_json), probePolicy: parse(row.probe_policy_json), budget: parse(row.budget_json) });
 
 /** Explicit user delegation. External content can only file a proposal. */
@@ -81,6 +83,18 @@ export class StandingIntents {
       return this.get(id);
     });
   }
+  update(id, expectedVersion, input) {
+    const spec = validateStandingIntent(input);
+    if (!spec) throw durableError('INVALID_STANDING_INTENT', 'Supply a complete bounded standing intent.', 400);
+    return this.database.atomic(() => {
+      const current = this.get(id);
+      if (!current || current.version !== expectedVersion || !['active', 'paused'].includes(current.status)) throw durableError('INTENT_CHANGED', 'The standing intent changed or cannot be edited.');
+      this.db.prepare(`UPDATE standing_intents SET description=?,prefilter_json=?,predicate_json=?,scope_json=?,desired_outcome=?,autonomy_json=?,prohibited_json=?,probe_policy_json=?,budget_json=?,expires_at=?,version=version+1,updated_at=? WHERE id=? AND version=?`)
+        .run(spec.description, json(spec.prefilter), spec.predicate, json(spec.scope), spec.desiredOutcome, json(spec.autonomy), json(spec.prohibited), json(spec.probePolicy), json(spec.budget), spec.expiresAt, iso(this.database.now()), id, expectedVersion);
+      this.database.bump('context_version');
+      return this.get(id);
+    });
+  }
   matchesPrefilter(intent, event) {
     if (!intent || intent.status !== 'active' || intent.confirmation !== 'user_confirmed') return false;
     if (intent.expires_at && Date.parse(intent.expires_at) <= this.database.now()) return false;
@@ -91,13 +105,25 @@ export class StandingIntents {
     const role = event.meta?.principalRole || 'UNKNOWN';
     if (!filter.roles.includes(role)) return false;
     if (filter.tokens?.length) {
-      const haystack = `${event.payload?.subject || ''}\n${event.payload?.body || ''}`.toLowerCase();
+      const fields = eventContext(event);
+      const haystack = `${fields.subject}\n${fields.body}`.normalize('NFKC').toLowerCase();
       if (!filter.tokens.every(token => haystack.includes(token))) return false;
     }
     return true;
   }
   prefilterHits(event, { limit = 3 } = {}) {
-    return this.list({ limit: 50 }).filter(intent => this.matchesPrefilter(intent, event)).slice(0, limit);
+    const matches = [];
+    for (const row of this.db.prepare("SELECT * FROM standing_intents WHERE status='active' AND confirmation='user_confirmed' AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at,id").iterate(iso(this.database.now()))) {
+      const intent = project(row);
+      if (this.matchesPrefilter(intent, event)) matches.push(intent);
+      if (matches.length >= limit) break;
+    }
+    return matches;
+  }
+  nextBudgetAt(intent) {
+    const row = this.db.prepare("SELECT created_at FROM activation_decisions WHERE stage='standing_intent' AND outcome IN ('MATCHED','UNRELATED','INVALID') AND evaluator_version=? AND created_at>=? ORDER BY created_at DESC LIMIT 1 OFFSET ?")
+      .get(intent.id, iso(this.database.now() - intent.budget.windowMs), intent.budget.maxMatches - 1);
+    return row ? iso(Date.parse(row.created_at) + intent.budget.windowMs + 1) : iso(this.database.now() + 1);
   }
   budgetOpen(intent) {
     const since = iso(this.database.now() - intent.budget.windowMs);

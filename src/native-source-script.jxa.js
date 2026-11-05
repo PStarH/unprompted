@@ -27,6 +27,78 @@ function run(argv) {
       if (!Array.isArray(picked)) picked = [picked];
       return JSON.stringify({ ok: true, paths: picked.map(function (item) { return item.toString(); }) });
     }
+    if (operation === 'choose-reminders' || operation === 'read-reminders' || operation === 'create-reminder' || operation === 'change-reminder' || operation === 'delete-reminder') {
+      var remindersApp = Application('Reminders'), reminderAccounts = remindersApp.accounts(), reminderLists = [], reminderLabels = [];
+      if (reminderAccounts.length > 30) throw new Error('ACCOUNT_LIMIT');
+      for (var rai = 0; rai < reminderAccounts.length; rai++) {
+        var ra = reminderAccounts[rai], rl = ra.lists();
+        if (reminderLists.length + rl.length > 1000) throw new Error('LIST_LIMIT');
+        for (var rli = 0; rli < rl.length; rli++) {
+          var rchoice = { accountId: String(ra.id()), folderId: String(rl[rli].id()), accountLabel: String(ra.name()).slice(0, 250), label: String(rl[rli].name()).slice(0, 250), target: rl[rli] };
+          reminderLists.push(rchoice); reminderLabels.push(String(reminderLists.length) + '  ' + rchoice.accountLabel + ' / ' + rchoice.label);
+        }
+      }
+      if (operation === 'choose-reminders') {
+        if (!reminderLists.length) return JSON.stringify({ ok: false, code: 'NO_FOLDERS' });
+        var rselected = current.chooseFromList(reminderLabels, { withTitle: 'Unprompted', withPrompt: args.locale === 'zh-CN' ? '选择只读观察的提醒事项列表' : 'Choose Reminders lists to observe read-only', multipleSelectionsAllowed: true, emptySelectionAllowed: false });
+        if (!rselected) return JSON.stringify({ ok: false, code: 'CANCELLED' });
+        return JSON.stringify({ ok: true, folders: rselected.map(function (label) { var entry = reminderLists[reminderLabels.indexOf(String(label))]; return { accountId: entry.accountId, folderId: entry.folderId, accountLabel: entry.accountLabel, label: entry.label }; }) });
+      }
+      if (operation === 'create-reminder') {
+        if (!args.folder || typeof args.title !== 'string' || !args.title.trim() || args.title.length > 500 || /[\r\n]/.test(args.title)
+          || typeof args.body !== 'string' || !args.body.trim() || args.body.length > 64000 || !/^unprompted-artifact:[a-f0-9]{64}$/.test(args.marker)) throw new Error('INVALID_CONTENT');
+        var writeList = null;
+        for (var rwi = 0; rwi < reminderLists.length; rwi++) if (reminderLists[rwi].accountId === args.folder.accountId && reminderLists[rwi].folderId === args.folder.folderId) writeList = reminderLists[rwi].target;
+        if (!writeList) throw new Error('LIST_UNAVAILABLE');
+        var newReminder = remindersApp.Reminder({ name: args.title, body: args.body + '\n' + args.marker });
+        writeList.reminders.push(newReminder);
+        return JSON.stringify({ ok: true, id: String(newReminder.id()) });
+      }
+      if (operation === 'change-reminder' || operation === 'delete-reminder') {
+        if (!args.folder || typeof args.reminderId !== 'string' || !args.reminderId || args.reminderId.length > 4096
+          || typeof args.expectedUpdatedAt !== 'string' || !Number.isFinite(Date.parse(args.expectedUpdatedAt))) throw new Error('INVALID_CONTENT');
+        var editList = null;
+        for (var rei = 0; rei < reminderLists.length; rei++) if (reminderLists[rei].accountId === args.folder.accountId && reminderLists[rei].folderId === args.folder.folderId) editList = reminderLists[rei].target;
+        if (!editList) throw new Error('LIST_UNAVAILABLE');
+        var candidates = editList.reminders(), editReminder = null;
+        if (candidates.length > 500) throw new Error('REMINDER_LIMIT');
+        for (var eri = 0; eri < candidates.length; eri++) if (String(candidates[eri].id()) === args.reminderId) { editReminder = candidates[eri]; break; }
+        if (!editReminder || editReminder.modificationDate().toISOString() !== args.expectedUpdatedAt) throw new Error('REMINDER_CHANGED');
+        if (operation === 'delete-reminder') { editReminder.delete(); return JSON.stringify({ ok: true, id: args.reminderId }); }
+        var changes = args.changes, own = function (key) { return Object.prototype.hasOwnProperty.call(changes, key); };
+        if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !Object.keys(changes).length
+          || Object.keys(changes).some(function (key) { return ['title', 'body', 'completed', 'dueAt'].indexOf(key) < 0; })
+          || own('title') && (typeof changes.title !== 'string' || !changes.title.trim() || changes.title.length > 500 || /[\r\n]/.test(changes.title))
+          || own('body') && (typeof changes.body !== 'string' || changes.body.length > 64000)
+          || own('completed') && typeof changes.completed !== 'boolean'
+          || own('dueAt') && (typeof changes.dueAt !== 'string' || !Number.isFinite(Date.parse(changes.dueAt)))) throw new Error('INVALID_CONTENT');
+        if (own('title')) editReminder.name = changes.title;
+        if (own('body')) editReminder.body = changes.body;
+        if (own('completed')) editReminder.completed = changes.completed;
+        if (own('dueAt')) editReminder.dueDate = new Date(changes.dueAt);
+        return JSON.stringify({ ok: true, id: args.reminderId });
+      }
+      var reminderRecords = [], reminderErrors = [], reminderComplete = true, reminderCount = 0, reminderUsed = 0;
+      for (var rsi = 0; rsi < args.folders.length; rsi++) {
+        var rs = args.folders[rsi], rt = null;
+        for (var rci = 0; rci < reminderLists.length; rci++) if (reminderLists[rci].accountId === rs.accountId && reminderLists[rci].folderId === rs.folderId) rt = reminderLists[rci];
+        if (!rt) { reminderComplete = false; reminderErrors.push({ code: 'LIST_UNAVAILABLE' }); continue; }
+        try {
+          var ris = rt.target.reminders();
+          for (var rii = 0; rii < ris.length; rii++) {
+            if (++reminderCount > 500) { reminderComplete = false; reminderErrors.push({ code: 'REMINDER_LIMIT' }); break; }
+            var ri = ris[rii], rb = String(ri.body() || ''), rn = String(ri.name() || '');
+            if (rb.length > 512 * 1024 || (reminderUsed += rb.length + rn.length) > 4 * 1024 * 1024) { reminderComplete = false; reminderErrors.push({ code: 'READ_BUDGET' }); break; }
+            var rd = ri.dueDate();
+            reminderRecords.push({ id: String(ri.id()), title: rn, body: rb, updatedAt: ri.modificationDate().toISOString(), state: ri.completed() ? 'closed' : 'open', dueAt: rd ? rd.toISOString() : null, list: rt.label, accountId: rs.accountId, folderId: rs.folderId });
+          }
+        } catch (reminderError) {
+          if (reminderError.errorNumber === -1743 || reminderError.number === -1743) throw reminderError;
+          reminderComplete = false; reminderErrors.push({ code: 'LIST_UNAVAILABLE' });
+        }
+      }
+      return JSON.stringify({ ok: true, records: reminderRecords, errors: reminderErrors, complete: reminderComplete });
+    }
     var notes = Application('Notes');
     if (operation === 'choose-notes') {
       var accounts = notes.accounts(), choices = [], labels = [];

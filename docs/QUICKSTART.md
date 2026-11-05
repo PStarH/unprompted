@@ -39,9 +39,7 @@ picker; on other systems, enter the folder path. Apple Notes is macOS-only and
 requires Automation permission for the app that runs Unprompted. Only the
 selected folders are read. Its real-account acceptance is still pending.
 
-GitHub and Outlook use official device OAuth: select Connect, copy the short
-code and confirm it on the official sign-in page. Both connections start
-read-only and activate without restarting.
+GitHub uses device OAuth: copy its short code and confirm it on GitHub. Outlook opens Microsoft sign-in directly. Both connections start read-only and activate without restarting.
 
 For Google, use its connection card. If a Desktop OAuth client is provisioned,
 choose **Connect Google**. Otherwise, follow the three in-app Google Cloud steps,

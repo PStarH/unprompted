@@ -3,8 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { startFixtureServer } from '../browser/fixture-server.mjs';
 
 export async function startConnectedFixture() {
-  const controls = { githubAuthorized: false, microsoftAuthorized: false, githubClosed: false, microsoftAccount: 'ms-a', microsoftDrafts: false };
-  const calls = [], at = '2026-10-26T09:00:00.000Z';
+  const at = '2026-10-26T09:00:00.000Z';
+  const controls = { githubAuthorized: false, microsoftAuthorized: false, githubClosed: false, microsoftAccount: 'ms-a', microsoftDrafts: false, microsoftExtraScopes: [], todoistContent: 'Inspect retry policy', todoistUpdatedAt: at };
+  const calls = [];
   const service = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://fixture.local');
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -23,7 +24,9 @@ export async function startConnectedFixture() {
     if (url.pathname === '/google/github.com/login/oauth/access_token') return json(controls.githubAuthorized
       ? { access_token: 'PRIVATE_GITHUB_ACCESS' } : { error: 'authorization_pending' });
     if (url.pathname === '/google/login.microsoftonline.com/common/oauth2/v2.0/token') return json(controls.microsoftAuthorized
-      ? { access_token: `PRIVATE_MS_ACCESS_${controls.microsoftAccount}`, refresh_token: 'PRIVATE_MS_REFRESH', expires_in: 3600, scope: `User.Read Mail.Read offline_access${controls.microsoftDrafts ? ' Mail.ReadWrite' : ''}` } : { error: 'authorization_pending' }, controls.microsoftAuthorized ? 200 : 400);
+      ? { access_token: `PRIVATE_MS_ACCESS_${controls.microsoftAccount}`, refresh_token: 'PRIVATE_MS_REFRESH', expires_in: 3600, scope: `User.Read Mail.Read offline_access${controls.microsoftDrafts ? ' Mail.ReadWrite' : ''}${controls.microsoftExtraScopes.length ? ` ${controls.microsoftExtraScopes.join(' ')}` : ''}` } : { error: 'authorization_pending' }, controls.microsoftAuthorized ? 200 : 400);
+    if (url.pathname === '/google/api.todoist.com/api/v1/user') return json({ id: 'todoist-a', email: 'todoist@example.test' });
+    if (url.pathname === '/google/api.todoist.com/api/v1/tasks') return json({ results: [{ id: 'task-a', content: controls.todoistContent, description: 'Read-only Todoist fixture', updated_at: controls.todoistUpdatedAt }], next_cursor: null });
     if (url.pathname === '/google/api.github.com/user') return json({ id: 123, login: 'reader' });
     const issue = { id: 15, number: 7, title: 'Investigate webhook retry behavior', body: 'This issue is assigned to reader. Inspect the retry policy.',
       user: { login: 'teammate' }, assignees: [{ id: 123, login: 'reader' }], state: controls.githubClosed ? 'closed' : 'open',

@@ -18,17 +18,62 @@ reserved for decisions and errors. Status must also be written in text.
 
 ## User-controlled appearance
 
-- **Space**, the default, uses a narrow rail with visible navigation labels and four Field groups of
-  task cards. No task is selected automatically. Selecting a card opens its
-  context panel; closing it preserves the draft and returns focus to the card.
+- Navigation has four destinations in the rail: Work, Memory, Connections and
+  Settings, with Settings pinned to the bottom.
+- **Space**, the default, uses a narrow rail with visible navigation labels.
+- Work follows the Field reference. The head is one number (all tasks) and
+  one sentence saying what the agent is doing, with the single next action
+  when there is one. Four zones always stay in place, even when empty: Needs
+  you, In motion, Waiting, and Watching · paused · done. A task is a quiet
+  line with a status mark, its title and what is happening now. Zones that
+  mix states also name the state in text. On phones the zones stack and an
+  empty zone is one line.
+- Below the zones, a background panel shows what the agent is doing, from
+  recorded state only: the sources it watches (with item counts and last
+  observation), its four most recent actions, and how many memories it keeps.
+  With no sources it says so and links to Connections.
+- Form controls (selects, inputs, checkboxes, switches, segmented filters)
+  share one style defined in `public/workbench.css`; nothing uses the browser
+  default.
+- Selecting a task opens a dedicated task page without a persistent task
+  index or dashboard content. The page uses a readable, centered width on
+  wide screens and the full width on phones. The left
+  column holds any non-final outcome first (result not confirmed, failed,
+  source disconnected, state unknown), then the decision, then steering. On
+  non-approval tasks, steering is a secondary disclosure unless it holds a
+  draft or error. Outstanding requirements remain visible; satisfied evidence
+  can be expanded on demand. Approval review keeps its full context visible.
+  Sources stay compact and open in the bounded source
+  dialog rather than stretching the page. Closing the page preserves the draft
+  and returns focus to the row. Unsent directions trigger the browser's leave
+  warning without persisting their text. No task is selected automatically.
+- Shared waits (one answer that unblocks several tasks) appear as one band
+  above the zones, because they are real decisions.
 - All five representations are chosen in Settings, with Field as the default.
-  The workspace shows only the current view name. New tasks, updates and page
-  reloads never open task details automatically.
-- Home is the single entry for reviewing tasks and following progress. The
-  separate Needs you navigation entry is removed; legacy attention links open
-  a filtered Home without selecting a task. Status filtering uses one select
-  instead of five repeated tabs. Suggestions remain collapsed on Home until
-  explicitly opened, with their existing decision actions intact.
+  New tasks, updates and page reloads never open task details automatically.
+- The Activity page interleaves real source changes and agent follow-through
+  in date groups. Each event is a quiet timeline row with its category and
+  time; supporting details and task links expand in place. Routine,
+  intervention, failure and verified states retain distinct labels and marks.
+  Legacy `#attention`
+  links open a filtered Work view, and legacy `#activity` links open the
+  record.
+- Memory Explorer starts with search and five recent memories. Search results
+  show an excerpt, the matching field/terms, and the originating context/date.
+  Selection opens a shared Inspector without opening a graph. Optional local
+  exploration has an explicit center: selecting a node changes only the Inspector;
+  Explore from here changes the center and records a return path. Edges explain
+  their recorded evidence. Project/person references and source tasks have distinct
+  labels and shapes. Scope buckets never create memory-to-memory connections.
+- Connections follows the Access Map reference. Each source row states its
+  access in words (read on, modify on or off, needs attention, or connect).
+  The counts double as filters. The page does not list observed context. In
+  demo mode it lists the simulated sources with item counts and the latest
+  observation.
+- `J` and `K` move between tasks that need the user, in on-screen order. On an
+  open task page, the left and right arrow keys move between all cards in the
+  same order as the workspace. They do nothing while typing, and live updates
+  never change the open task.
 - **Classic** uses labeled navigation. **Compact** reduces spacing and corner radii while retaining
   readable content. All three keep the same records, actions and navigation.
 - Mist is the supplied five-color default. Sage, Sand and Graphite are optional
@@ -43,14 +88,16 @@ reserved for decisions and errors. Status must also be written in text.
 
 ## Context and data
 
-- Keep the task list available while inspecting and steering work. Preserve
+- Keep task navigation available while inspecting and steering work. Preserve
   drafts, selection, focus and composition across live updates.
-- Memory Space shows every saved scope as a card, with its count, a short
-  content preview and explicitly saved deliverables. No scope is selected
-  automatically. Selecting a scope opens its contextual inspector. Library
-  records remain collapsed until opened; search and scope filters keep large
-  collections manageable. Facts, rules and execution experiences retain their
-  existing management sections.
+- Memory is maintained by the Agent; retrieval is search-led, while exploration and correction are optional.
+  Explicit relationships retain provenance. Shared scope/source connections are
+  deterministic projections and never widen retrieval applicability. Generic
+  global scope does not connect unrelated memories. The Inspector separates
+  origins, actual task-run usage, version history and technical metadata.
+  Disable, archive and recoverable delete remain distinct from permanent Forget.
+  On phones, the Inspector is a scrollable bottom sheet above navigation.
+  Advanced filters, rules and experience controls use progressive disclosure.
 - Connections group actual sources by state and show access, account, latest
   observation and available actions in place. Read and write permissions must
   remain distinct; neither a source connection nor a prototype implies write

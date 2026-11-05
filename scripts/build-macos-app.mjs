@@ -37,7 +37,7 @@ if (googleClientFile) {
   const client = json?.installed;
   if (typeof client?.client_id !== 'string' || !client.client_id.trim() || client.client_id.length > 512
     || typeof client?.client_secret !== 'string' || !client.client_secret.trim() || client.client_secret.length > 1024 || json.web
-    || (client.auth_uri && client.auth_uri !== 'https://accounts.google.com/o/oauth2/v2/auth')
+    || (client.auth_uri && !['https://accounts.google.com/o/oauth2/v2/auth', 'https://accounts.google.com/o/oauth2/auth'].includes(client.auth_uri))
     || (client.token_uri && client.token_uri !== 'https://oauth2.googleapis.com/token')) throw new Error('Choose an official Google Desktop OAuth client JSON.');
   // Include only registered client metadata, never tokens or account settings.
   provisionedGoogleClient = { installed: { client_id: client.client_id, client_secret: client.client_secret } };
@@ -160,6 +160,7 @@ CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
 RESOURCES="$CONTENTS/Resources"
 APP="$RESOURCES/app"
 NODE="$RESOURCES/runtime/node"
+export PATH="$RESOURCES/runtime:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 DATA="${'${UNPROMPTED_CONFIG_DIR:-$HOME/Library/Application Support/Unprompted}'}"
 PORT="${'${PORT:-}'}"
 if [ -z "$PORT" ]; then
@@ -211,7 +212,7 @@ done
 <key>CFBundleVersion</key><string>0.3.0</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSAppleEventsUsageDescription</key><string>Unprompted reads the Notes folders you select and can create notes in a selected folder when you explicitly authorize it.</string>
+<key>NSAppleEventsUsageDescription</key><string>Unprompted reads the Notes folders and Reminders lists you select. It can create notes in a selected folder when you explicitly authorize it.</string>
 </dict></plist>
 `;
   fs.writeFileSync(path.join(contents, 'Info.plist'), plist);

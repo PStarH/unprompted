@@ -146,6 +146,34 @@ test('restart resumes a persisted enabled setting with an immediate sync; stale 
   monitor.stop();
 });
 
+test('a calendar-only Google connection can be observed, and one with every Google read off cannot', async t => {
+  const calendar = fixture(t);
+  let ran = 0;
+  const monitor = new MonitoringService({
+    sync: { async run() { ran += 1; return { results: [{ connector: 'google', failed: false, partial: false }] }; } },
+    setup: calendar.setup,
+    connectors: [{ id: 'google', live: true, config: { readGmail: false, readDrive: false, readCalendar: true } }],
+    now: calendar.now,
+    setTimer: calendar.setTimer,
+    clearTimer: calendar.clearTimer
+  });
+  await monitor.setSettings({ enabled: true });
+  await monitor.whenIdle();
+  assert.equal(ran, 1);
+  assert.equal(monitor.describe().status, 'watching');
+  monitor.stop();
+
+  const closed = fixture(t);
+  const blocked = new MonitoringService({
+    sync: { async run() { throw new Error('must not run'); } },
+    setup: closed.setup,
+    connectors: [{ id: 'google', live: true, config: { readGmail: false, readDrive: false, readCalendar: false } }]
+  });
+  await assert.rejects(blocked.setSettings({ enabled: true }), /Connect and authorize/);
+  assert.equal(closed.setup.get().monitoring.enabled, false);
+  blocked.stop();
+});
+
 test('observation cannot be enabled without a live connector and preserves a closed state on restart', async t => {
   const f = fixture(t);
   const monitor = new MonitoringService({ sync: { async run() { throw new Error('must not run'); } }, setup: f.setup, connectors: [] });

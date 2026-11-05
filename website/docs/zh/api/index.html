@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh" data-root="../../" data-copy="复制" data-copied="已复制" data-no-results="没有匹配" data-search-start="输入关键词搜索文档。" data-close="关闭">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>本地 API · Unprompted 文档</title>
+  <meta name="description" content="用于查看工作区、连接模型和审阅工作的本机 HTTP API。">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/zh/api/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/api/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/api/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/api/">
+  <meta property="og:title" content="本地 API · Unprompted 文档">
+  <meta property="og:description" content="用于查看工作区、连接模型和审阅工作的本机 HTTP API。">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/zh/api/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../../sitemap.xml">
+  <link rel="stylesheet" href="../../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"本地 API","description":"用于查看工作区、连接模型和审阅工作的本机 HTTP API。","inLanguage":"zh-CN","url":"https://pstarh.github.io/unprompted/docs/zh/api/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"文档","item":"https://pstarh.github.io/unprompted/docs/zh/"},{"@type":"ListItem","position":2,"name":"参考"},{"@type":"ListItem","position":3,"name":"本地 API","item":"https://pstarh.github.io/unprompted/docs/zh/api/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="打开菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../../zh/"><img src="../../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">文档</span></a>
+    <button class="search-button" type="button" data-search><span>搜索文档</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="语言"><a href="../../api/" hreflang="en">EN</a><a href="../../zh/api/" hreflang="zh-CN" aria-current="true">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>文档目录</summary><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/" aria-current="page">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/" aria-current="page">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="当前位置"><a href="../../zh/">文档</a><span class="crumb-sep" aria-hidden="true">/</span><span>参考</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">本地 API</span></nav>
+      <p class="page-kicker">参考</p><h1 class="page-title">本地 API</h1>
+      <details class="mobile-toc"><summary>本页目录</summary><ol><li><a class="" href="#查看">查看</a></li><li><a class="" href="#模型">模型</a></li><li><a class="" href="#审阅">审阅</a></li><li><a class="" href="#自动跟进">自动跟进</a></li><li><a class="" href="#来源">来源</a></li></ol></details>
+      <article class="prose"><p>基址是启动时打印的地址，通常是 <code>http://127.0.0.1:4173</code>。没有身份验证。POST 正文是 JSON，并带 <code>Content-Type: application/json</code>。浏览器的跨源写入会被拒绝。不要把端口暴露出去。</p>
+<p>下面是日常路由。请求正文和其余持久化接口写在 <a href="https://github.com/PStarH/unprompted/blob/main/docs/API.md" rel="noreferrer">docs/API.md</a>。</p>
+<h2 id="查看">查看<a class="heading-link" href="#查看" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<div class="table-wrap"><table><thead><tr><th>方法</th><th>路径</th><th>结果</th></tr></thead><tbody><tr><td>GET</td><td><code>/api/health</code></td><td>运行模式、影子策略、提供商和数据模式</td></tr><tr><td>GET</td><td><code>/api/runtime</code></td><td>连接器、缺失的配置和模拟状态</td></tr><tr><td>GET</td><td><code>/api/setup</code></td><td>已脱敏的模型和来源状态。没有秘密</td></tr><tr><td>GET</td><td><code>/api/state</code></td><td>事件、任务、证据、文档和历史</td></tr><tr><td>GET</td><td><code>/api/stream</code></td><td>服务器推送的工作区快照</td></tr><tr><td>GET</td><td><code>/api/trace?taskId=TASK_ID</code></td><td>一项任务的决策链</td></tr></tbody></table></div>
+<p>真实工作区的 <code>/api/state</code> 可能含有个人内容。不要把它贴进议题。</p>
+<h2 id="模型">模型<a class="heading-link" href="#模型" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p><code>POST /api/setup/model</code> 接受 <code>baseUrl</code>、<code>model</code>、可选的 <code>apiKey</code>，以及 <code>harness</code>（<code>classic</code> 或 <code>pi</code>）。它和表单做同一次真实验证。失败不会保存这次候选。<code>POST /api/setup/model/forget</code> 移除已保存的连接。请求仍在进行时返回 <code>MODEL_BUSY</code>。由启动环境配置时返回 <code>MODEL_ENV_CONFIGURED</code>，并继续由该环境控制。</p>
+<h2 id="审阅">审阅<a class="heading-link" href="#审阅" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>带有准备草稿的任务会暴露 <code>reviewToken</code>。批准时在正文里送出这个精确令牌。草稿或输入变了，响应是 <strong>409</strong>，旧令牌不会被接受。重复一个已经接受的令牌是幂等的。接受记录的是本地决定，它本身不是对提供商的写入。</p>
+<p><code>POST /api/privacy/preview</code> 统计一次删除会牵涉什么。<code>POST /api/privacy/forget</code> 带上 <code>kind</code> 和 <code>id</code>，删除本地派生数据，并报告仍然保留的部分。它不会擦除提供商的副本。</p>
+<h2 id="自动跟进">自动跟进<a class="heading-link" href="#自动跟进" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p><code>POST /api/autonomy</code> 接受 <code>{ &quot;mode&quot;: &quot;time&quot;, &quot;durationMinutes&quot;: 30 }</code> 或 <code>{ &quot;mode&quot;: &quot;task&quot;, &quot;taskId&quot;: &quot;TASK_ID&quot; }</code>。响应包含 <code>grant</code> 和 <code>state</code>。同一模式、同一任务的新授权会替换上一条。时间授权和任务授权可以同时存在。<code>POST /api/autonomy/GRANT_ID/revoke</code> 停止该授权。<code>GET /api/state</code> 包含 <code>autonomy.enabled</code> 和当前有效的授权。无效输入返回 <strong>400</strong>。影子模式会拒绝，错误文本是 <code>YOLO requires write mode.</code> 行为见<a href="../../zh/follow-up/">自动跟进</a>。</p>
+<p><code>POST /api/tasks/TASK_ID/feedback</code> 的 <code>label</code> 为 <code>useful</code>、<code>not_useful</code>、<code>not_mine</code>、<code>duplicate</code>、<code>already_handled</code> 或 <code>wrong_association</code>。标成重复时还要带 <code>relatedTaskId</code>。<code>POST /api/feedback/FEEDBACK_ID/undo</code> 撤回一条纠正。这些都不会发信。<code>POST /api/misses</code> 带上 <code>note</code>，记下你看到而应用没有发现的事。它不创建任务。空的说明会被拒绝。</p>
+<h2 id="来源">来源<a class="heading-link" href="#来源" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>本地文件夹和备忘录的选择、移除和忘记在 <code>/api/setup/local-sources/</code> 下。取消选择器不会改变已保存的授权。<code>GET /api/local-sources/documents/:id</code> 返回最新文本，或一次明确的失败。</p>
+<p>连接器同步和 OAuth 路由使用同样的权限检查。排队的路由返回 <strong>202</strong> 和一个任务。这不是已核验的写入。JSON 演示期间，持久化工作区的这些操作返回 <strong>409</strong> <code>DURABLE_WORKSPACE_REQUIRED</code>。</p>
+<p>长期目标、经验、策略和产物授权在仓库的 API 文档里。创建目标或目的地授权需要 <code>confirmed: true</code>。它们本身都不会授予连接器写入。</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>复制本页</button><script type="application/json" id="page-markdown">"# 本地 API\n\n> 用于查看工作区、连接模型和审阅工作的本机 HTTP API。\n\n基址是启动时打印的地址，通常是 `http://127.0.0.1:4173`。没有身份验证。POST 正文是 JSON，并带 `Content-Type: application/json`。浏览器的跨源写入会被拒绝。不要把端口暴露出去。\n\n下面是日常路由。请求正文和其余持久化接口写在 [docs/API.md](https://github.com/PStarH/unprompted/blob/main/docs/API.md)。\n\n## 查看\n\n| 方法 | 路径 | 结果 |\n| --- | --- | --- |\n| GET | `/api/health` | 运行模式、影子策略、提供商和数据模式 |\n| GET | `/api/runtime` | 连接器、缺失的配置和模拟状态 |\n| GET | `/api/setup` | 已脱敏的模型和来源状态。没有秘密 |\n| GET | `/api/state` | 事件、任务、证据、文档和历史 |\n| GET | `/api/stream` | 服务器推送的工作区快照 |\n| GET | `/api/trace?taskId=TASK_ID` | 一项任务的决策链 |\n\n真实工作区的 `/api/state` 可能含有个人内容。不要把它贴进议题。\n\n## 模型\n\n`POST /api/setup/model` 接受 `baseUrl`、`model`、可选的 `apiKey`，以及 `harness`（`classic` 或 `pi`）。它和表单做同一次真实验证。失败不会保存这次候选。`POST /api/setup/model/forget` 移除已保存的连接。请求仍在进行时返回 `MODEL_BUSY`。由启动环境配置时返回 `MODEL_ENV_CONFIGURED`，并继续由该环境控制。\n\n## 审阅\n\n带有准备草稿的任务会暴露 `reviewToken`。批准时在正文里送出这个精确令牌。草稿或输入变了，响应是 **409**，旧令牌不会被接受。重复一个已经接受的令牌是幂等的。接受记录的是本地决定，它本身不是对提供商的写入。\n\n`POST /api/privacy/preview` 统计一次删除会牵涉什么。`POST /api/privacy/forget` 带上 `kind` 和 `id`，删除本地派生数据，并报告仍然保留的部分。它不会擦除提供商的副本。\n\n## 自动跟进\n\n`POST /api/autonomy` 接受 `{ \"mode\": \"time\", \"durationMinutes\": 30 }` 或 `{ \"mode\": \"task\", \"taskId\": \"TASK_ID\" }`。响应包含 `grant` 和 `state`。同一模式、同一任务的新授权会替换上一条。时间授权和任务授权可以同时存在。`POST /api/autonomy/GRANT_ID/revoke` 停止该授权。`GET /api/state` 包含 `autonomy.enabled` 和当前有效的授权。无效输入返回 **400**。影子模式会拒绝，错误文本是 `YOLO requires write mode.` 行为见[自动跟进](https://pstarh.github.io/unprompted/docs/zh/follow-up/)。\n\n`POST /api/tasks/TASK_ID/feedback` 的 `label` 为 `useful`、`not_useful`、`not_mine`、`duplicate`、`already_handled` 或 `wrong_association`。标成重复时还要带 `relatedTaskId`。`POST /api/feedback/FEEDBACK_ID/undo` 撤回一条纠正。这些都不会发信。`POST /api/misses` 带上 `note`，记下你看到而应用没有发现的事。它不创建任务。空的说明会被拒绝。\n\n## 来源\n\n本地文件夹和备忘录的选择、移除和忘记在 `/api/setup/local-sources/` 下。取消选择器不会改变已保存的授权。`GET /api/local-sources/documents/:id` 返回最新文本，或一次明确的失败。\n\n连接器同步和 OAuth 路由使用同样的权限检查。排队的路由返回 **202** 和一个任务。这不是已核验的写入。JSON 演示期间，持久化工作区的这些操作返回 **409** `DURABLE_WORKSPACE_REQUIRED`。\n\n长期目标、经验、策略和产物授权在仓库的 API 文档里。创建目标或目的地授权需要 `confirmed: true`。它们本身都不会授予连接器写入。\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=%E6%96%87%E6%A1%A3%3A%20%E6%9C%AC%E5%9C%B0%20API&amp;body=%E9%A1%B5%E9%9D%A2%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fzh%2Fapi%2F%0A%0A%E9%97%AE%E9%A2%98%3A%0A%0A" rel="noreferrer">反馈本页问题</a><span>版本 0.3.0 · 对应当前 main 分支</span></div>
+      <nav class="pager" aria-label="上一篇"><a href="../../zh/configuration/"><span>上一篇</span><strong>配置</strong></a><a class="next" href="../../zh/architecture/"><span>下一篇</span><strong>架构</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="本页目录"><h2>本页目录</h2><ol><li><a class="" href="#查看">查看</a></li><li><a class="" href="#模型">模型</a></li><li><a class="" href="#审阅">审阅</a></li><li><a class="" href="#自动跟进">自动跟进</a></li><li><a class="" href="#来源">来源</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../../">官网</a><a href="../../zh/">文档</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="打开菜单">
+    <div class="drawer-head"><strong>文档</strong><button class="icon-button" type="button" data-menu-close aria-label="关闭">×</button></div>
+    <section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/" aria-current="page">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/">安全</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="搜索">
+    <div class="search-head"><strong>搜索</strong><button class="icon-button" type="button" data-search-close aria-label="关闭">×</button></div>
+    <input type="search" placeholder="搜索文档" aria-label="搜索">
+    <p class="search-status">输入关键词搜索文档。</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

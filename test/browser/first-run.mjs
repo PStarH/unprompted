@@ -39,9 +39,8 @@ try {
       assert.equal((await (await page.request.get(fixture.base + '/api/state')).json()).outbox.length, 0);
       await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'ready', null, { timeout: 25_000 });
       await page.screenshot({ path: `${output}/ready-${label}.png`, fullPage: true, animations: 'disabled' });
-      await page.locator('#demoJourney [data-go="attention"]').click();
+      await page.locator('#taskContent [data-state="needs_user"] [data-select-task]').first().click();
       assert.equal(await page.locator('#viewHome').isVisible(), true);
-      await page.locator('#taskContent [data-select-task]').first().click();
       await page.locator('.ws-detail-drawer [data-action="approve"]').click();
       await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'verified');
       const complete = await (await page.request.get(fixture.base + '/api/state')).json();
@@ -53,7 +52,8 @@ try {
       if (await closeInspector.count()) await closeInspector.click();
       assert.equal(await page.locator('.ws-detail-drawer').count(), 0);
       await page.locator('#demoJourney [data-open-task]').click();
-      assert.match(await page.locator('#taskDialogContent .task-action .receipt').innerText(), /sim-1/);
+      await page.locator('#taskContent .ws-task-page .task-action .receipt').waitFor();
+      assert.match(await page.locator('#taskContent .task-action .receipt').innerText(), /sim-1/);
       await page.keyboard.press('Escape');
       await page.locator('#demoJourney [data-go="sources"]').click();
       assert.match(await page.locator('#connectorContent').innerText(), /npm start/);

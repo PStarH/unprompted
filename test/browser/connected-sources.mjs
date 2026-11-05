@@ -13,19 +13,31 @@ const page = await context.newPage(), errors = [], checks = [];
 const localFolder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-browser-local-')));
 page.on('pageerror', error => errors.push(error.message));
 const record = id => checks.push({ id, passed: true });
-for (const [url, id] of [['https://github.com/login/device', 'github'], ['https://microsoft.com/devicelogin', 'microsoft']]) {
+for (const [url, id] of [['https://github.com/login/device', 'github']]) {
   await context.route(url, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>Scripted provider consent</title><p>Scripted consent; no real account is used.</p><form method="post" action="${fixture.endpoint}/grant/${id}"><button id="grant">Confirm selected access</button></form>` }));
 }
+let lastMicrosoftScopes = [];
+await context.route('https://login.microsoftonline.com/common/oauth2/v2.0/authorize*', route => {
+  const authorize = new URL(route.request().url());
+  const callback = new URL(authorize.searchParams.get('redirect_uri'));
+  fixture.controls.microsoftAuthorized = true;
+  lastMicrosoftScopes = authorize.searchParams.get('scope').split(/\s+/);
+  fixture.controls.microsoftDrafts = lastMicrosoftScopes.includes('Mail.ReadWrite');
+  fixture.controls.microsoftExtraScopes = lastMicrosoftScopes.filter(scope => scope === 'Mail.Send');
+  return route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>Scripted provider consent</title><form action="${callback.href}"><input name="state" value="${authorize.searchParams.get('state')}"><input name="code" value="fixture-code"><button id="grant">Confirm selected access</button></form>` });
+});
 try {
   await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
   const home = page.locator('#connectionCatalogHome'); await home.waitFor();
-  for (const id of ['google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes']) {
-    assert.equal(await home.locator(`[data-connection-card="${id}"]`).count(), 1);
-  }
   const native = (await (await page.request.get(fixture.base + '/api/setup')).json()).localSources;
+  const offered = ['google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'todoist'];
+  if (native.apple_notes.available || native.apple_notes.connected) offered.push('apple_notes');
+  if (native.apple_reminders.available || native.apple_reminders.connected) offered.push('apple_reminders');
+  for (const id of offered) assert.equal(await home.locator(`[data-connection-card="${id}"]`).count(), 1, id);
+  if (native.apple_notes.available) assert.equal(await home.locator('[data-native-source=apple_notes]').isEnabled(), true);
+  else if (!native.apple_notes.connected) assert.equal(await home.locator('[data-connection-card="apple_notes"]').count(), 0);
   if (native.local_files.nativePicker) assert.equal(await home.locator('[data-native-source=local_files]').isEnabled(), true);
   else assert.equal(await home.locator('[data-native-path-form] [name=path]').isVisible(), true);
-  assert.equal(await home.locator('[data-native-source=apple_notes]').isEnabled(), native.apple_notes.available);
   assert.equal(await page.locator('#workspaceOnboarding').isVisible(), false, 'Google setup does not block selecting another source');
   const model = page.locator('[data-model-form]');
   await model.locator('[name="baseUrl"]').fill(fixture.endpoint + '/model/v1');
@@ -33,17 +45,43 @@ try {
   await model.locator('button[type="submit"]').click();
   await page.waitForFunction(() => document.querySelector('#modelOnboarding')?.textContent.includes('Model connected'));
   record('first-use-offers-local-and-cloud-sources-without-forcing-google-setup');
+  await page.locator('[data-view="sources"]').click();
+  await page.locator('#connectorContent [data-inspect-connection="notion"]').click();
+  const notionCard = page.locator('#connectorContent [data-connection-card="notion"]');
+  assert.equal(await notionCard.locator('[data-mcp-oauth="notion"]').isVisible(), true);
+  assert.match(await notionCard.innerText(), /does not automatically observe page changes/i);
+  await page.route('**/api/mcp/oauth/notion', async route => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await route.fulfill({ json: { oauth: { phase: 'authorized', authorizeUrl: 'https://notion-consent.example.test/' } } });
+  }, { times: 1 });
+  await context.route('https://notion-consent.example.test/', route => route.fulfill({ contentType: 'text/html', body: '<title>Scripted Notion sign-in</title>' }));
+  const notionPopupPromise = page.waitForEvent('popup');
+  await notionCard.locator('[data-mcp-oauth="notion"]').click();
+  const notionPopup = await notionPopupPromise;
+  await notionPopup.waitForURL('https://notion-consent.example.test/');
+  assert.equal(await notionPopup.title(), 'Scripted Notion sign-in');
+  await notionPopup.close();
+  await page.locator('[data-view="home"]').click();
+  record('notion-offers-official-mcp-sign-in-when-native-client-is-not-provisioned');
   for (const id of ['github', 'microsoft']) {
+    const other = home.locator('.home-other-sources');
+    if (await other.count() && !await other.evaluate(node => node.open)) await other.locator('summary').click();
     const disclosure = home.locator('.home-connections');
     if (await disclosure.count() && !await disclosure.evaluate(details => details.open)) await disclosure.locator('summary').click();
-    const opened = page.waitForEvent('popup'); await home.locator(`[data-select-connection="${id}"]`).click();
+    if (id === 'microsoft') await page.locator('[data-view="sources"]').click();
+    const opened = page.waitForEvent('popup');
+    if (id === 'microsoft') await page.locator('[data-inspect-connection="microsoft"]').click();
+    else await home.locator(`[data-select-connection="${id}"]`).click();
     const popup = await opened; await popup.locator('#grant').waitFor();
     const card = home.locator(`[data-connection-card="${id}"]`);
-    await card.locator('[data-copy-device-code]').click();
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), id === 'github' ? 'CODE-1234' : 'CODE1234');
+    if (id === 'github') {
+      await card.locator('[data-copy-device-code]').click();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'CODE-1234');
+    } else assert.equal(await card.locator('[data-copy-device-code]').count(), 0);
     await popup.locator('#grant').click();
+    if (id === 'microsoft') await page.locator('[data-view="home"]').click();
     await page.waitForFunction(id => document.querySelector(`#connectionCatalogHome [data-connection-card="${id}"]`)?.textContent.includes('Connected · read-only'), id, { timeout: 15_000 });
-    record(`${id}-uses-official-device-authorization-and-activates-without-restart`);
+    record(`${id}-uses-provider-authorization-and-activates-without-restart`);
   }
   await page.reload();
   await page.locator('#taskContent [data-task-card]').first().waitFor();
@@ -55,11 +93,10 @@ try {
   assert.match(await issue.innerText(), /Following assigned issue/);
   assert.equal(await issue.locator('[data-action="approve"]').count(), 0);
   await issue.locator('[data-select-task]').click();
-  await page.locator('#taskContent .ws-inspector [data-open-task]').first().click();
-  await page.locator('#taskDialog details[data-preserve^="full-evidence-"] > summary').click();
-  assert.match(await page.locator('#taskDialog').innerText(), /This issue is assigned to reader/);
-  await page.locator('#taskDialog [data-close-dialog]').click();
-  record('assigned-issues-keep-native-provenance-and-never-offer-an-email-send');
+  await page.locator('#taskContent details[data-preserve^="full-evidence-"] > summary').click();
+  assert.match(await page.locator('#taskContent .ws-task-page').innerText(), /This issue is assigned to reader/);
+  assert.equal(await page.locator('#taskDialog').count(), 0);
+  record('assigned-issues-keep-native-provenance-in-the-task-page-without-an-email-send');
   await page.locator('[data-view="sources"]').click();
   const account = (await (await page.request.get(fixture.base + '/api/setup')).json()).connections.github.account.label;
   await page.locator('[data-connection-search]').fill(account);
@@ -71,7 +108,22 @@ try {
   await page.locator('[data-inspect-connection="github"]').click();
   assert.equal(await githubCard.locator('[data-select-connection="github"]').getAttribute('aria-expanded'), 'true');
   assert.equal(await githubCard.locator('.source-detail-grid').isVisible(), true);
-  assert.equal(await githubCard.locator('[data-connection-form]').count(), 0);
+  assert.equal(await githubCard.locator('[data-connection-form]').count(), 1);
+  const apiGrant = page.locator('[data-platform-grant="github"]');
+  await apiGrant.locator('[name=pathPrefix]').fill('/repos/team/project');
+  await apiGrant.locator('[name=confirmed]').check();
+  await apiGrant.locator('[type=submit]').click();
+  await page.locator('[data-revoke-platform-grant]').waitFor();
+  let grants = await (await page.request.get(fixture.base + '/api/connector-grants')).json();
+  assert.equal(grants.enabled, true);
+  assert.equal((await (await page.request.get(fixture.base + '/api/setup')).json()).connections.github.readOnly, false);
+  assert.ok(grants.grants.some(grant => grant.connectorId === 'github' && grant.pathPrefix === '/repos/team/project' && grant.status === 'active'));
+  await page.locator('[data-revoke-platform-grant]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-revoke-platform-grant]'));
+  grants = await (await page.request.get(fixture.base + '/api/connector-grants')).json();
+  assert.equal(grants.grants.find(grant => grant.connectorId === 'github').status, 'revoked');
+  assert.equal((await (await page.request.get(fixture.base + '/api/setup')).json()).connections.github.readOnly, true);
+  record('native-platform-action-access-can-be-scoped-and-revoked');
   await page.screenshot({ path: `${output}/connections-desktop.png`, fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -98,11 +150,21 @@ try {
   await page.selectOption('#languageSelect', 'en');
   assert.equal(await artifactDetails.evaluate(details => details.open), true);
   record('artifact-permission-details-remain-open-across-live-renders');
+  await page.locator('#connectorContent [data-inspect-connection="microsoft"]').click();
+  const microsoftForm = page.locator('#connectorContent [data-connection-form="microsoft"]');
+  await microsoftForm.locator('[name="scopes"]').fill('Mail.Send');
+  const writeConsent = page.waitForEvent('popup'); await microsoftForm.locator('button[type="submit"]').click();
+  const writePopup = await writeConsent; await writePopup.locator('#grant').click();
+  await page.waitForFunction(async () => (await (await fetch('/api/setup')).json()).connections.microsoft.oauth.phase === 'connected');
+  assert.ok(lastMicrosoftScopes.includes('Mail.Send'));
+  await page.waitForFunction(() => document.querySelector('#artifactPermissions [data-artifact-scope="microsoft"] [name="scopes"]')?.value.includes('Mail.Send'));
   const artifactSource = page.locator('#artifactPermissions [data-artifact-source="microsoft"]');
   await artifactSource.evaluate(details => { details.open = true; });
   const draftConsent = page.waitForEvent('popup');
   await artifactSource.locator('[data-artifact-scope="microsoft"] button[type="submit"]').click();
   const draftPopup = await draftConsent;
+  await draftPopup.locator('#grant').waitFor();
+  assert.ok(lastMicrosoftScopes.includes('Mail.Send'), 'requesting drafts preserves Microsoft send scope');
   await draftPopup.locator('#grant').click();
   await artifactSource.locator('[data-artifact-grant-form="microsoft"]').waitFor({ timeout: 15000 });
   const draftGrant = artifactSource.locator('[data-artifact-grant-form="microsoft"]');
@@ -116,6 +178,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('#artifactPermissions [data-artifact-revoke]').length === 0);
   assert.equal((await (await page.request.get(fixture.base + '/api/setup')).json()).connections.microsoft.readOnly, true);
   record('draft-consent-and-destination-grant-work-in-the-ui-and-revoke-without-enabling-send');
+  record('outlook-draft-reauthorization-preserves-existing-action-scopes');
   const observation = page.locator('#observationContent');
   await observation.locator('[name="enabled"]').uncheck();
   await observation.locator('button[type="submit"]').click();
@@ -161,7 +224,9 @@ try {
   const localUrl = await page.locator('#taskContent .ws-inspector .task-action a').getAttribute('href');
   assert.match(await (await page.request.get(localUrl)).text(), /Selected local source text/);
   record('selected-local-folder-produces-real-source-task-without-email-actions');
-  await page.locator('#taskContent .ws-inspector [data-action="cancel"]').click();
+  await page.locator('#taskContent .ws-inspector').getByRole('button', { name: 'Stop following', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#taskContent .ws-inspector .ws-state')?.dataset.state === 'closed');
+  await page.locator('#taskContent [data-close-inspector]').click();
   await page.waitForFunction(() => document.querySelector('#taskContent [data-task-card^="observed:"]')?.dataset.state === 'closed');
   record('native-card-stop-without-navigation');
   await page.locator('[data-view="sources"]').click();
@@ -170,6 +235,18 @@ try {
   await page.waitForFunction(() => !document.querySelector('#connectorContent [data-connection-card="local_files"] [data-native-operation="forget"]'));
   assert.equal((await page.request.get(localUrl)).status(), 404);
   record('removing-local-scope-revokes-current-document-access');
+  await sources.locator('[data-inspect-connection="todoist"]').click();
+  const todoistForm = sources.locator('[data-connection-form="todoist"]');
+  await todoistForm.locator('[name="token"]').fill('personal_fixture_token');
+  await todoistForm.locator('[name="observe"]').uncheck();
+  await todoistForm.locator('[type="submit"]').click();
+  await page.waitForFunction(() => document.querySelector('#connectorContent [data-connection-card="todoist"]')?.textContent.includes('todoist@example.test'));
+  const todoistSetup = await (await page.request.get(fixture.base + '/api/setup')).json();
+  assert.equal(todoistSetup.connections.todoist.connected, true);
+  assert.equal(todoistSetup.connections.todoist.counts.tasks, 1);
+  assert.doesNotMatch(JSON.stringify(todoistSetup), /personal_fixture_token/);
+  record('todoist-native-token-form-connects-without-developer-app');
+  await page.screenshot({ path: `${output}/todoist-connected.png`, fullPage: true, animations: 'disabled' });
   assert.deepEqual(errors, []);
 } catch (error) {
   checks.push({ passed: false, error: error.message, stack: error.stack }); process.exitCode = 1;

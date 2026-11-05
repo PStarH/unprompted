@@ -1,3 +1,4 @@
+import { acknowledgedCursor } from './connector.js';
 /**
  * Connector sync runner.
  *
@@ -16,6 +17,8 @@
  * Nothing here decides *what* work matters. It only moves events.
  */
 
+const inFlightPulls = new WeakMap();
+
 export class ConnectorSync {
   constructor({ connectors, cursors, engine, now = () => new Date().toISOString(), timeoutMs = null }) {
     this.connectors = connectors || [];
@@ -27,6 +30,10 @@ export class ConnectorSync {
     this.lastRunAt = null;
   }
 
+  #revoked(connector) {
+    return this.engine.durableRuntime?.privacy?.permissionRevoked?.(connector.id) === true;
+  }
+
   /**
    * A hard ceiling for one connector pull.
    *
@@ -36,12 +43,17 @@ export class ConnectorSync {
    * the same window.
    */
   async #pullWithTimeout(connector, cursor) {
-    const pull = connector.pull({ cursor });
+    if (inFlightPulls.has(connector)) throw new Error('The previous connector pull is still in flight.');
+    const controller = new AbortController();
+    const pull = Promise.resolve().then(() => connector.pull({ cursor, signal: controller.signal }));
+    inFlightPulls.set(connector, pull);
+    const clear = () => { if (inFlightPulls.get(connector) === pull) inFlightPulls.delete(connector); };
+    pull.then(clear, clear);
     if (!this.timeoutMs) return pull;
     let timer;
     const deadline = new Promise((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error(`Connector pull timed out after ${this.timeoutMs}ms`)),
+        () => { controller.abort(); reject(new Error(`Connector pull timed out after ${this.timeoutMs}ms`)); },
         this.timeoutMs
       );
     });
@@ -60,7 +72,7 @@ export class ConnectorSync {
     const results = [];
     try {
       for (const connector of this.connectors) {
-        if (!connector.live) continue; // simulated connectors are driven by the scenario scheduler
+        if (!connector.live || this.#revoked(connector)) continue; // simulated connectors are driven by the scenario scheduler
         results.push(await this.#syncOne(connector));
       }
       return { results };
@@ -80,8 +92,15 @@ export class ConnectorSync {
       if (result.failed || result.partial || !result.hasMore || Date.now() - started >= 30000) break;
     }
     const last = pages.at(-1);
-    return { ...last, ingested: pages.reduce((count, page) => count + (page.ingested || 0), 0),
+    const summary = { ...last, ingested: pages.reduce((count, page) => count + (page.ingested || 0), 0),
       duplicates: pages.reduce((count, page) => count + (page.duplicates || 0), 0), pages: pages.length };
+    // History discovery is a separate connector method. A successful poll calls
+    // it once per privacy epoch so older stored-window events enter the same ingest path.
+    if (!summary.failed && this.engine.durableRuntime?.backfill) {
+      try { summary.history = await this.engine.durableRuntime.backfill(connector.id, { once: true }); }
+      catch (error) { summary.historyError = error instanceof Error ? error.message : 'History backfill failed.'; }
+    }
+    return summary;
   }
 
   async #syncPage(connector) {
@@ -89,6 +108,8 @@ export class ConnectorSync {
     let pulled;
     try {
       pulled = await this.#pullWithTimeout(connector, cursor);
+      pulled.cursor = acknowledgedCursor(cursor, pulled);
+      if (!connector.live || this.#revoked(connector)) throw new Error('The connector was disabled during synchronization.');
       if (!pulled || !Array.isArray(pulled.events) || (pulled.errors != null && !Array.isArray(pulled.errors))) {
         throw new Error('Connector returned an invalid pull result; the cursor was not advanced.');
       }
@@ -116,6 +137,7 @@ export class ConnectorSync {
       // Ingest is synchronous and idempotent; a replayed provider event is
       // counted rather than reprocessed.
       const outcome = this.engine.ingest(event);
+      if (outcome?.disposition === 'permission_revoked') throw new Error('The connector was disabled during synchronization.');
       if (outcome?.duplicate) duplicates += 1;
       else ingested += 1;
     } } catch {
@@ -129,6 +151,7 @@ export class ConnectorSync {
     const errors = Array.isArray(pulled?.errors) ? pulled.errors : [];
     const partial = Boolean(pulled?.partial) || errors.length > 0;
     if (cursorChanged) this.cursors.set(connector.id, pulled.cursor);
+    this.cursors.observe?.(connector.id, { complete: !partial && !pulled.hasMore && !Object.values(pulled.scopes || {}).some(scope => scope.status === 'recovering') && pulled.cursor?.recovering !== true, observedAt: this.now(), watermark: pulled.cursor?.gmail?.historyId || cursor?.gmail?.historyId || null });
 
     const statusPatch = {
       ok: !partial,

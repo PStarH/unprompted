@@ -7,7 +7,7 @@ import { readTextBounded } from '../bounded.js';
 import { normalizeAddress } from '../commitments.js';
 
 /**
- * Google Workspace connector — Gmail + Drive/Docs.
+ * Google Workspace connector — Gmail, Drive text exports and opt-in Calendar.
  *
  * This is real provider code: OAuth refresh-token flow, Gmail incremental
  * history sync, Drive change tracking, Google Docs export, and Gmail send with
@@ -33,6 +33,8 @@ const DRIVE = 'https://www.googleapis.com/drive/v3';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const DOC_MIME = 'application/vnd.google-apps.document';
 const DOCUMENT_LIST_LIMIT = 20;
+const TEXT_EXPORTS = { [DOC_MIME]: ['text/plain', 'document'], 'application/vnd.google-apps.spreadsheet': ['text/csv', 'spreadsheets'], 'application/vnd.google-apps.presentation': ['text/plain', 'presentation'] };
+const supportedFile = file => Boolean(TEXT_EXPORTS[file?.mimeType]);
 
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_SYNC_BUDGET_MS = 120000;
@@ -206,6 +208,7 @@ export class GoogleWorkspaceConnector extends Connector {
   constructor({ id = 'google', auth, config = {}, fetchImpl = globalThis.fetch }) {
     super({ id, kind: 'google-workspace', fetchImpl });
     this.config = config;
+    this.documentListLimit = Math.min(500, Math.max(1, Math.floor(positive(config.documentListLimit, DOCUMENT_LIST_LIMIT))));
     this.live = true;
     // Fail closed: a connector sends only when shadow mode is explicitly off.
     this.shadow = config.shadow !== false;
@@ -250,7 +253,7 @@ export class GoogleWorkspaceConnector extends Connector {
     const send = mail && this.sendEnabled;
     const patch = configured && this.config.docsWriteEnabled === true && !this.shadow;
     return {
-      read: [...(mail ? ['gmail.messages'] : []), ...(docs ? ['drive.google_docs'] : [])],
+      read: [...(mail ? ['gmail.messages'] : []), ...(docs ? ['drive.google_docs', 'drive.google_sheets', 'drive.google_slides'] : []), ...(configured && this.config.readCalendar ? ['calendar.primary'] : [])],
       search: [...(mail ? ['gmail.messages'] : []), ...(docs ? ['drive.google_docs'] : [])],
       pagination: [...(mail ? ['gmail.history', 'gmail.initial_listing', 'gmail.search'] : []), ...(docs ? ['drive.changes', 'drive.listing', 'drive.search'] : [])],
       incremental: [...(mail ? ['gmail.history'] : []), ...(docs ? ['drive.changes'] : [])],
@@ -378,6 +381,7 @@ export class GoogleWorkspaceConnector extends Connector {
     return this.syncDeadline.run(Date.now() + this.syncBudgetMs, async () => {
       const errors = [];
       const nextCursor = { ...(cursor || {}) };
+      const scopes = {};
       const events = [];
       let hasMore = false;
 
@@ -386,7 +390,9 @@ export class GoogleWorkspaceConnector extends Connector {
           const gmail = await this.#pullGmail(cursor?.gmail || null);
           events.push(...gmail.events);
           nextCursor.gmail = gmail.cursor;
+          scopes.gmail = { status: gmail.cursor?.resynced ? 'recovering' : 'complete', cursor: gmail.cursor };
         } catch (error) {
+          scopes.gmail = { status: 'failed' };
           errors.push({ scope: 'gmail', message: error.message, retryable: Boolean(error.retryable) });
         }
       }
@@ -396,17 +402,74 @@ export class GoogleWorkspaceConnector extends Connector {
           const drive = await this.#pullDrive(cursor?.drive || null);
           events.push(...drive.events);
           nextCursor.drive = drive.cursor;
+          scopes.drive = { status: drive.cursor?.recovering || drive.hasMore ? 'recovering' : 'complete', cursor: drive.cursor };
           hasMore ||= drive.hasMore === true;
           for (const error of drive.errors || []) {
             errors.push({ scope: 'drive', message: error.message, retryable: Boolean(error.retryable) });
           }
         } catch (error) {
+          scopes.drive = { status: 'failed' };
           errors.push({ scope: 'drive', message: error.message, retryable: Boolean(error.retryable) });
         }
       }
 
-      return { events, cursor: nextCursor, errors, partial: errors.length > 0, hasMore };
+      if (this.config.readCalendar === true) {
+        try {
+          const calendar = await this.#pullCalendar(cursor?.calendar || null);
+          events.push(...calendar.events); nextCursor.calendar = calendar.cursor;
+          scopes.calendar = { status: calendar.cursor.recovering ? 'recovering' : 'complete', cursor: calendar.cursor };
+          hasMore ||= calendar.hasMore;
+        } catch (error) {
+          scopes.calendar = { status: 'failed' };
+          errors.push({ scope: 'calendar', message: error.message, retryable: Boolean(error.retryable) });
+        }
+      }
+      return { events, cursor: nextCursor, scopes, errors, partial: errors.length > 0, hasMore };
     });
+  }
+
+  /** Opt-in primary calendar context; cancellations invalidate evidence, never imply completion. */
+  async #pullCalendar(cursor) {
+    let current = cursor || {}, recovering = current.recovering === true;
+    const endpoint = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+    const queryFor = state => {
+      const query = new URLSearchParams({ maxResults: '100', showDeleted: 'true', singleEvents: 'false' });
+      if (state.syncToken) query.set('syncToken', state.syncToken);
+      else query.set('timeMin', state.timeMin || new Date(Date.now() - 30 * 86400_000).toISOString());
+      if (state.pageToken) query.set('pageToken', state.pageToken);
+      return query;
+    };
+    let params = queryFor(current), page;
+    try { page = await this.#request(`${endpoint}?${params}`); }
+    catch (error) {
+      if (![400, 410].includes(error.status) || !current.syncToken && !current.pageToken) throw error;
+      recovering = true; current = { known: current.known || {}, recovering: true };
+      params = queryFor(current); page = await this.#request(`${endpoint}?${params}`);
+    }
+    if (!Array.isArray(page.items) || page.nextPageToken && (typeof page.nextPageToken !== 'string' || page.nextPageToken === current.pageToken)
+      || !page.nextPageToken && typeof page.nextSyncToken !== 'string') throw new ConnectorError('Calendar returned an incomplete sync page.', { connectorId: this.id });
+    const records = [], known = { ...(current.known || {}) }, seen = new Set(current.seen || []);
+    const at = new Date().toISOString();
+    for (const item of page.items) {
+      if (typeof item.id !== 'string' || !item.id) throw new ConnectorError('Calendar returned an incomplete event.', { connectorId: this.id });
+      const id = `google:calendar:primary:${item.id}`, cancelled = item.status === 'cancelled';
+      seen.add(item.id);
+      if (!cancelled && !Number.isFinite(Date.parse(item.updated))) throw new ConnectorError('Calendar returned incomplete event metadata.', { connectorId: this.id });
+      const modifiedAt = item.updated || at;
+      const revision = item.etag || item.updated || `cancelled:${current.syncToken || 'initial'}`;
+      let url = null;
+      try { const link = new URL(item.htmlLink); if (link.protocol === 'https:' && ['calendar.google.com', 'www.google.com'].includes(link.hostname) && !link.username && !link.password) url = link.href; } catch { /* absent provider URL */ }
+      records.push({ type: cancelled ? 'document.unavailable' : 'document.modified', providerEventId: `calendar:primary:${item.id}`, providerRevision: revision, operation: cancelled ? 'delete' : 'upsert', at: modifiedAt,
+        payload: { id, title: item.summary || known[item.id]?.title || '(Untitled event)', kind: 'calendar_event', content: cancelled ? undefined : [item.summary || '(Untitled event)', item.description || '', `Start: ${item.start?.dateTime || item.start?.date || ''}`, `End: ${item.end?.dateTime || item.end?.date || ''}`, item.location || '', ...(item.recurrence || [])].join('\n').slice(0, 32000),
+          modifiedAt, externalId: item.id, url, reason: cancelled ? 'cancelled' : undefined } });
+      if (cancelled) delete known[item.id]; else known[item.id] = { title: item.summary || '(Untitled event)' };
+    }
+    if (recovering && !page.nextPageToken) for (const id of Object.keys(known)) if (!seen.has(id)) {
+      records.push({ type: 'document.unavailable', providerEventId: `calendar:primary:${id}`, providerRevision: `recovery:${page.nextSyncToken}`, at, payload: { id: `google:calendar:primary:${id}`, reason: 'outside_recovered_calendar', modifiedAt: at } }); delete known[id];
+    }
+    if (Object.keys(known).length > 10000) throw new ConnectorError('Calendar observation exceeds 10,000 events.', { connectorId: this.id });
+    return { events: toNormalizedEvents(this.id, 'google', records), hasMore: Boolean(page.nextPageToken), cursor: { known,
+      ...(page.nextPageToken ? { pageToken: page.nextPageToken, syncToken: current.syncToken || null, timeMin: params.get('timeMin'), seen: [...seen], ...(recovering ? { recovering: true } : {}) } : { syncToken: page.nextSyncToken }) } };
   }
 
   /** Explicit user search, separate from proactive observation and task ingestion. */
@@ -444,23 +507,32 @@ export class GoogleWorkspaceConnector extends Connector {
       return { source, items, nextPageToken: nextPage(listing) };
     }
     const escaped = query.trim().replaceAll('\\', '\\\\').replaceAll("'", "\\'");
-    const params = new URLSearchParams({ q: `mimeType='${DOC_MIME}' and trashed=false and name contains '${escaped}'`, pageSize: String(limit),
+    const params = new URLSearchParams({ q: `(${Object.keys(TEXT_EXPORTS).map(type => `mimeType='${type}'`).join(' or ')}) and trashed=false and name contains '${escaped}'`, pageSize: String(limit),
       fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,modifiedTime)' });
     if (pageToken) params.set('pageToken', pageToken);
     const listing = await this.#request(`${DRIVE}/files?${params}`, { signal, beforeDispatch: guard });
     if (listing.incompleteSearch || !Array.isArray(listing.files || []) || (listing.files || []).length > limit) throw new ConnectorError('Drive returned an incomplete or invalid search page.', { connectorId: this.id, retryable: true });
     const items = (listing.files || []).map(file => {
-      if (typeof file.id !== 'string' || !file.id || typeof file.name !== 'string' || file.mimeType !== DOC_MIME) throw new ConnectorError('Drive returned an invalid document result.', { connectorId: this.id });
-      return { id: file.id, title: file.name, modifiedAt: file.modifiedTime || null, url: `https://docs.google.com/document/d/${encodeURIComponent(file.id)}/edit` };
+      if (typeof file.id !== 'string' || !file.id || typeof file.name !== 'string' || !supportedFile(file)) throw new ConnectorError('Drive returned an invalid document result.', { connectorId: this.id });
+      return { id: file.id, title: file.name, modifiedAt: file.modifiedTime || null, url: `https://docs.google.com/${TEXT_EXPORTS[file.mimeType]?.[1] || 'document'}/d/${encodeURIComponent(file.id)}/edit` };
     });
     guard();
     return { source, items, nextPageToken: nextPage(listing) };
   }
 
+  /** Re-read one source message before an action that depends on it. */
+  async sourceMessageState(id) {
+    if (!this.live || this.config?.readGmail === false || typeof id !== 'string' || !id) return { status: 'unknown' };
+    try {
+      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(id)}?format=minimal`);
+      return Array.isArray(message?.labelIds) && message.labelIds.includes('TRASH') ? { status: 'missing', reason: 'trashed' } : { status: 'present' };
+    } catch (error) { if (error.status === 404) return { status: 'missing', reason: 'deleted' }; throw error; }
+  }
+
   async listHistoricalEvents({ limit = 20 } = {}) {
     if (!this.live || this.config?.readGmail === false) return { events: [], networkCalls: 0, unavailable: true };
     const cap = Math.max(1, Math.min(20, Number(limit) || 20));
-    const listing = await this.#request(`${GMAIL}/users/me/messages?${new URLSearchParams({ q: 'newer_than:14d -in:chats', maxResults: String(cap) })}`);
+    const listing = await this.#request(`${GMAIL}/users/me/messages?${new URLSearchParams({ q: this.config.gmailQuery || 'newer_than:14d -in:chats -in:sent', maxResults: String(cap) })}`);
     let networkCalls = 1;
     const events = [];
     for (const message of (listing.messages || []).slice(0, cap)) {
@@ -473,10 +545,11 @@ export class GoogleWorkspaceConnector extends Connector {
   }
 
   async #pullGmail(cursor) {
-    const query = this.config.gmailQuery || 'newer_than:3d -in:chats';
+    const query = this.config.gmailQuery || 'newer_than:3d -in:chats -in:sent';
     let messageIds = [];
-    let historyId = cursor?.historyId || null;
+    let historyId = cursor?.query && cursor.query !== query ? null : cursor?.historyId || null;
     let resynced = false;
+    let removed = new Map();
 
     if (historyId) {
       try {
@@ -485,6 +558,7 @@ export class GoogleWorkspaceConnector extends Connector {
         // first page used to advance the cursor past mail that was never read.
         const history = await this.#collectHistory(historyId);
         messageIds = history.messageIds;
+        removed = history.removed;
         historyId = history.historyId || historyId;
       } catch (error) {
         // A too-old history cursor cannot be resumed; fall back to a bounded query
@@ -498,6 +572,10 @@ export class GoogleWorkspaceConnector extends Connector {
       }
     }
 
+    if (historyId && messageIds.length && this.config.gmailQuery) {
+      const matching = new Set(await this.#listMessageIds(query));
+      messageIds = messageIds.filter(id => matching.has(id));
+    }
     if (!historyId) {
       // Bootstrap (first run or expired cursor): capture the resume point BEFORE
       // listing. Mail that arrives during the listing is then picked up by the
@@ -521,20 +599,26 @@ export class GoogleWorkspaceConnector extends Connector {
         if (error.status === 404) continue;
         throw error;
       }
+      if ((message.labelIds || []).some(label => ['SENT', 'TRASH', 'DRAFT'].includes(label))) continue;
       events.push(...toNormalizedEvents(this.id, 'google', [this.#toEmailRecord(message)]));
+    }
+    for (const [id, reason] of removed) {
+      events.push(...toNormalizedEvents(this.id, 'google', [{ type: 'email.unavailable', providerEventId: `gmail-removed:${id}`, at: new Date().toISOString(), payload: { id, reason } }]));
     }
     return { events, cursor: { historyId, query, ...(resynced ? { resynced: true } : {}) } };
   }
 
   /** Read every messageAdded page; only the final page's historyId is a safe cursor. */
   async #collectHistory(startHistoryId) {
-    const ids = [];
+    const ids = [], removed = new Map();
     let pageToken = null;
     let historyId = startHistoryId;
     let pages = 0;
     const seenTokens = new Set();
     do {
-      const params = new URLSearchParams({ startHistoryId, historyTypes: 'messageAdded', maxResults: '100' });
+      const params = new URLSearchParams({ startHistoryId, maxResults: '100' });
+      // Deletions and moves to Trash invalidate work that relied on a message.
+      for (const type of ['messageAdded', 'messageDeleted', 'labelAdded']) params.append('historyTypes', type);
       if (pageToken) params.set('pageToken', pageToken);
       const page = await this.#request(`${GMAIL}/users/me/history?${params}`);
       if (page.history != null && !Array.isArray(page.history)) throw new ConnectorError('Gmail returned malformed history; the cursor was not advanced.', { connectorId: this.id });
@@ -549,6 +633,17 @@ export class GoogleWorkspaceConnector extends Connector {
           if (typeof message?.id !== 'string' || !message.id) throw new ConnectorError('Gmail returned an incomplete message addition; the cursor was not advanced.', { connectorId: this.id });
           ids.push(message.id);
         }
+        const deleted = entry.messagesDeleted, labelled = entry.labelsAdded;
+        if ((deleted != null && !Array.isArray(deleted)) || (labelled != null && !Array.isArray(labelled))) throw new ConnectorError('Gmail returned malformed message removals; the cursor was not advanced.', { connectorId: this.id });
+        for (const item of deleted || []) {
+          if (typeof item?.message?.id !== 'string' || !item.message.id) throw new ConnectorError('Gmail returned an incomplete message removal; the cursor was not advanced.', { connectorId: this.id });
+          removed.set(item.message.id, 'deleted');
+        }
+        for (const item of labelled || []) {
+          if (!Array.isArray(item?.labelIds) || !item.labelIds.includes('TRASH')) continue;
+          if (typeof item?.message?.id !== 'string' || !item.message.id) throw new ConnectorError('Gmail returned an incomplete message removal; the cursor was not advanced.', { connectorId: this.id });
+          removed.set(item.message.id, 'trashed');
+        }
       }
       if (page.historyId) historyId = page.historyId;
       pageToken = page.nextPageToken || null;
@@ -559,7 +654,7 @@ export class GoogleWorkspaceConnector extends Connector {
         throw new ConnectorError('Gmail history returned more than 100 pages; refusing to advance the cursor without consuming them.', { connectorId: this.id, retryable: true });
       }
     } while (pageToken);
-    return { messageIds: [...new Set(ids)], historyId };
+    return { messageIds: [...new Set(ids)].filter(id => !removed.has(id)), removed, historyId };
   }
 
   async #listMessageIds(query) {
@@ -655,7 +750,15 @@ export class GoogleWorkspaceConnector extends Connector {
         filesListingNewest: listed.filesListingNewest, filesListingTracking: listed.filesListingTracking } };
     }
 
-    const changes = await this.#driveChanges(pageToken);
+    let changes;
+    try { changes = await this.#driveChanges(pageToken); }
+    catch (error) {
+      if (![400, 410].includes(error.status)) throw error;
+      // Reset baseline before enumerating the entire readable set. Failed
+      // enumeration throws, retaining the old checkpoint for a safe retry.
+      const recovered = await this.#pullDrive({});
+      return { ...recovered, cursor: { ...recovered.cursor, recovering: recovered.hasMore === true }, recovery: 'expired' };
+    }
     const listed = await this.#driveFiles(current);
     return {
       events: dedupeEvents([...changes.events, ...listed.events]),
@@ -695,7 +798,7 @@ export class GoogleWorkspaceConnector extends Connector {
           events.push(this.#unavailableEvent(fileId, { title: file?.name, reason: 'removed', at: change.time, file }));
           continue;
         }
-        if (!file || file.mimeType !== DOC_MIME) continue;
+        if (!file || !supportedFile(file)) continue;
         if (file.trashed) {
           events.push(this.#unavailableEvent(file.id, { title: file.name, reason: 'trashed', at: change.time || file.modifiedTime, file }));
           continue;
@@ -753,16 +856,16 @@ export class GoogleWorkspaceConnector extends Connector {
   }
 
   /**
-   * Bounded read of Google Docs that already exist.
+   * Bounded read of supported Drive documents that already exist.
    *
    * Change tracking only sees edits after the baseline cursor, so a document
    * that has not changed since then would never be fetched. This lists at most
-   * DOCUMENT_LIST_LIMIT Docs, follows the list page token, and remembers the
+   * the configured document limit, follows the list page token, and remembers the
    * newest modified time so the next sync does not export the same revisions.
    * One inaccessible file is reported; it does not erase a file that exported.
    */
   async #driveFiles(cursor) {
-    const clauses = [`mimeType='${DOC_MIME}'`, 'trashed=false'];
+    const clauses = [`(${Object.keys(TEXT_EXPORTS).map(type => `mimeType='${type}'`).join(' or ')})`, 'trashed=false'];
     if (cursor.filesModifiedAfter) clauses.push(`modifiedTime > '${cursor.filesModifiedAfter}'`);
     const query = clauses.join(' and ');
     const files = [];
@@ -775,7 +878,7 @@ export class GoogleWorkspaceConnector extends Connector {
     let pages = 0;
 
     while (true) {
-      let url = `${DRIVE}/files?q=${encodeURIComponent(query)}&pageSize=20&orderBy=modifiedTime desc` +
+      let url = `${DRIVE}/files?q=${encodeURIComponent(query)}&pageSize=${Math.min(100, this.documentListLimit)}&orderBy=modifiedTime desc` +
         '&fields=nextPageToken,incompleteSearch,files(id,name,mimeType,modifiedTime,version)';
       if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
       let page;
@@ -791,12 +894,12 @@ export class GoogleWorkspaceConnector extends Connector {
       if (page.files != null && !Array.isArray(page.files)) throw new ConnectorError('Drive returned a malformed listing; the cursor was not advanced.', { connectorId: this.id });
       if (page.nextPageToken && (typeof page.nextPageToken !== 'string' || page.nextPageToken === pageToken)) throw new ConnectorError('Drive listing pagination did not advance; the cursor was not advanced.', { connectorId: this.id, retryable: true });
       for (const file of page.files || []) {
-        if (file.mimeType === DOC_MIME) files.push(file);
-        if (files.length >= DOCUMENT_LIST_LIMIT) break;
+        if (supportedFile(file)) files.push(file);
+
       }
       pageToken = page.nextPageToken || null;
       pages += 1;
-      if (files.length >= DOCUMENT_LIST_LIMIT || !pageToken || pages >= 5) break;
+      if (files.length >= this.documentListLimit || !pageToken || pages >= 5) break;
     }
 
     const events = [];
@@ -833,10 +936,11 @@ export class GoogleWorkspaceConnector extends Connector {
   }
 
   async #documentEvent(file, atFallback) {
-    const content = await this.#exportDocument(file.id);
+    const content = await this.#exportDocument(file.id, TEXT_EXPORTS[file.mimeType]?.[0]);
     const modifiedAt = file.modifiedTime ? new Date(file.modifiedTime).toISOString() : new Date().toISOString();
     const [event] = toNormalizedEvents(this.id, 'google', [{
-      providerEventId: `drive:${file.id}:${file.version || atFallback || modifiedAt}`,
+      providerEventId: `drive:${file.id}`,
+      providerRevision: file.version || atFallback || modifiedAt,
       type: 'document.modified',
       at: modifiedAt,
       payload: {
@@ -846,14 +950,15 @@ export class GoogleWorkspaceConnector extends Connector {
         content,
         modifiedAt,
         externalId: file.id,
-        url: `https://docs.google.com/document/d/${file.id}/edit`
+        url: `https://docs.google.com/${TEXT_EXPORTS[file.mimeType]?.[1] || 'document'}/d/${file.id}/edit`,
+        mimeType: file.mimeType
       },
       meta: { driveVersion: file.version || null }
     }]);
     return event;
   }
 
-  async #exportDocument(fileId) {
+  async #exportDocument(fileId, mimeType = 'text/plain') {
     const authHeaders = await this.auth.headers();
     const attempts = this.maxRetries + 1;
     let lastError = null;
@@ -864,7 +969,7 @@ export class GoogleWorkspaceConnector extends Connector {
       try {
         response = await withTimeout(
           Promise.resolve().then(() => this.fetchImpl(
-            `${DRIVE}/files/${encodeURIComponent(fileId)}/export?mimeType=text/plain`,
+            `${DRIVE}/files/${encodeURIComponent(fileId)}/export?mimeType=${mimeType}`,
             { headers: authHeaders, signal: controller.signal }
           )),
           this.#requestTimeoutMs(),
@@ -1015,9 +1120,13 @@ export function googleConfigFromEnv(env = process.env) {
     clientSecret: env.GOOGLE_CLIENT_SECRET || null,
     refreshToken: env.GOOGLE_REFRESH_TOKEN || null,
     accountEmail: env.GOOGLE_ACCOUNT_EMAIL || null,
+    accountId: env.GOOGLE_ACCOUNT_ID || null,
+    grantedScopes: (() => { try { const scopes = JSON.parse(env.GOOGLE_GRANTED_SCOPES || '[]'); return Array.isArray(scopes) ? scopes.filter(scope => typeof scope === 'string') : []; } catch { return []; } })(),
     gmailQuery: env.GOOGLE_GMAIL_QUERY || undefined,
+    documentListLimit: env.GOOGLE_DOCUMENT_LIST_LIMIT || undefined,
     readGmail: env.GOOGLE_READ_GMAIL !== 'false',
     readDrive: env.GOOGLE_READ_DRIVE !== 'false',
+    readCalendar: env.GOOGLE_READ_CALENDAR === 'true',
     sendEnabled: env.GOOGLE_SEND_ENABLED === 'true',
     docsWriteEnabled: env.GOOGLE_DOCS_WRITE_ENABLED === 'true',
     gmailDraftsEnabled: env.GOOGLE_DRAFTS_ENABLED === 'true',
