@@ -41,7 +41,8 @@ try {
   await page.waitForFunction(() => !document.querySelector('#durableDialog').open);
   await page.waitForFunction(() => !document.querySelector('.memory-inspector'));
   assert.equal(await page.locator('.memory-space-node').count(), 0);
-  assert.match(await page.locator('.memory-empty').innerText(), /No saved memories yet/);
+  assert.equal(await page.locator('.memory-result-open').count(), 0);
+  assert.match(await page.locator('.memory-empty').innerText(), /A place for what matters to remember/);
   checks.push('Forget previews dependencies and actually removes a saved memory');
   await page.goto(fixture.base + '/#preferences');
   await revealPanel(page, page.locator('[data-attention-settings] [name=hourly]'));

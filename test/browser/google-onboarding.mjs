@@ -97,6 +97,7 @@ try {
   record('pause-survives-reload-and-retains-the-last-check');
   await revealPanel(page, page.locator('#connectorContent [data-inspect-connection="google"]'));
   await page.locator('#connectorContent [data-inspect-connection="google"]').click();
+  await revealPanel(page, settings.locator('[data-preserve="google-diagnostics"] > summary'));
   await settings.locator('[data-preserve="google-diagnostics"] > summary').click();
   const cancelledPopup = page.waitForEvent('popup');
   await settings.locator('[data-google-reconnect]').click();

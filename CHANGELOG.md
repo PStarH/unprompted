@@ -2,7 +2,7 @@
 
 ## 0.4.0 — Unreleased
 
-- Self-hosted browser workspace for macOS and Windows; no desktop installer required. Windows runtime acceptance remains pending.
+- Self-hosted browser workspace for macOS and Windows; no desktop installer required. Hosted CI covers Windows installation, persistence and browser startup.
 - Source permissions, scoped platform actions, incremental synchronization and recovery improvements.
 - Permission refresh keeps narrowing changes read-only; artifact retries retain the original actor and review token. Mailbox formatting, encoded path boundaries and Google Docs readback receive stricter validation.
 - Memory exploration, MCP connection controls and task detail navigation.

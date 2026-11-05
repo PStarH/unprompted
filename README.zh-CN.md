@@ -39,7 +39,7 @@ Unprompted 留意你授权的来源，发现没人交办但值得处理的事，
 
 ## 快速开始
 
-**0.4.0 使用自托管网页版**，面向 macOS 与 Windows，也可在 Linux 运行 Node 服务。不需要 App、Docker 或付费服务器。安装 Node.js 22 或更新版本后，在终端或 Windows PowerShell 执行以下命令。Windows 运行验收仍待完成；Apple 备忘录和提醒事项仅支持 macOS。
+**0.4.0 使用自托管网页版**，面向 macOS 与 Windows，也可在 Linux 运行 Node 服务。不需要 App、Docker 或付费服务器。安装 Node.js 22 或更新版本后，在终端或 Windows PowerShell 执行以下命令。Windows 的依赖安装、本地数据恢复与浏览器首次启动已有托管 CI 验收；Apple 来源仅支持 macOS。
 
 **不需要任何账号即可体验：**
 

@@ -4,7 +4,7 @@
 
 ## Requirements
 
-Version 0.4.0 is a self-hosted web app. macOS and Windows use the same Node service and browser interface; Linux can also run it. No App installer or Docker is required. Windows runtime acceptance is pending. Apple Notes and Reminders are macOS-only.
+Version 0.4.0 is a self-hosted web app. macOS and Windows use the same Node service and browser interface; Linux can also run it. No App installer or Docker is required. Hosted Windows CI covers installation, selected-folder reads, restart recovery and browser startup. Apple sources are macOS-only.
 
 - Node.js **20+** with npm; **22+** is recommended.
 - Git to clone the repository. A source ZIP works too: extract it and open a

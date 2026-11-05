@@ -64,6 +64,7 @@ try {
  assert.equal(await page.locator('[data-dependency-answer="dep:human"]').inputValue(),'这段答案还没有提交：1200');
  assert.deepEqual(await page.locator('[data-dependency-answer="dep:human"]').evaluate(el=>[el.selectionStart,el.selectionEnd,document.activeElement===el]),[3,6,true]);
  record('shared-answer-and-selection-survive-live-update');
+ await revealPanel(page, page.locator('#taskContent [data-select-task="human-a"]'));
  await page.locator('#taskContent [data-select-task="human-a"]').click();
  const settings=page.locator('#taskContent details[data-preserve^="ws-management-"]');
  await page.locator('.ws-task-page .detail-focus-navigation').getByRole('tab', { name: '跟进设置', exact: true }).click();
@@ -96,6 +97,7 @@ try {
  record('closing-task-page-restores-task-focus');
  await emit(s=>{s.tasks[1].management.priority.score=120; s.tasks.push(make('human-new',150));});
  assert.equal(await page.locator('#taskContent [data-inspector-task]').count(),0,'Live updates must not reopen a closed task');
+ await revealPanel(page, page.locator('#taskContent [data-select-task="human-a"]'));
  await page.locator('#taskContent [data-select-task="human-a"]').click();
  const order=[await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task')];
  for(const expected of ['human-b','human-new']){
@@ -156,6 +158,7 @@ try {
  await page.screenshot({path:output+'/after-zh-1440.png',fullPage:true,animations:'disabled'});
  await emit(s=>{s.history.unshift({id:'record-task-entry',at:new Date().toISOString(),kind:'verification',text:'已核对任务来源',detail:'从日志进入对应任务',taskId:'human-a'});});
  await page.locator('[data-view="activity"]').click();
+ await page.locator('#homeRecord > .page-focus-navigation').getByRole('tab', { name: '跟进记录', exact: true }).click();
  const recordEntry=page.locator('#eventContent details.trace-event').filter({has:page.locator('[data-select-task="human-a"]')});
  await revealPanel(page, recordEntry.locator(':scope > summary'));
  await recordEntry.locator(':scope > summary').click();
@@ -165,6 +168,7 @@ try {
  assert.equal(await page.locator('#taskContent .ws-task-page').count(),1);
  record('activity-record-opens-the-selected-standalone-task-page');
  await page.keyboard.press('Escape');
+ await revealPanel(page, page.locator('#taskContent [data-select-task="human-a"]'));
  await page.locator('#taskContent [data-select-task="human-a"]').click();
  await page.locator('.ws-task-page .detail-focus-navigation').getByRole('tab', { name: '来源依据', exact: true }).click();
  assert.equal(await page.locator('#taskContent details[data-preserve^="full-evidence-"]').evaluate(el=>el.open),true);
