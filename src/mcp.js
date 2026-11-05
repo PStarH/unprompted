@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readRegularFile } from './local-files.js';
-import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfig, expandImportedServers, isGitReadTool } from './mcp-presets.js';
+import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfig, expandImportedServers, isGitPresetServer, isGitReadTool } from './mcp-presets.js';
 
 export { MCP_PRESETS };
 
@@ -172,24 +172,29 @@ export class McpManager {
       if (saved?.type === 'stdio' && (saved.command === 'npx' && JSON.stringify(saved.args) === JSON.stringify(legacyArgs) || saved.args?.length === 2 && /[/\\]src[/\\]mcp-key-server\.js$/.test(saved.args[0]) && saved.args[1] === id)) this.configs[id] = { ...saved, ...preset };
     }
     this.presetErrors = {};
-    let configs = this.configs;
-    try { configs = expandImportedServers(this.configs); }
-    catch (error) {
-      this.presetErrors.git = error.message;
-      configs = this.configs.git ? { ...this.configs, git: { ...this.configs.git, enabled: false } } : this.configs;
+    let expanded = this.configs;
+    let persist = null;
+    try {
+      const next = expandImportedServers(this.configs);
+      if (next !== this.configs) persist = next;
+      expanded = next;
+    } catch (error) {
+      Object.assign(this.presetErrors, error.serverErrors || { git: error.message });
+      if (error.servers) expanded = error.servers;
+      if (error.canonical && error.servers) persist = error.servers;
     }
-    let changed = configs !== this.configs;
-    const checked = { ...configs };
-    for (const [id, config] of Object.entries(checked)) {
-      try { validatePresetConfig(id, config); }
-      catch (error) {
-        this.presetErrors[id] = error.message;
-        if (config.enabled !== false) { checked[id] = { ...config, enabled: false }; changed = true; }
+    const runtime = { ...expanded };
+    for (const [id, config] of Object.entries(runtime)) {
+      if (!this.presetErrors[id]) {
+        try { validatePresetConfig(id, config); }
+        catch (error) { this.presetErrors[id] = error.message; }
       }
+      if (this.presetErrors[id] && config?.enabled !== false) runtime[id] = { ...config, enabled: false };
     }
-    this.configs = changed ? checked : configs;
-    if (changed && typeof this.configStore.write === 'function') {
-      try { this.configStore.write(this.configs); } catch { /* The in-memory correction still blocks connect. */ }
+    this.configs = Object.keys(this.presetErrors).length ? runtime : expanded;
+    // A missing directory is remembered only for this process. Canonical paths are saved.
+    if (persist && typeof this.configStore.write === 'function') {
+      try { this.configStore.write(persist); } catch { /* Canonical paths remain in memory. */ }
     }
     this.load = load; this.onChange = onChange; this.executableLookup = executableLookup; this.connections = new Map(); this.busy = false; this.closed = false; this.inFlight = 0;
     this.lockContext = new AsyncLocalStorage(); this.oauthBroker = null;
@@ -211,7 +216,7 @@ export class McpManager {
         status: connection?.status || 'disconnected', lastError: connection?.lastError || this.presetErrors[id] || null,
         allowDeclaredRead: config.allowDeclaredRead,
         tools: (connection?.tools || []).filter(tool => this.redact(String(tool.name)) === tool.name).map(tool => ({ name: tool.name, description: this.redact(String(tool.description || '')).slice(0, 500), inputSchema: this.redactMetadata(tool.inputSchema),
-          declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: this.isWrite(tool), allowed: this.allowed(config, tool) })),
+          declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: this.isWrite(id, config, tool), allowed: this.allowed(id, config, tool) })),
         resources: (connection?.resources || []).map(resource => ({ id: resourceId(resource.uri), name: this.redact(String(resource.name || '').slice(0, 300)), description: this.redact(String(resource.description || '').slice(0, 500)), allowed: config.enabled && config.readResources.includes(resourceId(resource.uri)) })) };
     }), presets: MCP_PRESETS.map(preset => ({
       id: preset.id, name: preset.name, category: preset.category, auth: preset.auth || (preset.requiresAuth ? 'key' : 'none'),
@@ -226,13 +231,13 @@ export class McpManager {
     })), limits: MCP_LIMITS };
   }
   #runtimeAvailable(command) { try { return Boolean(this.executableLookup(command)); } catch { return false; } }
-  isWrite(tool) {
-    if (isGitReadTool(tool?.name) && tool?.annotations?.destructiveHint !== true) return false;
+  isWrite(serverId, config, tool) {
+    if (isGitPresetServer(serverId, config) && isGitReadTool(tool?.name) && tool?.annotations?.destructiveHint !== true) return false;
     return tool?.annotations?.readOnlyHint !== true || tool?.annotations?.destructiveHint === true;
   }
-  allowed(config, tool) {
+  allowed(serverId, config, tool) {
     if (!config.enabled) return false;
-    if (this.isWrite(tool)) return (config.writeTools || []).includes(tool.name);
+    if (this.isWrite(serverId, config, tool)) return (config.writeTools || []).includes(tool.name);
     return config.readTools.includes(tool.name) || config.allowDeclaredRead === true;
   }
   async exclusive(fn) {
@@ -422,19 +427,19 @@ export class McpManager {
       const config = this.configs[serverId];
       if (!config || entry.status !== 'connected') continue;
       for (const tool of entry.tools) {
-        if (this.redact(String(tool.name)) !== tool.name || !this.allowed(config, tool) || tools.length >= (includeDispatcher ? MCP_LIMITS.tools : exposedLimit)) continue;
+        if (this.redact(String(tool.name)) !== tool.name || !this.allowed(serverId, config, tool) || tools.length >= (includeDispatcher ? MCP_LIMITS.tools : exposedLimit)) continue;
         const name = `mcp_${createHash('sha256').update(`${serverId}\0${tool.name}`).digest('hex').slice(0, 16)}`;
-        tools.push({ name, effect: this.isWrite(tool) ? 'write' : 'read', label: `${serverId} · ${tool.name}`, description: this.redact(`${serverId} / ${tool.name}: ${tool.description || ''}`).slice(0, 1000), parameters: this.redactMetadata(tool.inputSchema),
+        tools.push({ name, effect: this.isWrite(serverId, config, tool) ? 'write' : 'read', label: `${serverId} · ${tool.name}`, description: this.redact(`${serverId} / ${tool.name}: ${tool.description || ''}`).slice(0, 1000), parameters: this.redactMetadata(tool.inputSchema),
           execute: async (_id, args, signal) => {
-            if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
+            if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(serverId, this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
             if (!object(args) || JSON.stringify(args).length > 8000) throw fail('Invalid MCP tool arguments.');
             try {
               if (typeof entry.schemaValidator !== 'function') throw new Error('Validator unavailable');
               const validation = await entry.schemaValidator(tool.inputSchema)['~standard'].validate(args);
               if (validation.issues) throw new Error('Invalid arguments');
             } catch { throw fail('MCP tool arguments do not match the advertised schema.'); }
-            if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
-            const check = () => !signal?.aborted && !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.tools.includes(tool) && entry.status === 'connected' && this.allowed(this.configs[serverId] || { enabled: false }, tool);
+            if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(serverId, this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
+            const check = () => !signal?.aborted && !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.tools.includes(tool) && entry.status === 'connected' && this.allowed(serverId, this.configs[serverId] || { enabled: false }, tool);
             const invoke = async dispatchSignal => {
               if (!check()) throw fail('MCP action permission changed before dispatch.', 409);
             if (this.inFlight >= MCP_LIMITS.maxConcurrent) throw fail('MCP read concurrency limit reached. Retry later.', 429);
@@ -445,7 +450,7 @@ export class McpManager {
               const result = await entry.client.callTool({ name: tool.name, arguments: args }, {
                 timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs, signal: AbortSignal.any([entry.controller.signal, ...(dispatchSignal instanceof AbortSignal ? [dispatchSignal] : [])])
               });
-              if (!isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP task or connection changed during the call.', 409);
+              if (!isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || !this.allowed(serverId, this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP task or connection changed during the call.', 409);
               if (result.isError) throw fail('MCP tool reported an error.');
               // Text and structured data only. Never fetch returned image/resource URLs.
               const contents = (result.content || []).filter(item => item.type === 'text').map(item => item.text).join('\n');
@@ -455,7 +460,7 @@ export class McpManager {
             } catch (cause) { error = errorMessage(cause); throw fail(error, 502); }
             finally { this.inFlight--; onCall({ id: randomUUID(), serverId, tool: tool.name, status, startedAt, finishedAt: new Date().toISOString(), ...(error ? { error } : { text }) }); }
             };
-            if (this.isWrite(tool)) {
+            if (this.isWrite(serverId, this.configs[serverId], tool)) {
               if (!taskId || typeof executeWrite !== 'function') throw fail('MCP actions require an authorized durable task.', 403);
               const result = await executeWrite({ taskId, serverId, tool: tool.name, args, isCurrent, check, invoke });
               return { content: [{ type: 'text', text: JSON.stringify(result).slice(0, MCP_LIMITS.resultChars) }], details: {} };

@@ -23,8 +23,13 @@ export const RUNTIME_HINTS = Object.freeze({
 
 /** mcp-server-git does not declare readOnlyHint. These names are the read grant; add, commit, reset, checkout and create_branch stay off. */
 export const GIT_READ_TOOLS = Object.freeze(['git_status', 'git_log', 'git_diff', 'git_diff_unstaged', 'git_diff_staged', 'git_show', 'git_branch']);
+export function isGitPresetServer(id, config) {
+  return (id === 'git' || /^git-[1-9]\d*$/.test(id))
+    && config?.type === 'stdio' && config.command === 'uvx' && Array.isArray(config.args) && config.args[0] === 'mcp-server-git';
+}
+
 export function isGitReadTool(name) {
-  return typeof name === 'string' && (GIT_READ_TOOLS.includes(name) || /^git_diff(?:_|$)/.test(name));
+  return typeof name === 'string' && GIT_READ_TOOLS.includes(name);
 }
 
 export function scopePaths(value) {
@@ -314,6 +319,23 @@ function gitReadToolsMatch(tools) {
   return Array.isArray(tools) && GIT_READ_TOOLS.every(name => tools.includes(name));
 }
 
+const FILESYSTEM_PREFIX = Object.freeze(['-y', '@modelcontextprotocol/server-filesystem']);
+
+function filesystemPaths(config) {
+  if (!config || config.type !== 'stdio' || config.command !== 'npx' || !Array.isArray(config.args)) return null;
+  if (config.args.length <= FILESYSTEM_PREFIX.length || FILESYSTEM_PREFIX.some((arg, index) => config.args[index] !== arg)) return null;
+  return config.args.slice(FILESYSTEM_PREFIX.length);
+}
+
+function nextGitId(reserved) {
+  if (!reserved.has('git')) { reserved.add('git'); return 'git'; }
+  for (let n = 2; n < 1000; n += 1) {
+    const id = `git-${n}`;
+    if (!reserved.has(id)) { reserved.add(id); return id; }
+  }
+  throw new Error('No free server name for a Git repository.');
+}
+
 /**
  * mcp-server-git keeps only the last --repository. One imported `git` server
  * with several paths becomes `git`, `git-2`, `git-3`, ... each with one path.
@@ -323,21 +345,46 @@ export function expandImportedServers(servers) {
   if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return servers;
   let changed = false;
   const result = {};
+  const failures = {};
+  const reserved = new Set(Object.keys(servers));
   for (const [id, config] of Object.entries(servers)) {
-    const repos = id === 'git' || /^git-[1-9]\d*$/.test(id) ? gitRepositoryArgs(config) : null;
-    if (!repos?.length) { result[id] = config; continue; }
-    const canonical = scopePaths(repos.join('\n'));
-    if (id !== 'git' || canonical.length === 1) {
-      const repo = canonical[0];
-      if (canonical.length === 1 && repo === repos[0] && gitReadToolsMatch(config.readTools)) { result[id] = config; continue; }
+    try {
+      if (id === 'filesystem') {
+        const paths = filesystemPaths(config);
+        if (!paths?.length) { result[id] = config; continue; }
+        const canonical = scopePaths(paths.join('\n'));
+        if (canonical.length === paths.length && canonical.every((item, index) => item === paths[index])) { result[id] = config; continue; }
+        changed = true;
+        result[id] = { ...config, args: [...FILESYSTEM_PREFIX, ...canonical] };
+        continue;
+      }
+      const repos = id === 'git' || /^git-[1-9]\d*$/.test(id) ? gitRepositoryArgs(config) : null;
+      if (!repos?.length) { result[id] = config; continue; }
+      const canonical = scopePaths(repos.join('\n'));
+      if (id !== 'git' || canonical.length === 1) {
+        const repo = canonical[0];
+        if (canonical.length === 1 && repo === repos[0] && gitReadToolsMatch(config.readTools)) { result[id] = config; continue; }
+        changed = true;
+        result[id] = { ...config, args: ['mcp-server-git', '--repository', repo], readTools: [...GIT_READ_TOOLS] };
+        continue;
+      }
       changed = true;
-      result[id] = { ...config, args: ['mcp-server-git', '--repository', repo], readTools: [...GIT_READ_TOOLS] };
-      continue;
+      reserved.delete(id);
+      for (const repo of canonical) {
+        const serverId = nextGitId(reserved);
+        result[serverId] = { ...config, args: ['mcp-server-git', '--repository', repo], readTools: [...GIT_READ_TOOLS] };
+      }
+    } catch (error) {
+      failures[id] = error.message;
+      result[id] = config;
     }
-    changed = true;
-    canonical.forEach((repo, index) => {
-      result[index === 0 ? 'git' : `git-${index + 1}`] = { ...config, args: ['mcp-server-git', '--repository', repo], readTools: [...GIT_READ_TOOLS] };
-    });
+  }
+  if (Object.keys(failures).length) {
+    const error = new Error(Object.values(failures)[0]);
+    error.serverErrors = failures;
+    error.servers = changed ? result : servers;
+    error.canonical = changed;
+    throw error;
   }
   return changed ? result : servers;
 }

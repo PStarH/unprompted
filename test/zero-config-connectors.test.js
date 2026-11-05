@@ -211,6 +211,12 @@ test('zero-config MCP presets need no keys and explain a missing uvx or npx', as
   const expanded = expandImportedServers({ git: { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', repoA, '--repository', repoB], enabled: true } });
   assert.deepEqual(expanded.git.args, ['mcp-server-git', '--repository', fs.realpathSync(repoA)]);
   assert.deepEqual(expanded['git-2'].args, ['mcp-server-git', '--repository', fs.realpathSync(repoB)]);
+  const occupied = expandImportedServers({
+    git: { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', repoA, '--repository', repoB], enabled: true },
+    'git-2': { type: 'http', url: 'https://example.com/mcp', enabled: true }
+  });
+  assert.equal(occupied['git-2'].type, 'http');
+  assert.deepEqual(occupied['git-3'].args, ['mcp-server-git', '--repository', fs.realpathSync(repoB)]);
   assert.deepEqual(expanded.git.readTools, [...GIT_READ_TOOLS]);
   assert.ok(!expanded.git.args.includes(repoB) && expanded.git.args.filter(arg => arg === '--repository').length === 1);
   assert.deepEqual(buildPresetServerConfig('filesystem', { directories: `${notes}\n${repoA}` }).args.slice(2), [fs.realpathSync(notes), fs.realpathSync(repoA)]);
@@ -231,10 +237,13 @@ test('zero-config MCP presets need no keys and explain a missing uvx or npx', as
   assert.match(presets.find(preset => preset.id === 'git').runtime.hintZh, /uvx/);
   assert.equal(presets.find(preset => preset.id === 'filesystem').runtime.available, true);
   assert.equal(presets.find(preset => preset.id === 'deepwiki').connection.url, 'https://mcp.deepwiki.com/mcp');
-  assert.equal(manager.isWrite({ name: 'git_status' }), false);
-  assert.equal(manager.isWrite({ name: 'git_diff_unstaged' }), false);
-  assert.equal(manager.isWrite({ name: 'git_commit' }), true);
-  assert.equal(manager.isWrite({ name: 'git_add' }), true);
+  const gitServer = { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', repoA], enabled: true, readTools: [...GIT_READ_TOOLS], writeTools: [] };
+  assert.equal(manager.isWrite('git', gitServer, { name: 'git_status' }), false);
+  assert.equal(manager.isWrite('git-2', gitServer, { name: 'git_diff_unstaged' }), false);
+  assert.equal(manager.isWrite('git', gitServer, { name: 'git_diff_apply' }), true);
+  assert.equal(manager.isWrite('git', gitServer, { name: 'git_commit' }), true);
+  assert.equal(manager.isWrite('notes', { ...gitServer, command: 'node', args: ['evil.js'] }, { name: 'git_status' }), true);
+  assert.equal(manager.allowed('notes', { enabled: true, readTools: ['git_status'], allowDeclaredRead: true, type: 'stdio', command: 'uvx', args: ['mcp-server-git'] }, { name: 'git_diff_apply' }), false);
   const migrated = new McpManager({ configStore: { get: () => ({ fetch: { type: 'stdio', command: '/Users/sampan/.nvm/versions/node/v22.14.0/bin/node', args: ['/Users/sampan/Documents/GitHub/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true } }) }, executableLookup: () => null });
   assert.equal(migrated.configs.fetch.command, process.execPath);
   assert.ok(fs.existsSync(migrated.configs.fetch.args[0]));
@@ -244,9 +253,10 @@ test('zero-config MCP presets need no keys and explain a missing uvx or npx', as
   await manager.import({ mcpServers: { git: { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', repoA, '--repository', repoB], enabled: true } } }, { allowDeclaredRead: true });
   assert.equal(manager.configs.git.args.filter(arg => arg === '--repository').length, 1);
   assert.equal(manager.configs['git-2'].args.at(-1), fs.realpathSync(repoB));
-  assert.equal(manager.allowed(manager.configs.git, { name: 'git_log' }), true);
-  assert.equal(manager.allowed(manager.configs.git, { name: 'git_commit' }), false);
-  assert.equal(manager.allowed(manager.configs.git, { name: 'git_reset' }), false);
+  assert.equal(manager.allowed('git', manager.configs.git, { name: 'git_log' }), true);
+  assert.equal(manager.allowed('git', manager.configs.git, { name: 'git_commit' }), false);
+  assert.equal(manager.allowed('git', manager.configs.git, { name: 'git_reset' }), false);
+  assert.equal(manager.allowed('git', manager.configs.git, { name: 'git_diff_apply' }), false);
   const servers = manager.describe().servers;
   assert.equal(servers.find(item => item.id === 'git').status, 'failed');
   assert.match(servers.find(item => item.id === 'git').lastError, /uvx was not found/);
@@ -254,6 +264,29 @@ test('zero-config MCP presets need no keys and explain a missing uvx or npx', as
   await assert.rejects(manager.import({ mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', 'relative'] } } }), /absolute/);
   const page = fs.readFileSync(new URL('../public/mcp.js', import.meta.url), 'utf8');
   assert.doesNotMatch(page, /DEFAULT_PRESETS|mcp-server-git/);
+  const linkParent = directory(t);
+  const target = fs.mkdtempSync(path.join(linkParent, 'target-'));
+  const link = path.join(linkParent, 'link');
+  fs.symlinkSync(target, link);
+  const writes = [];
+  const missing = path.join(linkParent, 'missing-repo');
+  const remembering = new McpManager({ configStore: {
+    get: () => ({
+      git: { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', missing], enabled: true },
+      filesystem: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', link], enabled: true }
+    }),
+    write: value => writes.push(JSON.parse(JSON.stringify(value)))
+  }, executableLookup: () => null });
+  t.after(() => remembering.close());
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].git.enabled, true);
+  assert.equal(writes[0].git.args.at(-1), missing);
+  assert.equal(writes[0].filesystem.enabled, true);
+  assert.equal(writes[0].filesystem.args.at(-1), fs.realpathSync(target));
+  assert.equal(remembering.configs.git.enabled, false);
+  assert.match(remembering.describe().servers.find(item => item.id === 'git').lastError, /directory/);
+  assert.equal(remembering.configs.filesystem.enabled, true);
+  assert.equal(remembering.configs.filesystem.args.at(-1), fs.realpathSync(target));
 });
 
 test('a native read timeout keeps the previous cursor and does not retract evidence', async () => {
