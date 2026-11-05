@@ -1,5 +1,18 @@
 // Only authored UI literals are translated. Interpolated mail, names and evidence stay untouched.
 const messages = {
+  "件事": "tasks",
+  "要求与来源的对应内容": "Requirements and matching sources",
+  "正在留意": "Watching",
+  "最近做了什么": "Recent work",
+  "记得的事": "Remembered",
+  "条记忆": "memories",
+  "个范围": "scopes",
+  "尚未观察到": "Not observed yet",
+  "还没有连接来源": "No sources connected yet",
+  "连接一个来源": "Connect a source",
+  "还没有记录": "Nothing recorded yet",
+  "自动观察中": "Watching automatically",
+  "未开始观察": "Not watching yet",
   "待你处理": "To review",
   "记录": "Record",
   "日志": "Log",

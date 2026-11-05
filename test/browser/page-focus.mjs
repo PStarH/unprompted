@@ -13,6 +13,15 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(fixture.base);
   await page.locator('#taskContent .field-focus-nav').waitFor();
+  // Automatic grouping follows work out of an emptied section. A user's
+  // explicit choice, including an empty section, survives refresh and reload.
+  await page.waitForFunction(() => document.querySelector('#demoJourney')?.dataset.phase === 'ready');
+  await page.locator('#taskContent [data-state="needs_user"] [data-select-task]').waitFor();
+  await page.locator('#field-panel-working-tab').click();
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#field-panel-working-tab')?.getAttribute('aria-selected') === 'true');
+  assert.equal(await page.locator('#field-panel-working').isVisible(), true);
+  await page.locator('#field-panel-attention-tab').click();
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 960 });
     for (const name of ['home', 'activity', 'memory', 'sources', 'preferences']) {
@@ -42,7 +51,9 @@ try {
       assert.equal(await tabs.nth(1).getAttribute('aria-selected'), 'true');
       await tabs.nth(1).press('Home');
       assert.equal(await tabs.first().getAttribute('aria-selected'), 'true');
-      await view.locator('.page-focus-pager button').last().click();
+      const nextSection = nav.locator('..').locator(':scope > .page-focus-pager button').last();
+      if (await nextSection.isVisible()) await nextSection.click();
+      else await tabs.nth(1).click();
       assert.equal(await tabs.nth(1).getAttribute('aria-selected'), 'true');
       if (name === 'home') {
         const populated = view.locator('.ws-task-group[data-empty=false]');
@@ -76,8 +87,8 @@ try {
   await page.screenshot({ path: `${output}/memory-dark-390.png`, fullPage: true });
   await page.locator('[data-view=home]').click();
   await page.locator('#taskContent .field-focus-nav [role=tab]').first().click();
-  await page.locator('#taskStatusFilter').evaluate(el => { el.value = 'waiting'; el.dispatchEvent(new Event('change', { bubbles: true })); });
-  await page.waitForFunction(() => document.querySelector('#field-panel-waiting-tab')?.getAttribute('aria-selected') === 'true');
+  await page.locator('#taskStatusFilter').evaluate(el => { el.value = 'attention'; el.dispatchEvent(new Event('change', { bubbles: true })); });
+  await page.waitForFunction(() => document.querySelector('#field-panel-attention-tab')?.getAttribute('aria-selected') === 'true');
   await page.locator('#taskContent [data-select-task]:visible').first().click();
   await page.locator('.ws-task-page').waitFor();
   await page.screenshot({ path: `${output}/task-detail-390.png`, fullPage: true });

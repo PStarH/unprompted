@@ -1,6 +1,6 @@
 {
   "name": "unprompted-prototype",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "A proactive work partner: it notices work that was never assigned, gathers evidence, prepares an action, asks before acting, and verifies the result.",
   "license": "Apache-2.0",

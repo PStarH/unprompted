@@ -154,6 +154,7 @@ for (const [selector, definitions] of groups) {
 // Field groups are replaced on refresh. Restore the selected category without
 // moving application-owned nodes or interfering with task selection handlers.
 let fieldGroup = recall('tasks');
+let fieldSelectionExplicit = fieldGroup !== null;
 const taskHost = document.querySelector('#taskContent');
 let fieldFilter = null;
 function focusField() {
@@ -164,7 +165,8 @@ function focusField() {
   const filter = JSON.stringify([document.querySelector('#taskStatusFilter')?.value, document.querySelector('#taskSearch')?.value]);
   const filterChanged = fieldFilter !== null && fieldFilter !== filter;
   fieldFilter = filter;
-  if (filterChanged || !sections.some(section => section.dataset.group === fieldGroup)) {
+  const selectedSection = sections.find(section => section.dataset.group === fieldGroup);
+  if (filterChanged || !selectedSection || (!fieldSelectionExplicit && selectedSection.dataset.empty === 'true')) {
     fieldGroup = sections.find(section => section.dataset.empty !== 'true')?.dataset.group || sections[0].dataset.group;
   }
   const nav = document.createElement('div');
@@ -174,7 +176,7 @@ function focusField() {
   let updatePager = () => {};
   function select(index, focus = false) {
     fieldGroup = sections[index].dataset.group;
-    remember('tasks', fieldGroup);
+    if (fieldSelectionExplicit) remember('tasks', fieldGroup);
     sections.forEach((section, i) => {
       section.classList.toggle('page-focus-inactive', i !== index);
       nav.children[i].setAttribute('aria-selected', String(i === index));
@@ -202,18 +204,19 @@ function focusField() {
     section.setAttribute('aria-labelledby', button.id);
     section.setAttribute('role', 'tabpanel');
     section.tabIndex = 0;
-    button.addEventListener('click', () => select(index));
+    button.addEventListener('click', () => { fieldSelectionExplicit = true; select(index); });
     button.addEventListener('keydown', event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
       event.stopPropagation();
+      fieldSelectionExplicit = true;
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? sections.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + sections.length) % sections.length;
       select(next, true);
     });
     nav.append(button);
   });
   field.prepend(nav);
-  updatePager = addPager(nav, select, () => sections.findIndex(section => section.dataset.group === fieldGroup), sections.length);
+  updatePager = addPager(nav, index => { fieldSelectionExplicit = true; select(index); }, () => sections.findIndex(section => section.dataset.group === fieldGroup), sections.length);
   select(sections.findIndex(section => section.dataset.group === fieldGroup));
 }
 if (taskHost) {

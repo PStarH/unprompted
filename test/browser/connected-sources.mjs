@@ -84,16 +84,18 @@ try {
     record(`${id}-uses-provider-authorization-and-activates-without-restart`);
   }
   await page.reload();
-  await page.locator('#taskContent [data-task-card]').first().waitFor();
+  await page.locator('#taskContent [data-task-card]:visible').first().waitFor();
   assert.equal(await home.locator('.home-connections').evaluate(details => details.open), false);
   record('connected-home-opens-with-work-visible-and-source-management-collapsed');
   await page.waitForFunction(() => document.querySelectorAll('#taskContent [data-task-card]').length === 2);
   const issue = page.locator('#taskContent [data-task-card^="issue:"]');
+  const issuePanel = await issue.locator('..').locator('..').getAttribute('aria-labelledby');
+  await page.locator(`#${issuePanel}`).click();
   assert.match(await issue.innerText(), /GitHub.*team\/project/s);
   assert.match(await issue.innerText(), /Following assigned issue/);
   assert.equal(await issue.locator('[data-action="approve"]').count(), 0);
   await issue.locator('[data-select-task]').click();
-  await page.locator('#taskContent details[data-preserve^="full-evidence-"] > summary').click();
+  await page.locator('.ws-task-page .detail-focus-navigation').getByRole('tab', { name: 'Evidence', exact: true }).click();
   assert.match(await page.locator('#taskContent .ws-task-page').innerText(), /This issue is assigned to reader/);
   assert.equal(await page.locator('#taskDialog').count(), 0);
   record('assigned-issues-keep-native-provenance-in-the-task-page-without-an-email-send');
@@ -107,8 +109,11 @@ try {
   const githubCard = page.locator('#connectorContent [data-connection-card="github"]');
   await page.locator('[data-inspect-connection="github"]').click();
   assert.equal(await githubCard.locator('[data-select-connection="github"]').getAttribute('aria-expanded'), 'true');
+  const connectionTabs = page.locator('#connectorContent .connection-inspector .detail-focus-navigation');
+  await connectionTabs.getByRole('tab', { name: 'Status', exact: true }).click();
   assert.equal(await githubCard.locator('.source-detail-grid').isVisible(), true);
   assert.equal(await githubCard.locator('[data-connection-form]').count(), 1);
+  await connectionTabs.getByRole('tab', { name: 'Permissions', exact: true }).click();
   const apiGrant = page.locator('[data-platform-grant="github"]');
   await apiGrant.locator('[name=pathPrefix]').fill('/repos/team/project');
   await apiGrant.locator('[name=confirmed]').check();
@@ -128,6 +133,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.screenshot({ path: `${output}/connections-mobile.png`, animations: 'disabled' });
+  await page.locator('[data-close-connection-inspector]').click();
   await page.locator('[data-inspect-connection="microsoft"]').click();
   await page.waitForFunction(() => {
     const bounds = document.querySelector('.connection-inspector').getBoundingClientRect();
@@ -139,17 +145,20 @@ try {
   await page.locator('[data-inspect-connection="github"]').click();
   record('mobile-connection-inspector-opens-in-view-and-close-returns-to-the-source');
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await connectionTabs.getByRole('tab', { name: 'Account', exact: true }).click();
   await githubCard.locator('[data-select-connection="github"]').click();
   assert.equal(await githubCard.locator('[data-select-connection="github"]').getAttribute('aria-expanded'), 'false');
   assert.equal(await githubCard.locator('.source-detail-grid').count(), 0);
   record('connection-details-open-in-an-adjacent-inspector-and-close-in-place');
   const artifactDetails = page.locator('#artifactPermissions details').first();
-  await artifactDetails.locator('summary').click();
+  await page.locator('#viewSources > .page-focus-navigation').getByRole('tab', { name: 'Destinations', exact: true }).click();
+  if (!await artifactDetails.evaluate(details => details.open)) await artifactDetails.locator('summary').click();
   await page.selectOption('#languageSelect', 'zh-CN');
   assert.equal(await artifactDetails.evaluate(details => details.open), true);
   await page.selectOption('#languageSelect', 'en');
   assert.equal(await artifactDetails.evaluate(details => details.open), true);
   record('artifact-permission-details-remain-open-across-live-renders');
+  await page.locator('#viewSources > .page-focus-navigation').getByRole('tab', { name: 'Connections', exact: true }).click();
   await page.locator('#connectorContent [data-inspect-connection="microsoft"]').click();
   const microsoftForm = page.locator('#connectorContent [data-connection-form="microsoft"]');
   await microsoftForm.locator('[name="scopes"]').fill('Mail.Send');
@@ -158,6 +167,7 @@ try {
   await page.waitForFunction(async () => (await (await fetch('/api/setup')).json()).connections.microsoft.oauth.phase === 'connected');
   assert.ok(lastMicrosoftScopes.includes('Mail.Send'));
   await page.waitForFunction(() => document.querySelector('#artifactPermissions [data-artifact-scope="microsoft"] [name="scopes"]')?.value.includes('Mail.Send'));
+  await page.locator('#viewSources > .page-focus-navigation').getByRole('tab', { name: 'Destinations', exact: true }).click();
   const artifactSource = page.locator('#artifactPermissions [data-artifact-source="microsoft"]');
   await artifactSource.evaluate(details => { details.open = true; });
   const draftConsent = page.waitForEvent('popup');
@@ -179,6 +189,7 @@ try {
   assert.equal((await (await page.request.get(fixture.base + '/api/setup')).json()).connections.microsoft.readOnly, true);
   record('draft-consent-and-destination-grant-work-in-the-ui-and-revoke-without-enabling-send');
   record('outlook-draft-reauthorization-preserves-existing-action-scopes');
+  await page.locator('#viewSources > .page-focus-navigation').getByRole('tab', { name: 'Observation', exact: true }).click();
   const observation = page.locator('#observationContent');
   await observation.locator('[name="enabled"]').uncheck();
   await observation.locator('button[type="submit"]').click();
@@ -203,6 +214,7 @@ try {
   }
   record('both-languages-and-three-layout-widths-remain-readable-without-overflow');
   await page.selectOption('#languageSelect', 'en');
+  await page.locator('#viewSources > .page-focus-navigation').getByRole('tab', { name: 'Connections', exact: true }).click();
   const sources = page.locator('#connectorContent');
   await sources.locator('[data-inspect-connection="github"]').click();
   await sources.locator('[data-provider-operation="forget"][data-provider="github"]').click();

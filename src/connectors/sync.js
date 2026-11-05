@@ -28,6 +28,7 @@ export class ConnectorSync {
     this.timeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : null;
     this.running = false;
     this.lastRunAt = null;
+    this.pendingConnectors = new Map();
   }
 
   #revoked(connector) {
@@ -65,20 +66,35 @@ export class ConnectorSync {
    * A concurrent call is skipped rather than queued, so a slow provider cannot
    * build up a backlog of overlapping passes.
    */
-  async run() {
+  async run({ excludeIds = [] } = {}) {
     if (this.running) return { skipped: 'A sync is already running.', results: [] };
     this.running = true;
     this.lastRunAt = this.now();
     const results = [];
     try {
       for (const connector of this.connectors) {
-        if (!connector.live || this.#revoked(connector)) continue; // simulated connectors are driven by the scenario scheduler
-        results.push(await this.#syncOne(connector));
+        if (!connector.live || excludeIds.includes(connector.id)) continue;
+        const result = await this.runConnector(connector.id);
+        if (!result.skipped) results.push(result);
       }
       return { results };
     } finally {
       this.running = false;
     }
+  }
+
+  /** Independent sources can progress concurrently; one source never overlaps itself. */
+  runConnector(id, { afterCurrent = false, signal } = {}) {
+    if (signal?.aborted) return Promise.resolve({ connector: id, skipped: 'Observation stopped.' });
+    if (this.pendingConnectors.has(id)) {
+      const pending = this.pendingConnectors.get(id);
+      return afterCurrent ? pending.then(() => this.runConnector(id, { signal })) : pending;
+    }
+    const connector = this.connectors.find(item => item.id === id);
+    if (!connector?.live || this.#revoked(connector)) return Promise.resolve({ connector: id, skipped: 'Source unavailable.' });
+    const pending = this.#syncOne(connector).finally(() => this.pendingConnectors.delete(id));
+    this.pendingConnectors.set(id, pending);
+    return pending;
   }
 
   async #syncOne(connector) {

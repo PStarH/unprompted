@@ -4,6 +4,8 @@
 
 ## Requirements
 
+Version 0.4.0 is a self-hosted web app. macOS and Windows use the same Node service and browser interface; Linux can also run it. No App installer or Docker is required. Windows runtime acceptance is pending. Apple Notes and Reminders are macOS-only.
+
 - Node.js **20+** with npm; **22+** is recommended.
 - Git to clone the repository. A source ZIP works too: extract it and open a
   terminal inside the extracted directory.
@@ -16,7 +18,17 @@
   connector registration. Run `npm ci --include=optional` once for the pinned
   SQLite runtime and optional harness integrations. No frontend build is required.
 
-Check Node with `node --version`.
+Check Node with `node --version`. Use the commands below in macOS Terminal or Windows PowerShell. If SQLite cannot download a prebuilt binary, its native build requires the platform C++ toolchain (Visual Studio Build Tools on Windows). Prefer Node.js 22 on a supported architecture.
+
+## Upgrade, stop and remove
+
+Before replacing an earlier version, stop its service with **Ctrl+C** and back up the entire configuration directory described in [storage](CONFIGURATION.md#persistent-local-setup). Include any separately configured state directory and all SQLite companion files. Keep the backup private: it contains account credentials and source content. Do not copy a live database as an upgrade backup.
+
+Extract the new source into a separate directory, run `npm ci --include=optional`, then `npm start`. Use the same configuration/state paths to retain accounts and work. Do not run both versions against the same workspace. The 0.4.0 database upgrade is additive, but a previous application may refuse the newer schema: rollback requires stopping the new version and restoring the complete pre-upgrade backup before starting the previous version. An old executable alone is not a data rollback.
+
+Deleting the extracted source or an optional App does not delete the platform configuration directory. To remove private local data, stop the service and separately delete the configuration/state directories and any backups you made. Source files in selected folders and records already sent to providers are separate. This source distribution has no automatic updater.
+
+The default interface is local to the computer running the service. For a personal remote server, keep the loopback binding and use an SSH tunnel, for example `ssh -L 4173:127.0.0.1:4173 user@server`, then open `http://127.0.0.1:4173` locally. Loopback OAuth callbacks need their own forwards as well: the native Microsoft/Slack/Notion flow uses port 53682, MCP OAuth uses 53683, and Google chooses a temporary loopback port during sign-in. Add the matching SSH forwards before completing authorization; forwarding the web port alone does not make remote OAuth work. Remote OAuth acceptance has not been verified. Local file paths and MCP processes belong to the server, and macOS integrations require the server to be a Mac. The service has no built-in login: exposing its port publicly requires an independently configured access boundary.
 
 ## Start the model-backed agent
 

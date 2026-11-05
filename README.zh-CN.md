@@ -39,6 +39,8 @@ Unprompted 留意你授权的来源，发现没人交办但值得处理的事，
 
 ## 快速开始
 
+**0.4.0 使用自托管网页版**，面向 macOS 与 Windows，也可在 Linux 运行 Node 服务。不需要 App、Docker 或付费服务器。安装 Node.js 22 或更新版本后，在终端或 Windows PowerShell 执行以下命令。Windows 运行验收仍待完成；Apple 备忘录和提醒事项仅支持 macOS。
+
 **不需要任何账号即可体验：**
 
 ```sh
@@ -66,7 +68,7 @@ npm run demo
 **正常启动不会播放样例或生成虚构任务。**
 
 <details>
-<summary><strong>macOS 应用（Apple 芯片）</strong></summary>
+<summary><strong>旧版 macOS 应用预览（0.3.0，Apple 芯片）</strong></summary>
 
 从 [Releases](https://github.com/PStarH/unprompted/releases) 下载 `Unprompted-0.3.0-macos-arm64.zip`，用
 `shasum -a 256 -c Unprompted-0.3.0-macos-arm64.zip.sha256` 校验，解压后把 `Unprompted.app` 移到 `/Applications`。

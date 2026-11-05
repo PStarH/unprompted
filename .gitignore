@@ -6,6 +6,7 @@ outputs/
 .freebuff/
 docs/evidence/
 films/
+ui-archive/
 
 # Local runtime state and credentials.
 data/
@@ -26,7 +27,7 @@ mcp.json
 *.key
 
 # Tooling leftovers.
-node_modules/
+node_modules
 .browser-cache/
 .DS_Store
 ._*

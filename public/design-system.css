@@ -1,0 +1,289 @@
+/* ==========================================================================
+   Unprompted design system — final layer (loaded last).
+   Principle: narrow attention. One thing in focus, everything else quiet.
+   - Neutral palette, ONE accent (used only for the primary action + focus).
+   - System / Inter type, clear scale, generous spacing, hairline borders.
+   - No decorative shadows or motion; reduced-motion fully respected.
+   Earlier stylesheets remain for layout/behaviour; this file owns the look.
+   Roll back: remove the <link> to this file in index.html.
+   ========================================================================== */
+
+/* ---------- 1. Tokens ---------- */
+:root {
+  --ds-font: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --ds-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* type scale (px) */
+  --ds-text-xs: 12px; --ds-text-sm: 13px; --ds-text-md: 14px; --ds-text-lg: 16px;
+  --ds-title-sm: 18px; --ds-title-md: 22px; --ds-title-lg: 28px;
+  /* spacing (4px grid) */
+  --ds-1: 4px; --ds-2: 8px; --ds-3: 12px; --ds-4: 16px; --ds-5: 20px; --ds-6: 24px; --ds-8: 32px; --ds-10: 40px; --ds-12: 48px;
+  --ds-radius: 10px; --ds-radius-sm: 8px; --ds-radius-lg: 14px;
+  --ds-measure: 760px;       /* max reading width of the focused column */
+  --ds-dur: 120ms;           /* the only motion: colour changes on hover */
+  --radius: var(--ds-radius); --radius-sm: var(--ds-radius-sm);
+  --ctl-h: 36px; --ctl-radius: var(--ds-radius-sm);
+  --shadow-sm: none; --elev-1: none;
+  --elev-2: 0 12px 32px -12px rgb(15 17 21 / .18);
+  --ring: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent);
+  font-family: var(--ds-font);
+  font-feature-settings: "cv11", "ss01";
+  text-rendering: optimizeLegibility;
+}
+
+/* Default palette (mist) is remapped to the neutral system. Custom palettes
+   chosen in Settings → Appearance still apply untouched. !important is needed
+   because appearance.js writes palette tokens as inline styles. */
+:root[data-palette="mist"]:not([data-theme="dark"]), :root:not([data-palette]):not([data-theme="dark"]) {
+  --canvas: #f7f7f8 !important;
+  --surface: #ffffff !important;
+  --surface-quiet: #f3f3f5 !important;
+  --ink: #111318 !important;
+  --muted: #62666f !important;
+  --muted-soft: #8a8e97 !important;
+  --line: #e7e8eb !important;
+  --line-strong: #d3d5da !important;
+  --green: #2f5bea !important;          /* the one accent */
+  --green-strong: #2649c4 !important;
+  --green-light: #eef2fe !important;
+  --selected: #eef2fe !important;
+  --accent: #2f5bea !important;
+  --lime: #eef2fe !important;
+  --action-ink: #ffffff !important;
+  --hover: #f1f2f4 !important;
+  --sidebar: #f7f7f8 !important;
+  --sidebar-ink: #111318 !important;
+  --sidebar-muted: #62666f !important;
+  --sidebar-line: #e7e8eb !important;
+  --sidebar-active: #e9eaee !important;
+  --sidebar-active-ink: #111318 !important;
+  --amber: #9a5b13 !important; --amber-light: #fdf6ec !important;
+  --error: #c0362c !important; --error-light: #fdf1f0 !important;
+}
+:root[data-palette="mist"][data-theme="dark"], :root:not([data-palette])[data-theme="dark"] {
+  --canvas: #0f1012 !important;
+  --surface: #16171a !important;
+  --surface-quiet: #1b1c20 !important;
+  --ink: #ececef !important;
+  --muted: #9b9ea6 !important;
+  --muted-soft: #7c7f87 !important;
+  --line: #26282d !important;
+  --line-strong: #34363c !important;
+  --green: #7c9cff !important;
+  --green-strong: #9bb3ff !important;
+  --green-light: #1c2340 !important;
+  --selected: #1c2340 !important;
+  --accent: #7c9cff !important;
+  --lime: #1c2340 !important;
+  --action-ink: #0f1012 !important;
+  --hover: #1e1f23 !important;
+  --sidebar: #0f1012 !important;
+  --sidebar-ink: #ececef !important;
+  --sidebar-muted: #9b9ea6 !important;
+  --sidebar-line: #26282d !important;
+  --sidebar-active: #212227 !important;
+  --sidebar-active-ink: #ececef !important;
+  --amber: #f0b46a !important; --amber-light: #2a2116 !important;
+  --error: #ff8a80 !important; --error-light: #2c1817 !important;
+  --elev-2: 0 0 0 1px #26282d, 0 16px 40px -16px #000c;
+}
+
+/* ---------- 2. Base ---------- */
+html, body { background: var(--canvas); color: var(--ink); font-family: var(--ds-font); }
+body { font-size: var(--ds-text-md); line-height: 1.55; letter-spacing: -0.005em; }
+h1, h2, h3, h4 { color: var(--ink); letter-spacing: -0.015em; text-wrap: balance; }
+:where(p, li, dd) { text-wrap: pretty; }
+::selection { background: color-mix(in srgb, var(--green) 22%, transparent); }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+kbd { font-family: var(--ds-mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 1px; border-radius: 5px; background: var(--surface); color: var(--muted); box-shadow: none; padding: 1px 5px; }
+
+/* ---------- 3. Shell: quiet light rail + quiet top bar ---------- */
+.sidebar { background: var(--sidebar) !important; border-right: 1px solid var(--line) !important; }
+.sidebar .ws-logo { background: var(--ink) !important; color: var(--canvas) !important; border-radius: 9px !important; width: 32px !important; height: 32px !important; }
+.sidebar .ws-logo svg { width: 20px; height: 20px; }
+.sidebar .brand { margin-bottom: var(--ds-8) !important; }
+.sidebar .nav-item, html[lang] .sidebar .nav-item { color: var(--muted); border-radius: var(--ds-radius-sm); font-size: 11px; font-weight: 500; transition: color var(--ds-dur), background-color var(--ds-dur); }
+.sidebar .nav-item:hover { background: var(--hover) !important; color: var(--ink) !important; }
+.sidebar .nav-item.active, html[lang] .sidebar .nav-item.active { background: var(--sidebar-active) !important; color: var(--ink) !important; }
+.sidebar .nav-item svg { stroke-width: 1.6; }
+.sidebar-foot { border-top-color: var(--line) !important; }
+
+.topbar { background: color-mix(in srgb, var(--canvas) 92%, transparent) !important; border-bottom: 1px solid var(--line) !important; height: 56px !important; min-height: 56px !important; box-shadow: none !important; }
+.topbar .breadcrumb { font-size: var(--ds-text-sm); color: var(--muted); }
+.topbar .breadcrumb #pageCrumb { color: var(--ink); font-weight: 600; }
+.topbar .breadcrumb-slash { color: var(--line-strong); }
+.topbar .connection { font-size: var(--ds-text-xs); color: var(--muted); }
+.topbar .icon-button { color: var(--muted); }
+.topbar .icon-button:hover { color: var(--ink); background: var(--hover); }
+.topbar select:not([multiple]):not([size]) { border-color: transparent; background-color: transparent; box-shadow: none; color: var(--muted); }
+.topbar select:not([multiple]):not([size]):hover { background-color: var(--hover); }
+
+/* Footer repeats the sidebar status: hide it to reduce noise. */
+.main-footer { display: none !important; }
+
+/* ---------- 4. Controls ---------- */
+.primary-button, .secondary-button, .text-button, .icon-button { font-family: inherit; font-size: var(--ds-text-sm); font-weight: 500; letter-spacing: 0; border-radius: var(--ds-radius-sm) !important; box-shadow: none !important; filter: none !important; transition: background-color var(--ds-dur), border-color var(--ds-dur), color var(--ds-dur); }
+.primary-button { background: var(--green) !important; border-color: var(--green) !important; color: var(--action-ink) !important; }
+.primary-button:hover:not(:disabled) { background: var(--green-strong) !important; border-color: var(--green-strong) !important; }
+.secondary-button { background: var(--surface) !important; border: 1px solid var(--line-strong) !important; color: var(--ink) !important; }
+.secondary-button:hover:not(:disabled) { background: var(--hover) !important; }
+.text-button { color: var(--muted); }
+.text-button:hover { color: var(--ink); }
+.danger-button { color: var(--error) !important; }
+.icon-button { border-color: transparent; background: transparent; color: var(--muted); }
+.icon-button:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+:is(button, a):disabled { opacity: .45; }
+select:not([multiple]):not([size]), :where(input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="hidden"]):not([type="range"]), textarea) { box-shadow: none !important; border-color: var(--line-strong); background-color: var(--surface); font-family: inherit; }
+
+/* ---------- 5. Surfaces: flat, hairline, no shadow ---------- */
+.surface, .model-onboarding, .source-connection-card, .home-ambient, .ws-detail-drawer.is-inline, .decision-card, .mcp-panel > .surface { background: var(--surface); border: 1px solid var(--line) !important; border-radius: var(--ds-radius-lg) !important; box-shadow: none !important; }
+dialog { border: 1px solid var(--line) !important; border-radius: var(--ds-radius-lg) !important; background: var(--surface) !important; color: var(--ink); box-shadow: var(--elev-2) !important; }
+dialog::backdrop { background: rgb(15 17 21 / .32); backdrop-filter: none; }
+.toast { border-radius: var(--ds-radius) !important; box-shadow: var(--elev-2) !important; }
+
+/* ---------- 6. Page headings ---------- */
+.page-heading h1 { font-size: var(--ds-title-lg) !important; font-weight: 600 !important; letter-spacing: -0.02em !important; line-height: 1.2; }
+.page-heading p { color: var(--muted); font-size: var(--ds-text-md); max-width: 60ch; }
+.section-header h2, .surface > h2, .settings-copy h2 { font-size: var(--ds-text-lg) !important; font-weight: 600 !important; }
+
+/* ---------- 7. Workbench home: one column, one focus ---------- */
+#viewHome { max-width: 1080px; margin-inline: auto; }
+.ws-workspace-toolbar { gap: var(--ds-4); margin-bottom: var(--ds-6); }
+.field-total strong { font-size: 32px !important; letter-spacing: -0.03em !important; font-weight: 600 !important; }
+.field-total span { color: var(--muted); }
+.task-search-wrap { border-radius: var(--ds-radius-sm); }
+.task-search-wrap input { min-height: 36px; }
+
+/* Status tabs → quiet segmented underline, accent only on the active one */
+.page-focus-navigation > .page-focus-nav, .page-focus-nav { border-bottom: 1px solid var(--line) !important; padding: 0 !important; gap: var(--ds-1) !important; margin-bottom: var(--ds-6) !important; background: none !important; }
+.page-focus-navigation .page-focus-nav button, .page-focus-nav button { opacity: 1 !important; color: var(--muted) !important; background: transparent !important; border-radius: 0 !important; padding: 10px 12px !important; font-size: var(--ds-text-sm) !important; font-weight: 500 !important; box-shadow: none !important; border-bottom: 2px solid transparent !important; margin-bottom: -1px; transition: color var(--ds-dur); }
+.page-focus-navigation .page-focus-nav button:hover, .page-focus-nav button:hover { color: var(--ink) !important; }
+.page-focus-navigation .page-focus-nav button[aria-selected=true], .page-focus-nav button[aria-selected=true] { color: var(--ink) !important; font-weight: 600 !important; border-bottom-color: var(--ink) !important; background: transparent !important; }
+.page-focus-pager button { border: 1px solid var(--line) !important; background: var(--surface) !important; box-shadow: none !important; border-radius: var(--ds-radius-sm) !important; }
+
+/* Task rows: the work items. Clear title, one muted line. */
+.ws-task-group h3 { font-size: var(--ds-text-xs) !important; font-weight: 600 !important; color: var(--muted) !important; text-transform: none; letter-spacing: 0.01em; }
+.ws-task-row { border-radius: var(--ds-radius) !important; }
+.ws-task-select { border-radius: var(--ds-radius) !important; padding: 14px 16px !important; }
+.ws-task-select:hover { background: var(--hover) !important; }
+.ws-task-row.selected > .ws-row-main { background: var(--selected) !important; }
+.ws-task-select strong, .ws-task-select h3, .ws-task-select h4 { font-weight: 600; font-size: var(--ds-text-md); color: var(--ink); }
+
+/* Secondary home content (sources / recent / memory): demoted, lighter */
+.home-ambient { margin-top: var(--ds-10) !important; background: transparent !important; border-color: var(--line) !important; }
+.home-ambient h3 { font-size: var(--ds-text-xs) !important; font-weight: 600 !important; color: var(--muted) !important; letter-spacing: 0.01em; }
+.home-ambient, .home-ambient li { color: var(--muted); font-size: var(--ds-text-sm); }
+.home-ambient time { color: var(--muted-soft); font-variant-numeric: tabular-nums; }
+
+/* ---------- 8. Task page: a centred reading column ---------- */
+.ws-detail-drawer.is-page { max-width: var(--ds-measure) !important; background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--ds-radius-lg) !important; box-shadow: none !important; }
+.ws-detail-drawer.is-page .ws-task-page-bar { border-bottom: 1px solid var(--line); }
+.ws-detail-drawer.is-page .ws-inspector-heading :is(h1, h2) { font-size: var(--ds-title-md) !important; font-weight: 600 !important; letter-spacing: -0.02em !important; line-height: 1.25 !important; }
+.ws-detail-drawer.is-page .ws-task-update { color: var(--muted) !important; font-size: var(--ds-text-md) !important; }
+.ws-detail-drawer.is-page .ws-path li { color: var(--muted); }
+.ws-detail-drawer.is-page .ws-step-mark { border-color: var(--line-strong) !important; }
+.ws-detail-drawer:not(.is-page):not(.is-inline) { box-shadow: var(--elev-2) !important; border-left-color: var(--line) !important; }
+blockquote, .ws-detail-drawer blockquote { border-left: 2px solid var(--line-strong); color: var(--ink); }
+details > summary { color: var(--muted); }
+details > summary:hover { color: var(--ink); }
+
+/* ---------- 9. Status colour: dots/text only, never big fills ---------- */
+.sidebar-dot, .connection-dot { box-shadow: none !important; animation: none !important; }
+
+/* ---------- 10. Motion: none that is decorative ---------- */
+.connection-pulse, .ws-loading span { animation-duration: 1.6s; }
+.evidence-peek, .decision-receipt, .select-menu { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+/* ---------- 11. Tab rail: a single hairline, pager aligned to it ---------- */
+.page-focus-navigation { align-items: center !important; border-bottom: 1px solid var(--line) !important; margin-bottom: var(--ds-6) !important; gap: var(--ds-4) !important; }
+.page-focus-navigation > .page-focus-nav { border-bottom: 0 !important; margin: 0 !important; padding: 0 !important; }
+.page-focus-navigation .page-focus-nav button { min-height: 44px !important; margin-bottom: -1px; }
+.page-focus-pager { gap: var(--ds-1) !important; }
+.page-focus-pager button { width: 32px !important; height: 32px !important; min-height: 32px !important; color: var(--muted); }
+.page-focus-pager button:hover:not(:disabled) { color: var(--ink); background: var(--hover) !important; }
+
+/* ---------- 12. Consistent page width; vertical settings rail ---------- */
+.page-content > .view { max-width: 1080px; margin-inline: auto; width: 100%; }
+#viewPreferences .page-focus-navigation { border-bottom: 0 !important; }
+#viewPreferences .page-focus-nav button { border-bottom: 0 !important; margin-bottom: 0; border-radius: var(--ds-radius-sm) !important; text-align: left; }
+#viewPreferences .page-focus-nav button[aria-selected=true] { background: var(--sidebar-active) !important; }
+
+/* ---------- 13. Audit pass 2: consistent page column ---------- */
+.page-content > .view { max-width: 1040px !important; margin-inline: auto !important; }
+.page-content > .view :is(.activity-layout, .home-record, .memory-content, .connection-catalog, #connectorContent, .settings-page, .narrow-content, .mcp-panel, .activity-stream) { max-width: none; }
+
+/* Home task cards: size to content (no tall empty boxes) */
+.ws-task-row, .ws-task-select, .ws-task-group > div > article { min-height: 0 !important; height: auto !important; }
+.ws-task-group > div { align-items: start !important; }
+
+/* Form fields: always themed (legacy files hard-code #fff and greens) */
+:root input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="range"]):not([type="hidden"]), :root textarea, :root select { background-color: var(--surface) !important; color: var(--ink) !important; border-color: var(--line-strong) !important; }
+:root input::placeholder, :root textarea::placeholder { color: var(--muted-soft); }
+.task-search-wrap input { background: var(--surface) !important; }
+
+/* Section labels: sentence case, no shouting */
+.ws-context-section h3, .eyebrow { text-transform: none !important; letter-spacing: 0.01em !important; font-size: var(--ds-text-xs) !important; font-weight: 600 !important; color: var(--muted) !important; }
+
+/* Settings rail: the pager duplicates the list → hide visually (still in DOM) */
+#viewPreferences .page-focus-pager { display: none !important; }
+@media (max-width: 720px) {
+  .page-focus-navigation { flex-wrap: wrap; }
+  .page-focus-pager { display: none !important; }
+}
+
+/* ---------- 14. Legacy green palette (interactions.css) → tokens ---------- */
+.decision-modebar > div, .proof-mode { background: var(--surface-quiet) !important; border-color: var(--line) !important; }
+.decision-modebar button, .proof-mode button { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.decision-modebar button[aria-pressed="true"], .proof-mode button[aria-pressed="true"] { background: var(--surface) !important; color: var(--ink) !important; box-shadow: 0 0 0 1px var(--line) !important; }
+.decision-modebar > span, #decisionPosition, .deck-keyboard { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.deck-nav .icon-button { background: var(--surface) !important; color: var(--muted) !important; border: 1px solid var(--line) !important; }
+.deck-nav .icon-button:hover:not(:disabled), .decision-preview:hover { background: var(--hover) !important; color: var(--ink) !important; }
+#decisionDeckCurrent .task-card, #decisionDeckCurrent .decision-card { border-color: var(--line) !important; box-shadow: none !important; }
+.decision-preview { background: var(--surface) !important; border-color: var(--line) !important; color: var(--muted) !important; box-shadow: none !important; }
+
+.decision-receipt { background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--ds-radius) !important; }
+.receipt-mark { background: var(--green-light) !important; color: var(--green) !important; }
+.decision-receipt strong { color: var(--ink) !important; font-size: var(--ds-text-sm) !important; }
+.decision-receipt p { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.decision-receipt .icon-button { color: var(--muted) !important; }
+.decision-receipt[data-status="uncertain"] { background: var(--amber-light) !important; border-color: color-mix(in srgb, var(--amber) 25%, var(--line)) !important; }
+.decision-receipt[data-status="uncertain"] strong { color: var(--amber) !important; }
+.decision-receipt[data-status="uncertain"] .receipt-mark { background: var(--surface) !important; color: var(--amber) !important; }
+
+.proof-trigger { color: var(--muted) !important; }
+.proof-trigger > span { border-bottom-color: var(--line-strong) !important; }
+.proof-trigger small { color: var(--muted-soft) !important; font-size: 11px !important; }
+.proof-trigger:hover, .proof-trigger[aria-expanded="true"] { color: var(--ink) !important; }
+.change-lens { background: var(--surface-quiet) !important; border-color: var(--line) !important; color: var(--muted) !important; font-size: 11px !important; }
+.change-lens:hover { background: var(--hover) !important; color: var(--ink) !important; }
+
+.evidence-peek { background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--ds-radius-lg) !important; box-shadow: var(--elev-2) !important; color: var(--ink); }
+.evidence-peek > header { border-bottom-color: var(--line) !important; }
+.evidence-peek header .icon-button { color: var(--muted) !important; }
+.proof-source, .proof-source a { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.proof-source strong, .proof-new { color: var(--ink) !important; background: var(--surface-quiet) !important; font-size: 11px !important; }
+.proof-changes { background: var(--surface-quiet) !important; border-color: var(--line) !important; }
+.proof-change-title { color: var(--ink) !important; font-size: var(--ds-text-xs) !important; }
+.proof-changes p, .proof-row-body > p, .proof-empty p, .proof-footer { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; line-height: 1.6 !important; }
+.proof-row { border-bottom-color: var(--line) !important; }
+.proof-mark { color: var(--green) !important; }
+.proof-row.unmet .proof-mark, .proof-row-state, .proof-row-body small { color: var(--muted) !important; font-size: 11px; }
+.proof-row strong { color: var(--ink) !important; font-size: var(--ds-text-sm) !important; }
+.proof-row.unmet strong { color: var(--muted) !important; }
+.proof-row blockquote, .proof-historical { border-left-color: var(--line-strong) !important; color: var(--ink) !important; background: transparent !important; font-size: var(--ds-text-sm) !important; line-height: 1.6 !important; }
+.proof-caution { color: var(--amber) !important; background: var(--amber-light) !important; border-left-color: var(--amber) !important; font-size: var(--ds-text-xs) !important; line-height: 1.6 !important; }
+.proof-empty { color: var(--muted) !important; }
+.proof-footer .text-button { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+
+.task-next > span, .task-meta, .task-category, .task-bottom, .task-bottom .text-button, .state-badge.waiting, .management-line > span, .management-meta, .management-explanation, .wait-form label { color: var(--muted) !important; }
+.task-next > p { color: var(--ink) !important; }
+.task-management { background: var(--surface-quiet) !important; border: 1px solid var(--line); }
+.wait-form { border-top-color: var(--line) !important; }
+.shared-dependency { background: var(--surface) !important; border: 1px solid var(--line) !important; border-left: 2px solid var(--green) !important; border-radius: var(--ds-radius) !important; }
+.shared-dependency .eyebrow, .shared-dependency details { color: var(--muted) !important; }
+
+/* Top-bar language picker stays chrome-less (overrides the field rule above) */
+:root .topbar select { background-color: transparent !important; border-color: transparent !important; color: var(--muted) !important; }
+:root .topbar select:hover { background-color: var(--hover) !important; }

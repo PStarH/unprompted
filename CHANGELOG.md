@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — Unreleased
+
+- Self-hosted browser workspace for macOS and Windows; no desktop installer required. Windows runtime acceptance remains pending.
+- Source permissions, scoped platform actions, incremental synchronization and recovery improvements.
+- Permission refresh keeps narrowing changes read-only; artifact retries retain the original actor and review token. Mailbox formatting, encoded path boundaries and Google Docs readback receive stricter validation.
+- Memory exploration, MCP connection controls and task detail navigation.
+- Automatic task grouping follows work when its previous section becomes empty, while preserving explicit user choices.
+- Application bundles exclude local editor backups; privacy documentation describes actual credential storage and deletion limits.
+- Sources continue using periodic reconciliation. Real-time provider notifications are deferred to a later version.
+
 ## 0.3.0 — 2026-10-28
 
 Unprompted is an early, local-first proactive agent implementation. This preview

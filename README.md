@@ -60,6 +60,8 @@ focus or interrupt typing.
 
 ## Quick start
 
+Version **0.4.0** runs as a self-hosted web application on macOS and Windows (Linux can also run the Node service). No desktop app, Docker or paid hosting is required. Install Node.js 22 or newer, then run the commands below in Terminal or Windows PowerShell. Windows runtime acceptance is pending; Apple Notes and Reminders require macOS.
+
 **Try it without any account:**
 
 ```sh
@@ -94,7 +96,7 @@ emails, documents and work it found, and an empty result stays empty. **Normal
 startup never plays a sample or invents tasks.**
 
 <details>
-<summary><strong>macOS app (Apple silicon)</strong></summary>
+<summary><strong>Previous macOS app preview (0.3.0, Apple silicon)</strong></summary>
 
 Download `Unprompted-0.3.0-macos-arm64.zip` from
 [Releases](https://github.com/PStarH/unprompted/releases), check it with

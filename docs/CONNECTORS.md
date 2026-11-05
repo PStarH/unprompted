@@ -6,6 +6,10 @@ Connect a model, then choose a source on the home page. Authorization applies
 without restarting. You can connect several sources, pause observation, retry a
 failed read and disconnect one account while keeping the others connected.
 
+## Observation
+
+Sources use periodic incremental checks on this computer. Observation starts immediately after connection and resumes on restart. Keep the local service running; pause or disconnect to stop observation. Provider push notifications are deferred to a future version.
+
 ## Available connections
 
 | Source | Sign-in | What is observed | External actions |
