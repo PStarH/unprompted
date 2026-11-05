@@ -501,6 +501,62 @@ test('a new destination grant does not cancel a queued non-mail artifact', async
   assert.equal(context.connection.writes.length, 1);
 });
 
+test('a changed reply is not retried as an approved draft', async t => {
+  const context = await fixture(t, 'google');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  const approved = task.draft.body;
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  context.store.mutate(state => { state.tasks[context.taskId].draft.body = `${approved}\nUnapproved edit`; });
+  await context.runtime.artifacts.createGrant({ connectorId: 'google', targetId: 'drafts', project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'blocked');
+  assert.match(requests[0].error, /Review it before trying again/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a context retry happens once and does not chain', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseFirst;
+  let releaseSecond;
+  let markStarted;
+  let markSecond;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const second = new Promise(resolve => { markSecond = resolve; });
+  let phase = 'first';
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (phase === 'first') { phase = 'between'; markStarted(); await new Promise(resolve => { releaseFirst = resolve; }); phase = 'retry'; }
+    else if (phase === 'retry') { phase = 'second-wait'; markSecond(); await new Promise(resolve => { releaseSecond = resolve; }); phase = 'done'; }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  releaseFirst();
+  await second;
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Other' }, { confirmed: true });
+  releaseSecond();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2);
+  assert.equal(requests.every(item => item.status === 'blocked'), true, JSON.stringify(requests));
+  assert.equal(context.connection.writes.length, 0);
+});
+
 test('a permission refresh retries a draft that was cancelled before dispatch', async t => {
   const context = await fixture(t, 'google');
   context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));

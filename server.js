@@ -12,7 +12,7 @@ import { demoMemorySpace, demoMemoryDetail } from './src/demo-memory-space.js';
 import { buildRuntime } from './src/connectors/index.js';
 import { ConnectorSync } from './src/connectors/sync.js';
 import { createReasoner } from './src/reasoning.js';
-import { PermissionDeniedError } from './src/permissions.js';
+import { PermissionDeniedError, grantInvestigationDecision, shadowAfterFailedSourceRefresh } from './src/permissions.js';
 import { normaliseDateLocale } from './src/requests.js';
 import { GoogleAuth } from './src/connectors/google.js';
 import { GoogleDocsWriteProvider } from './src/document-delivery.js';
@@ -31,7 +31,7 @@ import { nativeSnapshot } from './src/connectors/local-snapshot.js';
 import { mailScopeRemoval } from './src/connectors/apple-mail.js';
 import { bindConnectionAccount } from './src/external-work.js';
 import { readRegularFile } from './src/local-files.js';
-import { McpManager, McpConfigStore } from './src/mcp.js';
+import { McpManager, McpConfigStore, mcpWritesWidened } from './src/mcp.js';
 import { McpOAuthBroker } from './src/mcp-oauth.js';
 import { SqliteStore } from './src/durable/store.js';
 import { DurableRuntime } from './src/durable/runtime.js';
@@ -502,24 +502,35 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     return publicSetupStatus();
   } catch (error) {
     if (!installed) {
-      heldPolicy.shadow = previousShadow;
-      if (engine.taskServices?.policy && engine.taskServices.policy !== heldPolicy) engine.taskServices.policy.shadow = previousTaskShadow;
-      if (documentProvider) documentProvider.shadow = previousDocShadow;
-      if (googleConnector) googleConnector.shadow = previousConnectorShadow;
+      // A narrowing refresh already failed closed. Do not put the previous
+      // writable flags back. A widening grant may restore the flags it had.
+      const shadow = shadowAfterFailedSourceRefresh({ widening, previousShadow });
+      heldPolicy.shadow = shadow;
+      if (engine.taskServices?.policy) engine.taskServices.policy.shadow = widening ? previousTaskShadow : true;
+      if (documentProvider) documentProvider.shadow = widening ? previousDocShadow : true;
+      if (googleConnector) googleConnector.shadow = widening ? previousConnectorShadow : true;
     }
     throw error;
   } finally { workspaceChanging = false; if (durableRuntime) { durableRuntime.suspended = false; durableRuntime.kick(); } }
 }
 
+function draftStillDispatching() {
+  return Object.values(store.state.tasks).some(task => (task.artifactRequests || []).some(request => request.family === 'email.draft' && (request.status === 'queued' || request.status === 'executing')));
+}
+
 function investigateAfterGrant() {
   const generation = sourceRefreshGeneration;
-  let timer;
-  const bounded = new Promise(resolve => { timer = setTimeout(resolve, 10_000); timer.unref?.(); });
-  void Promise.race([durableRuntime.whenIdle(), bounded]).then(() => {
-    clearTimeout(timer);
+  const wait = async (round = 0) => {
+    let timer;
+    const bounded = new Promise(resolve => { timer = setTimeout(resolve, 10_000); timer.unref?.(); });
+    try { await Promise.race([durableRuntime.whenIdle(), bounded]); }
+    finally { clearTimeout(timer); }
     if (generation !== sourceRefreshGeneration || shutdownPromise) return;
-    engine.investigateWithTools();
-  }).catch(() => {});
+    const decision = grantInvestigationDecision({ draftExecuting: draftStillDispatching(), round });
+    if (decision === 'defer') return wait(round + 1);
+    if (decision === 'investigate') engine.investigateWithTools();
+  };
+  void wait().catch(() => {});
 }
 
 function disconnectGoogleForThisRun() {
@@ -939,11 +950,18 @@ async function handleHttpRequest(req, res) {
       if (url.pathname === '/api/mcp/import' || /^\/api\/mcp\/servers\/[^/]+$/.test(url.pathname)) {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid MCP request body.' });
         if (demoMode) return json(res, 409, { error: 'Open your persistent workspace to connect MCP services.', code: 'DISPOSABLE_DEMO' });
+        const serverId = url.pathname === '/api/mcp/import' ? null : decodeURIComponent(url.pathname.split('/').pop());
+        const previousMcp = serverId ? mcp.configs[serverId] : null;
         const result = url.pathname === '/api/mcp/import'
           ? await mcp.import(body.config, { allowDeclaredRead: body.allowDeclaredRead === true })
-          : await mcp.update(decodeURIComponent(url.pathname.split('/').pop()), body);
-        if (Array.isArray(body.writeTools) && body.writeTools.length) {
-          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: true }); }
+          : await mcp.update(serverId, body);
+        const writesTouched = Array.isArray(body.writeTools) || body.enabled != null;
+        if (serverId && writesTouched) {
+          const widening = mcpWritesWidened(previousMcp, body);
+          if (widening && process.env.UNPROMPTED_SHADOW_MODE !== 'true') localSetup.setArtifactWrites(true);
+          if (widening || body.enabled === false || Array.isArray(body.writeTools)) {
+            await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: widening && process.env.UNPROMPTED_SHADOW_MODE !== 'true' });
+          }
         }
         engine.investigateWithTools();
         return json(res, 200, { mcp: result, setup: publicSetupStatus() });

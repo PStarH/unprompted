@@ -89,4 +89,19 @@ export class PermissionPolicy {
 
 export const defaultPolicy = new PermissionPolicy();
 
-export const permissionsApi = { ACTION_CLASSES, PermissionPolicy, PermissionDeniedError, defaultPolicy };
+/** A failed disconnect or scope removal stays read-only. A failed widening grant restores the prior flag. */
+export function shadowAfterFailedSourceRefresh({ widening, previousShadow }) {
+  return widening ? previousShadow === true : true;
+}
+
+/**
+ * After the grant response's bounded wait, do not start a tool investigation
+ * while a draft is still dispatching. One extra wait is enough; then skip.
+ */
+export function grantInvestigationDecision({ draftExecuting, round, maxRounds = 1 } = {}) {
+  if (draftExecuting && round < maxRounds) return 'defer';
+  if (draftExecuting) return 'skip';
+  return 'investigate';
+}
+
+export const permissionsApi = { ACTION_CLASSES, PermissionPolicy, PermissionDeniedError, defaultPolicy, shadowAfterFailedSourceRefresh, grantInvestigationDecision };

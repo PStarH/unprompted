@@ -86,7 +86,7 @@ export class ArtifactActions {
     const activation = this.runtime.activationFor(task);
     if (!activation.activate || !explicit && (activation.requiresReview || task.guidanceReviewRequired || !grant.automatic)) throw fail('This task requires individual review before creating an artifact.');
   }
-  request(taskId, input, { actor = 'harness', isCurrent = () => false, reviewToken = null, retryInterrupted = false } = {}) {
+  request(taskId, input, { actor = 'harness', isCurrent = () => false, reviewToken = null, retryInterrupted = false, contextRetry = false } = {}) {
     if (!knownKeys(input, ['grantId', 'title', 'body']) || !text(input.grantId, 80)) throw fail('Invalid artifact request.', 'INVALID_ARTIFACT', 400);
     const task = this.runtime.tasks.get(taskId), grant = this.grants().find(item => item.id === input.grantId);
     if (!task) throw fail('Task not found.', 'MISSING_TASK', 404);
@@ -116,6 +116,7 @@ export class ArtifactActions {
       connectorId: grant.connectorId, family: grant.family, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch,
       contextVersion: Number(this.database.get('context_version')), payload: { ...payload, idempotencyKey: key },
       ...(grant.family === 'email.draft' ? { draftToken: draftReviewToken(task) } : {}),
+      ...(contextRetry ? { contextRetry: true } : {}),
       explicit, status: 'queued', createdAt: iso(this.database.now()) };
     this.engine.store.mutate(state => {
       state.tasks[taskId].artifactRequests = [...(state.tasks[taskId].artifactRequests || []), request];
@@ -188,13 +189,25 @@ export class ArtifactActions {
       const staleContext = request.contextVersion !== Number(this.database.get('context_version'));
       const notDispatched = !execution || execution.status === 'cancelled' || execution.status === 'intent';
       if (staleContext && notDispatched && !['dispatched', 'accepted', 'unknown'].includes(execution?.status)) {
-        this.record(task.id, request.id, { status: 'blocked', error: 'The destination authorization changed before dispatch. A new attempt was queued.' });
         const grant = this.grants().find(item => item.id === request.grantId && item.status === 'active');
         const current = this.runtime.tasks.get(task.id);
-        if (grant && current && !current.artifactRequests?.some(item => item.grantId === grant.id && item.inputVersion === current.inputVersion && !['blocked', 'undone'].includes(item.status))) {
+        const email = grant?.family === 'email.draft';
+        const draftStillApproved = !email || request.draftToken === draftReviewToken(current);
+        const retryable = Boolean(grant && current && !request.contextRetry && draftStillApproved
+          && !current.artifactRequests?.some(item => item.id !== request.id && item.grantId === grant.id && item.inputVersion === current.inputVersion && !['blocked', 'undone'].includes(item.status)));
+        this.record(task.id, request.id, { status: 'blocked', error: !draftStillApproved
+          ? 'The prepared reply changed. Review it before trying again.'
+          : retryable
+            ? 'The destination authorization changed before dispatch. A new attempt was queued.'
+            : 'Authorization or task context changed. Review the task before trying again.' });
+        if (retryable) {
           try {
-            this.request(task.id, grant.family === 'email.draft' ? { grantId: grant.id } : { grantId: grant.id, title: request.payload.title, body: request.payload.body },
-              { actor: request.explicit ? 'user' : 'activation', retryInterrupted: true, reviewToken: request.explicit ? draftReviewToken(current) : null });
+            // Mail retries only the reply whose review token still matches.
+            // Recomputing the token here would approve whatever the draft says now.
+            this.request(task.id, email ? { grantId: grant.id } : { grantId: grant.id, title: request.payload.title, body: request.payload.body },
+              email
+                ? { actor: 'user', retryInterrupted: true, contextRetry: true, reviewToken: request.draftToken }
+                : { actor: request.explicit ? 'user' : 'activation', retryInterrupted: true, contextRetry: true, ...(request.explicit ? { reviewToken: draftReviewToken(current) } : {}) });
           } catch { /* the blocked attempt stays visible for review */ }
         }
         return;

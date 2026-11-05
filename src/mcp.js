@@ -8,6 +8,15 @@ import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfi
 
 export { MCP_PRESETS };
 
+/** A write-tool update widens access only when it adds a tool or turns a disabled server on. */
+export function mcpWritesWidened(previous, { writeTools, enabled } = {}) {
+  const oldTools = new Set(previous?.writeTools || []);
+  const nextTools = Array.isArray(writeTools) ? writeTools : [...oldTools];
+  const addsTool = nextTools.some(tool => !oldTools.has(tool));
+  const enables = enabled === true && previous?.enabled !== true;
+  return addsTool || enables;
+}
+
 export function findExecutable(command, pathValue = stdioEnvironment().PATH) {
   if (typeof command !== 'string' || !/^[A-Za-z0-9._-]{1,40}$/.test(command)) return null;
   for (const dir of String(pathValue || '').split(path.delimiter)) {
