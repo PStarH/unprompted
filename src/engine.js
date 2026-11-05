@@ -16,9 +16,10 @@ import { STRATEGY_IDS } from './probes/strategies.js';
 import { determineFreshness, runRecord, relevantRuns } from './freshness.js';
 import { evidenceSignature, claim, unknownItem, sourceRef, evidenceItem } from './evidence.js';
 import { PermissionPolicy, PermissionDeniedError } from './permissions.js';
+import { Autonomy } from './autonomy.js';
 import { ToolSafetyGateway, validReceipt } from './tool-gateway.js';
 import { SimulatedMailProvider, UncertainDeliveryError } from './providers.js';
-import { validateEventPayload, EVENT_TYPES, REGISTRY_EVENT_TYPES } from './connectors/events.js';
+import { normalizeEvent, validateEventPayload, EVENT_TYPES, REGISTRY_EVENT_TYPES } from './connectors/events.js';
 import { createReasoner } from './reasoning.js';
 import {
   notification, emitNotification, resolveNotifications, markRead, openNotifications, summarise, deadlineRisk
@@ -34,7 +35,7 @@ import { chooseVerificationDepth, compareAcrossSources, applySourceConflicts, CR
 import { traceEntry, appendTrace, explainDecision, summariseDecision } from './trace.js';
 import { TaskServices } from './task-services.js';
 import { projectWorkspaceTaskManagement } from './task-management.js';
-import { draftReviewToken } from './draft-review.js';
+import { draftReviewToken, preparedWorkReviewToken } from './draft-review.js';
 import { REASONING_RECOVERY, reasoningFailure, reasoningMayResume } from './reasoning-recovery.js';
 import { ingestAssignedIssue, ingestGitHubWork, ingestObservedTask, isSourceFollowTask } from './external-work.js';
 import { publicSourceCursors } from './connectors/connector.js';
@@ -63,6 +64,7 @@ const record = (state, kind, text, taskId = null, eventId = null) => {
   state.history.push({ id: `h-${state.history.length + 1}`, at: stamp(), kind, text, taskId, eventId });
 };
 const sourceTimestamp = (message, event) => {
+  if (Number.isFinite(Date.parse(message.updatedAt))) return message.updatedAt;
   const raw = message?.receivedAt || event?.at || stamp();
   const time = Date.parse(raw);
   return Number.isFinite(time) ? new Date(time).toISOString() : stamp();
@@ -112,7 +114,7 @@ const isSettled = task => task.status === 'completed' || task.status === 'cancel
  * assessment, approval and retry all treat them as absent.
  */
 const documentAvailable = document => Boolean(document) && document.available !== false;
-const nativeObservation = (event, doc) => ['local_files', 'apple_notes'].includes(event.source) && event.connectorId === event.source
+const nativeObservation = (event, doc) => ['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_contacts', 'todoist'].includes(event.source) && event.connectorId === event.source
   && String(doc.id).startsWith(`${event.source}:`) && Number.isSafeInteger(doc.sourceObservationRevision) && doc.sourceObservationRevision > 0;
 
 /** Delivery progress follows requirements and blockers, independently of source revision churn. */
@@ -155,10 +157,14 @@ export class WorkEngine {
     this.documentProvider = documentProvider;
     this.policy = policy;
     this.reasoner = reasoner || createReasoner(process.env);
-    this.externalTools = externalTools ? scope => {
-      const tools = externalTools(scope);
+    this.externalTools = (scope = {}) => {
+      const provided = externalTools?.(scope) || [];
+      const shared = this.durableRuntime?.tools(scope) || [];
+      // Workspace tools are owned by the current runtime. One adapter per name
+      // prevents server-specific wiring from changing task source semantics.
+      const tools = [...new Map([...provided, ...shared].map(tool => [tool.name, tool])).values()];
       return this.durableRuntime && scope.taskId ? this.durableRuntime.wrapReadTools(tools, scope.taskId) : tools;
-    } : null;
+    };
     this.mode = mode || store.state.mode || 'simulation';
     this.stallAfterMs = Number.isFinite(Number(stallAfterMs)) ? Math.max(0, Number(stallAfterMs)) : DEFAULT_STALL_AFTER_MS;
     // Numeric dates are read only from explicit configuration or a
@@ -175,6 +181,8 @@ export class WorkEngine {
     this.planCache = new PlanCache();
     this.taskServices = new TaskServices(this, { documentProvider });
     this.toolGateway = new ToolSafetyGateway(this);
+    this.autonomy = new Autonomy(this);
+    this.policy.temporaryAuthorization = (approval, taskId) => this.autonomy.authorize(approval, taskId);
     if (!store.durable) this.recover();
   }
 
@@ -191,7 +199,7 @@ export class WorkEngine {
     return this.dateLocale;
   }
 
-  changed() { this.onChange(this.publicState()); }
+  changed() { this.autonomy?.schedule(); this.onChange(this.publicState()); }
 
   /**
    * Track in-flight asynchronous work.
@@ -208,9 +216,11 @@ export class WorkEngine {
   }
 
   async whenSettled() {
+    await this.autonomy.whenIdle();
     // Finishing one job can start another, such as a scoped send after model refinement.
     while (this.pending.size) await Promise.allSettled([...this.pending]);
     if (this.durableRuntime && !this.durableRuntime.inWorker()) await this.durableRuntime.whenIdle();
+    await this.autonomy.whenIdle();
   }
 
   /** Settle a provider call synchronously when the provider is synchronous. */
@@ -226,6 +236,7 @@ export class WorkEngine {
     const managementByTaskId = projectWorkspaceTaskManagement(taskValues, state, now);
     return {
       revision: state.revision,
+      autonomy: this.autonomy.describe(),
       ...(this.durableRuntime ? { durable: this.durableRuntime.describe() } : {}),
       ...(this.durableRuntime ? { groundedMemories: this.store.db.prepare('SELECT id,scope_type,scope_key,content,version,source_kind,source_id FROM user_memories').all() } : {}),
       mode: this.mode,
@@ -235,6 +246,7 @@ export class WorkEngine {
       tasks: taskValues.map(task => ({
         ...task,
         reviewToken: draftReviewToken(task),
+        preparedWorkReviewToken: preparedWorkReviewToken(task),
         management: managementByTaskId.get(task.id)
       })),
       taskWaits: Object.values(state.taskWaits || {}),
@@ -291,6 +303,7 @@ export class WorkEngine {
   // ---------------------------------------------------------------- ingestion
 
   ingest(input) {
+    if (!input?.id && (input?.providerRevision != null || input?.providerEtag != null)) input = { ...input, ...normalizeEvent(input) };
     return this.durableRuntime ? this.durableRuntime.ingest(input, event => this.ingestLegacy(event)) : this.ingestLegacy(input);
   }
 
@@ -307,7 +320,10 @@ export class WorkEngine {
       relations: [],
       disposition: '',
       payload: input.payload,
-      meta: input.meta || {}
+      meta: input.meta || {},
+      providerRevision: input.providerRevision ?? null,
+      providerEtag: input.providerEtag ?? null,
+      operation: input.operation || 'upsert'
     };
     if (this.durableRuntime && input.activation) event.activation = input.activation;
     if (input.suppressForwardActivation === true) event.suppressForwardActivation = true;
@@ -332,6 +348,7 @@ export class WorkEngine {
     else if (event.type === 'task.observed') { result = ingestObservedTask(this.store, event); if (result.taskId) this.#maybeInvestigateNativeTask(result.taskId); this.changed(); }
     else if (event.type === 'document.modified') result = this.#ingestDocument(event);
     else if (event.type === 'document.unavailable') result = this.#ingestDocumentUnavailable(event);
+    else if (event.type === 'email.unavailable') result = this.#ingestEmailUnavailable(event);
     else if (REGISTRY_EVENT_TYPES.includes(event.type)) result = this.#ingestRunRecord(event);
     else if (event.type === 'timer.due') {
       event.disposition = 'timer_due'; event.summary = 'Scheduled Situation reevaluation';
@@ -358,6 +375,7 @@ export class WorkEngine {
   }
 
   #appendCommitmentSource(task, request, message, event, kind = 'duplicate') {
+    if (event.operation === 'update' && request) delete task.sourceUnavailable;
     const at = sourceTimestamp(message, event);
     const revision = Number(task.commitment?.revision || 1);
     task.commitment = task.commitment || commitmentScope(request || task.request, message);
@@ -457,6 +475,7 @@ export class WorkEngine {
     task.requestHistory = task.requestHistory || [];
     task.requestHistory.push(this.#requestHistoryEntry(task.request, message, event, 'superseded', oldRevision, at));
     task.request = latestRequest;
+    if (event.operation === 'update') delete task.sourceUnavailable;
     task.commitment = task.commitment || commitmentScope(latestRequest, message);
     task.commitment.revision = nextRevision;
     task.commitment.signature = nextSignature;
@@ -551,7 +570,14 @@ export class WorkEngine {
 
   #ingestEmail(event, { confirmedCancellation = false } = {}) {
     const message = event.payload;
-    const sourceAt = sourceTimestamp(message, event);
+    const previousMessage = this.store.state.inbox.find(item => item.id === message.id && item.connectorId === event.connectorId);
+    event.operation = previousMessage ? 'update' : 'create';
+    const sourceAt = message.updatedAt || sourceTimestamp(message, event);
+    if (previousMessage && Number.isFinite(Date.parse(previousMessage.updatedAt)) && Date.parse(sourceAt) < Date.parse(previousMessage.updatedAt)) {
+      event.disposition = 'stale_change'; event.summary = 'Older message revision ignored';
+      this.store.mutate(state => state.events.push(event));
+      return { duplicate: false, id: event.id, disposition: event.disposition };
+    }
     const threadKey = message.threadId ? String(message.threadId) : `message:${message.id}`;
     const generation = (this.threadGenerations.get(threadKey) || 0) + 1;
     this.threadGenerations.set(threadKey, generation);
@@ -582,11 +608,15 @@ export class WorkEngine {
     const feedbackSuppress = feedbackMatches.find(item => item.effect === 'suppress_scoped_candidate');
     const feedbackHandled = feedbackMatches.find(item => item.effect === 'ignore_as_already_handled');
     const feedbackDuplicate = feedbackMatches.find(item => item.effect === 'associate_with_existing_task');
-    selected = matchCandidates.length === 1 ? matchCandidates[0] : null;
+    const editedTargets = previousMessage ? Object.values(state.tasks || {}).filter(task => !isSettled(task) && task.sourceConnectorId === event.connectorId && (task.sourceEmailId === message.id || task.commitment?.sourceMessageIds?.includes(message.id) || task.request?.source?.id === message.id)) : [];
+    selected = editedTargets.length === 1 && request ? editedTargets[0] : matchCandidates.length === 1 ? matchCandidates[0] : null;
 
     this.store.mutate(current => {
       current.events.push(event);
-      if (!current.inbox.some(item => item.id === message.id)) current.inbox.push({ ...message, connectorId: event.connectorId, source: event.source });
+      const messageIndex = current.inbox.findIndex(item => item.id === message.id && item.connectorId === event.connectorId);
+      const observedMessage = { ...message, connectorId: event.connectorId, source: event.source, providerRevision: event.providerRevision, providerEtag: event.providerEtag };
+      if (messageIndex < 0) current.inbox.push(observedMessage);
+      else current.inbox[messageIndex] = observedMessage;
       event.summary = `Email received · ${message.subject}`;
 
       if (event.meta.originClass === 'AUTOMATION') {
@@ -692,6 +722,17 @@ export class WorkEngine {
       }
 
       if (!request) {
+        if (previousMessage && editedTargets.length && previousMessage.body !== message.body) {
+          for (const candidate of editedTargets) {
+            const task = current.tasks[candidate.id];
+            task.sourceUnavailable = { reason: 'request_edited_without_grounded_replacement', at: sourceAt, eventId: event.id };
+            task.actionVersion = Number(task.actionVersion || 0) + 1;
+            if (!task.draft?.userEdited) task.draft = null;
+            task.reason = 'The source request was edited; review the current message before acting.';
+            task.updatedAt = stamp();
+          }
+          event.relations = editedTargets.map(task => task.id);
+        }
         event.disposition = 'context_only';
         event.rejection = rejection || { code: 'unknown', detail: 'No request was identified.' };
         if (trusted.length > 1 && (isWithdrawalMessage(message) || isRescheduleMessage(message))) {
@@ -726,7 +767,7 @@ export class WorkEngine {
         }
         event.relations = [target.id];
         const nextSignature = requestRevisionSignature(request);
-        if (nextSignature === requestRevisionSignature(target.request)) {
+        if (nextSignature === requestRevisionSignature(target.request) && !(previousMessage && previousMessage.body !== message.body)) {
           this.#appendCommitmentSource(target, request, message, event, 'duplicate');
           event.disposition = 'duplicate_request';
           record(current, 'duplicate_request', 'A repeated message from the same sender names the same thread, deliverable and delivery participants; it was attached to the existing commitment.', target.id, event.id);
@@ -876,7 +917,7 @@ export class WorkEngine {
       this.changed();
     });
     this.pendingDiscovery.set(event.id, pending);
-    pending.then(() => { if (this.pendingDiscovery.get(event.id) === pending) this.pendingDiscovery.delete(event.id); });
+    pending.then(() => { if (this.pendingDiscovery.get(event.id) === pending) this.pendingDiscovery.delete(event.id); this.pruneReasoningBudget(); });
     this.#track(pending);
     return true;
   }
@@ -885,6 +926,7 @@ export class WorkEngine {
     const doc = event.payload;
     const docId = String(doc.id);
     const stored = this.store.state.documents[docId];
+    event.operation = stored ? 'update' : 'create';
     const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
     const storedAt = Date.parse(stored?.modifiedAt || stored?.observedAt || '');
     if (stored && (nativeObservation(event, doc) ? stored.sourceObservationRevision >= doc.sourceObservationRevision
@@ -916,6 +958,7 @@ export class WorkEngine {
         ...(nativeObservation(event, doc) ? { sourceObservationRevision: doc.sourceObservationRevision } : {}),
         observedAt: event.at || stamp(),
         version: (previous?.version || 0) + 1,
+        providerRevision: event.providerRevision, providerEtag: event.providerEtag,
         source: event.source,
         available: true,
         unavailableReason: null,
@@ -1001,6 +1044,38 @@ export class WorkEngine {
         : `"${title}" is no longer available (${doc.reason || 'unknown reason'}); no outstanding request depended on it.`, null, event.id);
     });
     for (const taskId of relations) this.assess(taskId, event.id, { force: true });
+    this.changed();
+    return { duplicate: false, id: event.id, disposition: event.disposition, relations };
+  }
+
+  /**
+   * A source message was deleted, trashed, moved out of the observed folder,
+   * or lost access. The local copy stays for audit, but open work that was
+   * requested by it is held for review: nothing is sent or pre-authorised on
+   * the strength of a message the provider no longer shows. The request is not
+   * treated as withdrawn, because deleting mail is not a cancellation.
+   */
+  #ingestEmailUnavailable(event) {
+    const messageId = String(event.payload.id);
+    const reason = event.payload.reason || 'unavailable';
+    let relations = [];
+    this.store.mutate(state => {
+      state.events.push(event);
+      const message = (state.inbox || []).find(item => item.id === messageId);
+      if (message) Object.assign(message, { available: false, unavailableReason: reason, unavailableAt: event.at || stamp() });
+      relations = Object.values(state.tasks).filter(task => !isSettled(task)
+        && (task.sourceEmailId === messageId || task.request?.source?.id === messageId)).map(task => task.id);
+      for (const id of relations) {
+        state.tasks[id].sourceUnavailable = { reason, at: event.at || stamp(), eventId: event.id };
+        state.tasks[id].updatedAt = stamp();
+      }
+      event.relations = relations;
+      event.disposition = relations.length ? 'evidence_invalidated' : 'unrelated_change';
+      event.summary = `Message unavailable · ${message?.subject || messageId}`;
+      record(state, 'observation', relations.length
+        ? `The source message is no longer available (${reason}); ${relations.length} request(s) now need review before any action.`
+        : `A message is no longer available (${reason}); no outstanding request depended on it.`, null, event.id);
+    });
     this.changed();
     return { duplicate: false, id: event.id, disposition: event.disposition, relations };
   }
@@ -1183,7 +1258,7 @@ export class WorkEngine {
       noteFailure(error);
     });
     this.pendingReasoning.set(work.key, pending);
-    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); });
+    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); });
     this.#track(pending);
     return true;
   }
@@ -1340,7 +1415,7 @@ export class WorkEngine {
       this.changed();
     });
     this.pendingReasoning.set(work.key, pending);
-    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); });
+    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); });
     this.#track(pending);
     return true;
   }
@@ -1406,7 +1481,7 @@ export class WorkEngine {
       }); this.changed();
     });
     this.pendingReasoning.set(work.key, pending);
-    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); });
+    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); });
     this.#track(pending); return true;
   }
 
@@ -1421,6 +1496,7 @@ export class WorkEngine {
 
   assess(taskId, eventId = null, { force = false, allowAutomation = true } = {}) {
     const task = this.store.state.tasks[taskId];
+    if (task?.kind === 'standing_intent' && this.durableRuntime) { this.durableRuntime.scheduleTask(taskId, `standing_source:${eventId || 'recheck'}`); return; }
     if (this.durableRuntime?.tasks.hasPendingSemantic(taskId)) return;
     if (!task || isSettled(task) || isSourceFollowTask(task)) return;
     const state = this.store.state;
@@ -1595,7 +1671,7 @@ export class WorkEngine {
     }
     if (ambiguous) freshnessBlockers.push({ id: 'ambiguous_document', detail: `Ambiguous document match: ${contenders.join(', ')}.` });
     if (!document) freshnessBlockers.push({ id: 'no_document', detail: 'No document with an identity link to this request has been observed.' });
-    if (['local_files', 'apple_notes'].includes(document?.source)) {
+    if (['local_files', 'apple_notes', 'apple_calendar', 'apple_contacts'].includes(document?.source)) {
       const detail = 'This document is only available on this computer. A shareable document is required before preparing an external delivery.';
       freshnessBlockers.push({ id: 'local_document_not_shared', detail });
       unknowns.push(unknownItem({ id: 'local_document_not_shared', question: 'How will the recipient access this document?', reason: detail,
@@ -1774,7 +1850,7 @@ export class WorkEngine {
     // cover: a competing source could contradict the draft, so the action needs
     // a fresh approval even though the user pre-authorised this flow.
     const activation = this.durableRuntime?.activationFor(this.store.state.tasks[taskId]);
-    if (allowAutomation && grant && !this.policy.shadow && verification.depth !== 'enhanced' && this.#roleAllowsAutomaticWrite(this.store.state.tasks[taskId]) && (!activation || activation.activate && !activation.requiresReview)) this.#runPreAuthorized(taskId, grant);
+    if (allowAutomation && grant && !this.policy.shadow && !this.store.state.tasks[taskId]?.sourceUnavailable && verification.depth !== 'enhanced' && this.#roleAllowsAutomaticWrite(this.store.state.tasks[taskId]) && (!activation || activation.activate && !activation.requiresReview)) this.#runPreAuthorized(taskId, grant);
     this.changed();
   }
 
@@ -1865,6 +1941,7 @@ export class WorkEngine {
     const provider = this.#providerForTask(task);
     if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet. Wait for reasoning or retry the failed model request.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
+    if (task.sourceUnavailable) throw Object.assign(new Error('The source message is no longer available. Review the request before sending.'), { code: 'SOURCE_UNAVAILABLE' });
     if (Object.hasOwn(options, 'reviewToken') && options.reviewToken !== draftReviewToken(task)) {
       const error = new Error('The prepared reply changed. Review the updated reply before sending.');
       error.code = 'REVIEW_CHANGED';
@@ -1910,7 +1987,8 @@ export class WorkEngine {
       throw new Error(reason);
     }
 
-    const approval = { permission: 'user_approved', taskId, approvedAt: stamp() };
+    const approval = { permission: options.autonomyGrantId ? 'temporary_yolo' : 'user_approved', taskId,
+      ...(options.autonomyGrantId ? { grantId: options.autonomyGrantId } : {}), approvedAt: stamp() };
     try {
       this.policy.authorize({ actionClass: 'execute_external', approval, taskId });
       if (provider.live && provider.canSend === false) throw new PermissionDeniedError('Delivery is not enabled for this source. The reply remains available to copy.');
@@ -1937,7 +2015,7 @@ export class WorkEngine {
       commitmentRevision: requestVersion,
       ...(this.durableRuntime ? { inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch } : {}),
       actionClass: 'execute_external',
-      permission: 'user_approved',
+      ...approval,
       approvedAt: approval.approvedAt,
       status: 'executing',
       phase: 'approved',
@@ -1949,12 +2027,13 @@ export class WorkEngine {
       state.tasks[taskId].status = 'verifying';
       state.tasks[taskId].actionVersion = actionVersion;
       state.tasks[taskId].action = action;
-      record(state, 'approval', `User approved the reply. Checking the ${provider.kind} provider before and after sending.`, taskId);
+      delete state.tasks[taskId].autonomyError;
+      record(state, 'approval', `${options.autonomyGrantId ? 'Temporary YOLO authorized' : 'User approved'} the reply. Checking the ${provider.kind} provider before and after sending.`, taskId);
     });
     this.#addTrace(traceEntry({
       stage: 'policy', taskId,
       input: { actionClass: 'execute_external', idempotencyKey: action.idempotencyKey, documentId: document.id, documentVersion: document.version },
-      policy: { permission: 'user_approved', decision: 'allowed', reason: 'Explicit user approval present.' },
+      policy: { permission: approval.permission, grantId: approval.grantId || null, decision: 'allowed', reason: options.autonomyGrantId ? 'Active temporary user authorization.' : 'Explicit user approval present.' },
       outcome: { status: 'verifying' }
     }));
     this.changed();
@@ -2186,6 +2265,7 @@ export class WorkEngine {
   }
 
   #sendFailure(error) {
+    if (error.definitiveNoEffect && error.code === 'SOURCE_UNAVAILABLE') return { denied: true, blocked: error.message };
     if (error.definitiveNoEffect && ['AUTHORIZATION_REQUIRED', 'REVIEW_REQUIRED', 'ACTIVATION_SUPPRESSED'].includes(error.code)) return { denied: true, blocked: 'Authorization changed before dispatch. Nothing was sent; review the draft before continuing.' };
     if (error instanceof UncertainDeliveryError || error.ambiguous) return {};
     return { blocked: `Delivery failed: ${error.message}. No automatic retry was attempted.` };
@@ -2343,6 +2423,7 @@ export class WorkEngine {
       });
       this.#refreshAttention();
       this.changed();
+      if (absent) this.durableRuntime?.releaseTaskCoordination(taskId);
       return this.store.state.tasks[taskId];
     });
   }
@@ -2529,9 +2610,10 @@ export class WorkEngine {
   setTaskPaused(taskId, paused) { return pauseTask(this, taskId, paused); }
   directTask(taskId, direction) { this.durableRuntime?.userFeedback(taskId, 'explicit_rejection'); return directTask(this, taskId, direction); }
   undoTaskDirection(taskId, id) { return undoTaskDirection(this, taskId, id); }
-  updateTaskMemory(id, operation) { return updateTaskMemory(this, id, operation); }
+  updateTaskMemory(id, operation, transaction) { return updateTaskMemory(this, id, operation, transaction); }
 
   recheckTaskGuidance(taskId) {
+    if (this.store.state.tasks[taskId]?.kind === 'standing_intent' && this.durableRuntime) { this.durableRuntime.scheduleTask(taskId, 'standing_intent_guidance'); return; }
     this.assess(taskId, null, { force: true, allowAutomation: false });
     const task = this.store.state.tasks[taskId];
     if (!task || isSettled(task)) return;
@@ -3061,6 +3143,7 @@ export class WorkEngine {
     const provider = this.#providerForTask(task);
     if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
+    if (task.sourceUnavailable) throw Object.assign(new Error('The source message is no longer available. Review the request before sending.'), { code: 'SOURCE_UNAVAILABLE' });
     if (provider.live && provider.canSend === false) throw new PermissionDeniedError('Delivery is not enabled for this source.');
     const requestVersion = Number(task.commitment?.revision || 1);
     if (Number(task.draft.requestVersion || 1) !== requestVersion || (task.commitment?.status && task.commitment.status !== 'active')) {
@@ -3246,6 +3329,7 @@ export class WorkEngine {
     }
     this.#refreshAttention(now);
     if (this.store.state.revision !== startingRevision) this.changed();
+    this.pruneReasoningBudget();
     return summary;
   }
 
@@ -3309,6 +3393,36 @@ export class WorkEngine {
       const key = message.threadId ? String(message.threadId) : `message:${message.id}`;
       if (this.#maybeRecoverUnrecognizedMessage(event, this.threadGenerations.get(key) || 0, { now: at, dueOnly })) discoveries += 1;
     }
+    this.pruneReasoningBudget();
     return { tasks, discoveries };
+  }
+
+  /** Drop finished per-request counters. In-flight and queued ids stay inside prune. */
+  pruneReasoningBudget({ finishedJobId = null } = {}) {
+    const budget = this.reasoner?.budget;
+    if (typeof budget?.prune !== 'function') return;
+    const keep = [];
+    const active = work => Boolean(work) && (['pending', 'running', 'not_started'].includes(work.status) || work.status === 'failed' && reasoningMayResume(work));
+    for (const task of Object.values(this.store.state.tasks || {})) {
+      const work = task.reasoningWork;
+      if (!active(work) || typeof work.key !== 'string') continue;
+      keep.push(`${work.key}:attempt:${work.attempts}`);
+    }
+    for (const event of this.store.state.events || []) {
+      if (event.type !== 'email.received' || !active(event.reasoning)) continue;
+      keep.push(`discover:${event.payload?.id || 'message'}`);
+    }
+    const database = this.durableRuntime?.db;
+    if (database) {
+      const jobs = database.prepare("SELECT id, job_type, attempts FROM jobs WHERE state='running' AND job_type IN ('situation_delta','situation_pair','standing_intent_match','compile_experience')").all();
+      for (const job of jobs) {
+        if (finishedJobId && job.id === finishedJobId) continue;
+        if (job.job_type === 'situation_delta') keep.push(`delta:${job.id}:attempt:${job.attempts}`);
+        else if (job.job_type === 'situation_pair') keep.push(`pair:${job.id}:attempt:${job.attempts}`);
+        else if (job.job_type === 'standing_intent_match') keep.push(`intent:${job.id}:${job.attempts}`);
+        else if (job.job_type === 'compile_experience') keep.push(`compile:${job.id}`);
+      }
+    }
+    budget.prune(keep);
   }
 }

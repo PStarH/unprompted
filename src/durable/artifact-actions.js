@@ -4,6 +4,7 @@ import { digest, explicitTasks } from '../connectors/local-snapshot.js';
 import { durableError, iso, json, parse } from './database.js';
 import { effectDigest } from './experience.js';
 import { draftReviewToken } from '../draft-review.js';
+import { reminderListId } from '../connectors/apple-reminders.js';
 
 const fail = (message, code = 'ARTIFACT_NOT_AUTHORIZED', status = 403) => durableError(code, message, status);
 const activeTask = task => task && !task.privacyInvalidated && !task.control?.paused && !task.yieldState
@@ -12,7 +13,7 @@ const activeTask = task => task && !task.privacyInvalidated && !task.control?.pa
 const knownKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const text = (value, max) => typeof value === 'string' && Boolean(value.trim()) && value.length <= max && !value.includes('\0');
 const publicRequest = request => ({ id: request.id, grantId: request.grantId, connectorId: request.connectorId, family: request.family,
-  status: request.status, inputVersion: request.inputVersion, receipt: request.receipt || null, createdAt: request.createdAt, error: request.error || null });
+  status: request.status, inputVersion: request.inputVersion, receipt: request.receipt || null, createdAt: request.createdAt, error: request.error || null, undo: request.undo || null });
 
 export class ArtifactActions {
   constructor(runtime, { connectionFor = () => null } = {}) {
@@ -32,7 +33,7 @@ export class ArtifactActions {
     return Object.entries(ARTIFACT_ACTIONS).flatMap(([connectorId, spec]) => {
       const connection = this.connectionFor(connectorId);
       if (!connection?.connector?.live || !connection.accountId || this.runtime.privacy.permissionRevoked(connectorId)) return [];
-      const targets = connectorId === 'apple_notes' ? connection.connector.folders.map(folder => ({ id: folder.folderId, label: folder.label }))
+      const targets = ['apple_notes', 'apple_reminders'].includes(connectorId) ? connection.connector.folders.map(folder => ({ id: connectorId === 'apple_reminders' ? reminderListId(folder) : folder.folderId, label: folder.label }))
         : connectorId === 'notion' ? Object.values(this.engine.store.state.documents).filter(document => document.source === 'notion' && document.available !== false).map(document => ({ id: document.externalId, label: document.title }))
           : [{ id: 'drafts', label: spec.label }];
       return [{ connectorId, family: spec.family, label: spec.label, accountLabel: connection.accountLabel || connectorId,
@@ -91,6 +92,7 @@ export class ArtifactActions {
     if (!task) throw fail('Task not found.', 'MISSING_TASK', 404);
     if (!grant) throw fail('Choose an active user authorization.');
     const explicit = actor === 'user';
+    if (!explicit && !this.runtime.contextReady(taskId)) throw fail('Read the deferred task context before preparing an artifact.', 'CONTEXT_READ_REQUIRED', 409);
     if (!explicit && (actor !== 'activation' && (this.runtime.current()?.taskId !== taskId || !isCurrent()))) throw fail('A current task harness is required.');
     if (explicit && draftReviewToken(task) !== reviewToken) throw fail('Refresh this task before creating an artifact.', 'REVIEW_CHANGED', 409);
     this.check(task, grant, { explicit });
@@ -180,6 +182,47 @@ export class ArtifactActions {
         ? 'The provider outcome needs reconciliation. No automatic repeat was attempted.' : 'Authorization or task context changed. Review the task before trying again.' });
       if (uncertain) this.runtime.jobs.enqueue({ queue: 'effects', type: 'reconcile_execution', taskId: task.id, key: `artifact-reconcile:${execution.id}`, payload: { executionId: execution.id } });
     }
+  }
+  /**
+   * Remove an artifact this app created. Only an artifact that still matches
+   * what was created is removed: if the user edited, sent or deleted it, the
+   * readback no longer matches and nothing is changed. Sent email is never
+   * undone here; it is irreversible.
+   */
+  async undo(taskId, requestId, { actor = 'user' } = {}) {
+    if (actor !== 'user') throw fail('Only the user can undo an artifact.', 'UNDO_NOT_AUTHORIZED');
+    const task = this.runtime.tasks.get(taskId), request = task?.artifactRequests?.find(item => item.id === requestId);
+    if (!request || task.privacyInvalidated) throw fail('Artifact not found.', 'MISSING_ARTIFACT', 404);
+    if (request.status === 'undone') return publicRequest(request);
+    const execution = this.runtime.ledger.byKey(request.key), receiptId = execution?.provider_receipt_id || request.receipt?.id;
+    if (request.status !== 'verified' || execution?.status !== 'verified' || !receiptId) throw fail('Only a verified artifact can be undone.', 'UNDO_NOT_READY', 409);
+    if (request.undo?.status === 'running') throw fail('This artifact is already being undone.', 'UNDO_BUSY', 409);
+    const grant = this.grants().find(item => item.id === request.grantId), provider = grant && this.provider(grant);
+    if (!provider || provider.kind !== execution.provider) throw fail('Reconnect the artifact account to undo it.', 'UNDO_UNAVAILABLE', 409);
+    if (!['google', 'microsoft', 'notion'].includes(grant.connectorId)) throw fail('This target cannot remove artifacts automatically. Delete it in the app where it was created.', 'UNDO_UNSUPPORTED', 409);
+    this.engine.policy.authorize({ actionClass: 'execute_external', approval: { permission: 'user_approved', taskId }, taskId });
+    this.record(taskId, requestId, { undo: { status: 'running', at: iso(this.database.now()) } });
+    let removed = false;
+    try {
+      const current = await this.runtime.gateway.read(() => provider.lookup(request.key, { receiptId, payload: request.payload }));
+      if (current?.status !== 'found') {
+        this.record(taskId, requestId, { undo: { status: 'refused', at: iso(this.database.now()), error: 'The artifact changed or was already removed, so it was left as it is.' } });
+        throw fail('The artifact changed or was already removed, so it was left as it is.', 'UNDO_CHANGED', 409);
+      }
+      // From here the provider may have acted, so a failure is an unknown outcome.
+      removed = true;
+      const result = await provider.remove(receiptId);
+      if (!result.verified) throw Object.assign(new Error('The removal could not be confirmed.'), { code: 'UNDO_UNCONFIRMED' });
+    } catch (error) {
+      if (error.code === 'UNDO_CHANGED') throw error;
+      this.record(taskId, requestId, { undo: { status: removed ? 'unknown' : 'failed', at: iso(this.database.now()),
+        error: removed ? 'The provider did not confirm the removal. Check the target before trying again.' : 'The artifact could not be checked. Nothing was removed.' } });
+      throw fail(removed ? 'The provider did not confirm the removal.' : 'The artifact could not be checked. Nothing was removed.', 'UNDO_FAILED', 409);
+    }
+    const at = iso(this.database.now());
+    this.record(taskId, requestId, { status: 'undone', undo: { status: 'verified', at } });
+    try { this.runtime.experiences.feedback({ kind: 'undo', taskId, executionId: execution.id }); } catch { /* learning evidence is advisory */ }
+    return publicRequest(this.runtime.tasks.get(taskId).artifactRequests.find(item => item.id === requestId));
   }
   recoveryProvider(execution) {
     const task = this.runtime.tasks.get(execution.task_id), request = task?.artifactRequests?.find(item => item.key === execution.idempotency_key);

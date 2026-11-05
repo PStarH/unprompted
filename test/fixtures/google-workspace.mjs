@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { startFixtureServer } from '../browser/fixture-server.mjs';
 
 export async function startGoogleFixture({ provisioned = true, directory = null, root = null } = {}) {
-  const controls = { apiDisabled: false, rejectTask: false, rejectModel: false, empty: false, identityVerified: true, searchPaged: false };
+  const controls = { apiDisabled: false, rejectTask: false, rejectModel: false, empty: false, identityVerified: true, searchPaged: false, extraGrantedScopes: [] };
   const calls = [];
   const requests = http.createServer(async (req, res) => {
     try {
@@ -17,7 +17,7 @@ export async function startGoogleFixture({ provisioned = true, directory = null,
         const fields = new URLSearchParams(body);
         const id = fields.get('code') === 'reader-b' || fields.get('refresh_token') === 'PRIVATE_REFRESH_reader-b' ? 'reader-b' : 'reader-a';
         return json({ access_token: `PRIVATE_ACCESS_${id}`, refresh_token: `PRIVATE_REFRESH_${id}`, expires_in: 3600,
-          scope: 'openid email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/documents' });
+          scope: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/documents', ...controls.extraGrantedScopes].join(' ') });
       }
       if (url.pathname === '/google/openidconnect.googleapis.com/v1/userinfo') return json({ sub: account, email: `${account}@example.test`, email_verified: controls.identityVerified });
       if (url.pathname === '/model/v1/chat/completions') {

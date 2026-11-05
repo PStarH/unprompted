@@ -14,12 +14,13 @@ import { draftReviewToken } from '../src/draft-review.js';
 import { OpenAiCompatibleReasoner, PiReasoner } from '../src/reasoning.js';
 import { piSupported } from '../src/pi-runtime.js';
 import { LocalSetupStore } from '../src/setup.js';
+import { reminderListId } from '../src/connectors/apple-reminders.js';
 
 const parent = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const json = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
 const scopes = { google: ['https://www.googleapis.com/auth/gmail.compose'], microsoft: ['Mail.ReadWrite'] };
 function connectionFor(id) {
-  const writes = [], records = new Map();
+  const writes = [], records = new Map(), removals = [], deleted = new Set();
   const connector = { id, live: true, config: { gmailDraftsEnabled: true }, auth: { accessToken: async () => 'PRIVATE_TOKEN' },
     folders: [{ accountId: 'notes-account', folderId: 'notes-folder', label: 'Work' }],
     fetchImpl: async (url, options) => {
@@ -33,6 +34,9 @@ function connectionFor(id) {
         return json({ id: recordId });
       }
       const remoteId = target.pathname.split('/').at(-1), record = records.get(remoteId);
+      if (options.method === 'DELETE') { removals.push(target.pathname); records.delete(remoteId); deleted.add(remoteId); return new Response(null, { status: 204 }); }
+      if (options.method === 'PATCH') { removals.push(target.pathname); Object.assign(record, JSON.parse(options.body)); return json({ id: remoteId, ...record }); }
+      if (deleted.has(remoteId)) return new Response('{}', { status: 404 });
       if (id === 'google') return json({ id: remoteId, message: { ...record.message, labelIds: ['DRAFT'] } });
       if (id === 'microsoft') return json({ id: remoteId, isDraft: true, ...record });
       if (target.pathname.endsWith('/children')) {
@@ -49,10 +53,18 @@ function connectionFor(id) {
       async readNotes(folders) {
         return { records: [...records].map(([providerId, content]) => ({ providerId, accountId: folders[0].accountId, folderId: folders[0].folderId,
           title: content.title, content: `${content.title}\n${content.body}\n${content.marker}` })) };
+      },
+      async createReminder(folder, content, { signal }) {
+        signal?.throwIfAborted();
+        const id = `native-${writes.length + 1}`; writes.push({ folder, content }); records.set(id, content); return { id };
+      },
+      async readReminders(folders) {
+        return { records: [...records].map(([id, content]) => ({ id, accountId: folders[0].accountId, folderId: folders[0].folderId,
+          title: content.title, body: `${content.body}\n${content.marker}`, state: 'open' })), errors: [], complete: true };
       }
     }
   };
-  return { connector, accountId: `${id}-account`, scopes: scopes[id] || [], writes, records };
+  return { connector, accountId: `${id}-account`, scopes: scopes[id] || [], writes, records, removals };
 }
 async function fixture(t, id = 'notion', { shadow = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-artifacts-'));
@@ -67,7 +79,7 @@ async function fixture(t, id = 'notion', { shadow = false } = {}) {
   await engine.whenSettled();
   const taskId = 'request:m1';
   assert.equal(store.state.tasks[taskId].status, 'ready_for_approval');
-  const targetId = id === 'notion' ? parent : id === 'apple_notes' ? 'notes-folder' : 'drafts';
+  const targetId = id === 'notion' ? parent : id === 'apple_reminders' ? reminderListId(connection.connector.folders[0]) : id === 'apple_notes' ? 'notes-folder' : 'drafts';
   const grant = await runtime.artifacts.createGrant({ connectorId: id, targetId }, { confirmed: true });
   return { directory, store, engine, runtime, connection, grant, taskId };
 }
@@ -77,7 +89,7 @@ function request(context) {
     ...(context.grant.family === 'email.draft' ? {} : { title: 'Cedar 工作进展', body: 'Project findings\nA source-backed summary.' }) }, { actor: 'user', reviewToken: draftReviewToken(task) });
 }
 
-for (const id of ['google', 'microsoft', 'notion', 'apple_notes']) {
+for (const id of ['google', 'microsoft', 'notion', 'apple_notes', 'apple_reminders']) {
   test(`${id} creates a guarded artifact, verifies it through independent readback and leaves the source task open`, async t => {
     const context = await fixture(t, id);
     const pending = request(context);
@@ -215,10 +227,29 @@ test('Gmail draft permission does not enable sending or Google Docs editing', t 
 test('artifact providers reject targets outside the selected native folders and missing mail write scopes', () => {
   const notes = connectionFor('apple_notes');
   assert.equal(new ArtifactProvider(notes, 'unselected-folder').available(), false);
+  assert.equal(new ArtifactProvider(connectionFor('apple_reminders'), 'unselected-list').available(), false);
   for (const id of ['google', 'microsoft']) {
     const connection = connectionFor(id); connection.scopes = [];
     assert.equal(new ArtifactProvider(connection, 'drafts').available(), false);
   }
+});
+
+test('a changed or completed reminder is not verified as the original creation', async () => {
+  const connection = connectionFor('apple_reminders');
+  const provider = new ArtifactProvider(connection, reminderListId(connection.connector.folders[0]));
+  const payload = { title: 'Call Cedar', body: 'Discuss next steps', idempotencyKey: 'one-operation' };
+  const receipt = await provider.create(payload, { beforeDispatch() {} });
+  assert.equal((await provider.lookup(payload.idempotencyKey, { receiptId: receipt.id, payload })).status, 'found');
+  connection.records.get(receipt.id).body = 'Changed by the user';
+  assert.equal((await provider.lookup(payload.idempotencyKey, { receiptId: receipt.id, payload })).status, 'unknown');
+});
+
+test('Reminders artifact destinations distinguish equal list IDs in different accounts', async () => {
+  const connection = connectionFor('apple_reminders');
+  connection.connector.folders.push({ accountId: 'other-account', folderId: 'notes-folder', label: 'Other Work' });
+  const provider = new ArtifactProvider(connection, reminderListId(connection.connector.folders[1]));
+  await provider.create({ title: 'Follow up', body: 'Check the result', idempotencyKey: 'second-account' }, { beforeDispatch() {} });
+  assert.equal(connection.writes[0].folder.accountId, 'other-account');
 });
 
 test('activation saves the prepared reply automatically without enabling send authorization', async t => {
@@ -254,6 +285,48 @@ test('native Notes script creates only in the exact selected folder and escapes 
   input.folder.folderId = 'unselected';
   assert.equal(JSON.parse(sandbox.run(['create-note'])).ok, false);
   assert.equal(written.length, 1);
+});
+
+test('native Reminders script creates only in the chosen account and list, preserving text as data', () => {
+  const written = [];
+  const list = { id: () => 'list', name: () => 'Work', reminders: { push: item => written.push(item) } };
+  const account = { id: () => 'account', name: () => 'Personal', lists: () => [list] };
+  const reminders = { accounts: () => [account], Reminder: content => ({ ...content, id: () => 'reminder-id' }) };
+  const application = name => { assert.equal(name, 'Reminders'); return reminders; };
+  application.currentApplication = () => ({});
+  const sandbox = vm.createContext({ ObjC: { import: () => {} }, Application: application });
+  vm.runInContext(fs.readFileSync(new URL('../src/native-source-script.jxa.js', import.meta.url), 'utf8'), sandbox);
+  const input = { folder: { accountId: 'account', folderId: 'list' }, title: 'Call <Cedar>', body: 'Review\n<script>text</script>', marker: `unprompted-artifact:${'a'.repeat(64)}` };
+  sandbox.inputJSON = () => input;
+  const result = JSON.parse(sandbox.run(['create-reminder']));
+  assert.equal(result.ok, true); assert.equal(result.id, 'reminder-id');
+  assert.equal(written.length, 1); assert.equal(written[0].name, input.title);
+  assert.equal(written[0].body, `${input.body}\n${input.marker}`);
+  input.folder.accountId = 'different-account';
+  assert.equal(JSON.parse(sandbox.run(['create-reminder'])).ok, false);
+  assert.equal(written.length, 1);
+});
+
+test('native Reminders changes and deletion check the chosen list and exact last modification', () => {
+  let deleted = false;
+  const reminder = { id: () => 'reminder-id', modificationDate: () => new Date('2026-01-01T00:00:00.000Z'), delete() { deleted = true; } };
+  const list = { id: () => 'list', name: () => 'Work', reminders: () => [reminder] };
+  const account = { id: () => 'account', name: () => 'Personal', lists: () => [list] };
+  const application = name => { assert.equal(name, 'Reminders'); return { accounts: () => [account] }; };
+  application.currentApplication = () => ({});
+  const sandbox = vm.createContext({ ObjC: { import: () => {} }, Application: application });
+  vm.runInContext(fs.readFileSync(new URL('../src/native-source-script.jxa.js', import.meta.url), 'utf8'), sandbox);
+  const input = { folder: { accountId: 'account', folderId: 'list' }, reminderId: 'reminder-id', expectedUpdatedAt: '2025-01-01T00:00:00.000Z', changes: { completed: true } };
+  sandbox.inputJSON = () => input;
+  assert.equal(JSON.parse(sandbox.run(['change-reminder'])).ok, false);
+  assert.equal(reminder.completed, undefined);
+  input.expectedUpdatedAt = '2026-01-01T00:00:00.000Z';
+  assert.equal(JSON.parse(sandbox.run(['change-reminder'])).ok, true);
+  assert.equal(reminder.completed, true);
+  input.folder.folderId = 'other-list';
+  assert.equal(JSON.parse(sandbox.run(['delete-reminder'])).ok, false); assert.equal(deleted, false);
+  input.folder.folderId = 'list';
+  assert.equal(JSON.parse(sandbox.run(['delete-reminder'])).ok, true); assert.equal(deleted, true);
 });
 
 test('individual artifact review satisfies require-review while preserving suppression', async t => {
@@ -331,3 +404,39 @@ for (const connectorId of ['apple_notes', 'notion']) {
     }
   });
 }
+
+for (const id of ['google', 'microsoft', 'notion']) {
+  test(`${id} undo removes an unchanged artifact, confirms the removal and records undo feedback`, async t => {
+    const context = await fixture(t, id);
+    request(context); await context.engine.whenSettled();
+    const created = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+    assert.equal(created.status, 'verified');
+    await assert.rejects(context.runtime.artifacts.undo(context.taskId, created.id, { actor: 'activation' }), error => error.code === 'UNDO_NOT_AUTHORIZED');
+    const undone = await context.runtime.artifacts.undo(context.taskId, created.id);
+    assert.equal(undone.status, 'undone');
+    assert.equal(undone.undo.status, 'verified');
+    assert.equal(context.connection.removals.length, 1);
+    assert.equal(context.runtime.db.prepare("SELECT COUNT(*) n FROM feedback_events WHERE kind='undo'").get().n, 1);
+    assert.equal((await context.runtime.artifacts.undo(context.taskId, created.id)).status, 'undone', 'a repeated undo is a no-op');
+    assert.equal(context.connection.removals.length, 1);
+    const lifecycle = context.runtime.artifactLifecycle(context.taskId);
+    assert.equal(lifecycle.published[0].status, 'undone');
+    assert.equal(lifecycle.published[0].reversibility.kind, 'reversible');
+  });
+}
+
+test('undo leaves an artifact the user changed and refuses targets without automatic removal', async t => {
+  const context = await fixture(t, 'microsoft');
+  request(context); await context.engine.whenSettled();
+  const created = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+  const [remoteId, record] = [...context.connection.records][0];
+  context.connection.records.set(remoteId, { ...record, subject: 'Edited by the user' });
+  await assert.rejects(context.runtime.artifacts.undo(context.taskId, created.id), error => error.code === 'UNDO_CHANGED');
+  assert.equal(context.connection.removals.length, 0, 'an edited draft is never removed');
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].undo.status, 'refused');
+
+  const notes = await fixture(t, 'apple_notes');
+  request(notes); await notes.engine.whenSettled();
+  const note = notes.runtime.tasks.get(notes.taskId).artifactRequests[0];
+  await assert.rejects(notes.runtime.artifacts.undo(notes.taskId, note.id), error => error.code === 'UNDO_UNSUPPORTED');
+});

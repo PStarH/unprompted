@@ -45,7 +45,7 @@ A distribution registers each OAuth application once. People using the app then 
 | App | What the build includes | What the user does |
 | --- | --- | --- |
 | GitHub | A public client ID, device flow, and read access to Issues, pull requests, contents, Actions, and Metadata. Do not request the `repo` scope | **Get authorization code** |
-| Outlook | A public client ID and device flow. Delegated `openid`, `profile`, `offline_access`, `User.Read`, and `Mail.Read`. Drafts later add `Mail.ReadWrite` | **Get authorization code** |
+| Outlook | A public client ID and browser authorization with PKCE; register `http://localhost/oauth/microsoft` as a mobile and desktop redirect. Delegated `openid`, `profile`, `offline_access`, `User.Read`, and `Mail.Read`. Drafts later add `Mail.ReadWrite` | **Connect**, then sign in and consent |
 | Slack | A client ID and secret, with PKCE. Redirect `http://localhost:53682/oauth/slack`. User scopes `im:read`, `im:history`, `mpim:read`, `mpim:history`, and `users:read`. No bot or write scope | **Connect** |
 | Notion | A client ID and secret. Redirect `http://localhost:53682/oauth/notion`. Read content, read user information, and **Insert content** when users will create pages | **Connect** |
 | Google | A Desktop client file, with no user refresh token | **Connect Google** |

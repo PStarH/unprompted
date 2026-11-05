@@ -1,3 +1,4 @@
+import { eventDeliveryKey } from '../connectors/events.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -6,11 +7,12 @@ import { readRegularFile } from '../local-files.js';
 import { DurableDatabase, durableError, iso, json, parse } from './database.js';
 import { DurableJobs } from './jobs.js';
 import { DurableTasks, taskProjection } from './tasks.js';
-import { HybridMemory } from './memory.js';
+import { LOCAL_EMBEDDING, lexicalEmbedding, HybridMemory } from './memory.js';
 import { AttentionBudget } from './attention.js';
 import { effectDigest } from './experience.js';
 import { activationFlags } from './flags.js';
 import { readinessBlock } from './coordination.js';
+import { memoryLifecycle } from '../memory-lifecycle.js';
 
 const closed = task => ['completed', 'cancelled'].includes(task.status) || task.userDismissed;
 const metaKeys = ['stateVersion', 'inputVersion', 'processedInputVersion', 'runGeneration', 'privacyEpoch', 'dirty', 'situationId', 'dedupTaskKey'];
@@ -97,7 +99,7 @@ export class SqliteStore {
     const addedEvents = (state.events || []).filter(event => !previousEvents.has(event.id));
     for (const event of addedEvents) {
       this.db.prepare(`INSERT OR IGNORE INTO durable_inbox(id,provider,provider_event_id,event_json,material_signature,received_at)
-        VALUES(?,?,?,?,?,?)`).run(event.id, event.connectorId || event.source || 'local', event.providerEventId || event.id, json(event), effectDigest([event.type, event.payload]), event.at || at);
+        VALUES(?,?,?,?,?,?)`).run(event.id, event.connectorId || event.source || 'local', eventDeliveryKey(event), json(event), effectDigest([event.type, event.payload]), event.at || at);
       this.db.prepare('INSERT OR IGNORE INTO source_records(kind,id,created_at) VALUES(\'event\',?,?)').run(event.id, at);
       this.db.prepare("UPDATE durable_inbox SET state='processed',processed_at=COALESCE(processed_at,?) WHERE id=? AND state!='forgotten'").run(at, event.id);
     }
@@ -128,13 +130,13 @@ export class SqliteStore {
       const priorSource = !row && task.sourceEmailId && state.events.find(event => event.type === 'email.received' && event.payload?.id === task.sourceEmailId);
       const eventsToAttach = priorSource && !addedEvents.some(event => event.id === priorSource.id) ? [...addedEvents, priorSource] : addedEvents;
       const associated = eventsToAttach.filter(event => event.disposition !== 'stale_change' && (event.relations?.includes(id) || event.situationTaskIds?.includes(id) || knownSources.includes(event.payload?.id)
-        || ['document.modified', 'document.unavailable'].includes(event.type) && (task.documentId === event.payload?.id || task.evidence?.documents?.some(document => document.documentId === event.payload?.id))));
+        || event.type === 'email.unavailable' && knownSources.includes(event.payload?.id) || ['document.modified', 'document.unavailable'].includes(event.type) && (task.documentId === event.payload?.id || task.evidence?.documents?.some(document => document.documentId === event.payload?.id))));
       const interpreted = !row && associated.find(event => event.interpretedSituationId && event.relations?.includes(id));
       if (interpreted && !this.tasks.row(id).situation_id) this.tasks.situations.attachTask(interpreted.interpretedSituationId, id, `legacy:${id}`);
       if (!this.tasks.row(id).situation_id && associated.length) this.tasks.situations.fromLegacyTask(task, associated.map(event => event.id));
       for (const event of eventsToAttach) {
         const referenced = event.relations?.includes(id) || event.situationTaskIds?.includes(id) || knownSources.includes(event.payload?.id)
-          || ['document.modified', 'document.unavailable'].includes(event.type) && (task.documentId === event.payload?.id || task.evidence?.documents?.some(document => document.documentId === event.payload?.id));
+          || event.type === 'email.unavailable' && knownSources.includes(event.payload?.id) || ['document.modified', 'document.unavailable'].includes(event.type) && (task.documentId === event.payload?.id || task.evidence?.documents?.some(document => document.documentId === event.payload?.id));
         if (referenced && event.disposition !== 'stale_change') this.tasks.associate(id, event.id, null, { initial: !row || migration, withdrawal: event.disposition === 'request_withdrawn' });
         if (referenced && event.activation) {
           const current = this.tasks.get(id);
@@ -145,21 +147,28 @@ export class SqliteStore {
       state.tasks[id] = this.tasks.get(id);
     }
     for (const id of Object.keys(before.tasks || {})) if (!state.tasks[id]) this.db.prepare('DELETE FROM tasks WHERE id=? AND version=?').run(id, before.tasks[id].stateVersion);
+    const supersessions = [];
     for (const [id, memory] of Object.entries(state.taskMemories || {})) {
       if (this.database.forgotten('task_memory', id) || this.database.forgotten('memory', id)) throw durableError('SOURCE_FORGOTTEN', 'This memory has been forgotten.');
       const source = this.db.prepare('SELECT * FROM source_records WHERE kind=\'task_memory\' AND id=?').get(id);
       if (!source) this.db.prepare('INSERT INTO source_records(kind,id,created_at) VALUES(\'task_memory\',?,?)').run(id, at);
       if (memory.taskId) this.database.lineage('task', memory.taskId, 'task_memory', id);
-      if (memory.deletedAt) {
-        this.db.prepare("UPDATE source_records SET active=0 WHERE kind='task_memory' AND id=?").run(id);
-        this.db.prepare('DELETE FROM memory_fts WHERE id=?').run(id); this.db.prepare('DELETE FROM memory_embeddings WHERE memory_id=?').run(id);
-        this.db.prepare('DELETE FROM hot_context_items WHERE origin_kind=\'memory\' AND origin_id=?').run(id);
-        if (!before.taskMemories?.[id]?.deletedAt) { this.database.bump('context_version'); this.memory.invalidate(); }
-      } else {
-        this.db.prepare("UPDATE source_records SET active=1 WHERE kind='task_memory' AND id=?").run(id);
-        this.memory.put({ id, content: memory.text, scopeType: 'project', scopeKey: json([memory.scope?.entity?.toLowerCase(), memory.scope?.deliverable?.toLowerCase()]), sourceKind: 'task_memory', sourceId: id });
-        for (const task of Object.values(state.tasks)) if (task.guidance?.memoryId === id || !task.guidance && task.request?.subjectEntity?.toLowerCase() === memory.scope?.entity?.toLowerCase() && task.request?.deliverable?.toLowerCase() === memory.scope?.deliverable?.toLowerCase()) this.database.lineage('task_memory', id, 'task', task.id);
-      }
+      const lifecycle = memoryLifecycle(memory);
+      this.db.prepare("UPDATE source_records SET active=? WHERE kind='task_memory' AND id=?").run(lifecycle === 'deleted' ? 0 : 1, id);
+      this.memory.put({ id, content: memory.text, scopeType: 'project', scopeKey: json([memory.scope?.entity?.toLowerCase(), memory.scope?.deliverable?.toLowerCase()]), sourceKind: 'task_memory', sourceId: id,
+        memoryKind: memory.memoryKind || 'fact', lifecycleState: lifecycle, validUntil: memory.validUntil || null },
+        // Snapshot projection must stay synchronous, including the first use
+        // of an injected encoder. FTS remains available for legacy records.
+        this.memory.asyncEncoderKnown !== false ? { vector: lexicalEmbedding(memory.text), embeddingModel: LOCAL_EMBEDDING } : {});
+      if (lifecycle !== 'deleted') for (const task of Object.values(state.tasks)) if (task.guidance?.memoryId === id || !task.guidance && task.request?.subjectEntity?.toLowerCase() === memory.scope?.entity?.toLowerCase() && task.request?.deliverable?.toLowerCase() === memory.scope?.deliverable?.toLowerCase()) this.database.lineage('task_memory', id, 'task', task.id);
+      if (memory.supersededBy && state.taskMemories?.[memory.supersededBy]) supersessions.push([id, memory.supersededBy]);
+    }
+    for (const [id, replacementId] of supersessions) {
+      this.db.prepare(`INSERT INTO memory_relations(id,source_memory_id,target_memory_id,relation_kind,status,evidence_kind,evidence_ref,created_at,updated_at)
+        VALUES(?,?,?,'supersedes','established','direct_correction',?,?,?)
+        ON CONFLICT(source_memory_id,target_memory_id,relation_kind) DO UPDATE SET status='established',evidence_kind='direct_correction',evidence_ref=excluded.evidence_ref,updated_at=excluded.updated_at`)
+        .run(randomUUID(), replacementId, id, id, at, at);
+
     }
     for (const [id, direction] of Object.entries(state.taskDirections || {})) {
       this.db.prepare('INSERT OR IGNORE INTO source_records(kind,id,created_at) VALUES(\'task_direction\',?,?)').run(id, at);
@@ -205,9 +214,9 @@ export class SqliteStore {
       }
     }
   }
-  mutate(callback) { return this.#transaction(callback, false).result; }
+  mutate(callback, { afterSync = null } = {}) { return this.#transaction(callback, false, afterSync).result; }
   mutateIfChanged(callback) { return this.#transaction(callback, true); }
-  #transaction(callback, onlyIfChanged) {
+  #transaction(callback, onlyIfChanged, afterSync = null) {
     this.#assert(); const state = this.state, before = structuredClone(state), snapshotVersion = this.snapshotVersion;
     this.#mutating = true;
     try {
@@ -219,6 +228,10 @@ export class SqliteStore {
         if (result?.then) { Promise.resolve(result).catch(() => {}); throw new TypeError('Store mutation callbacks must be synchronous.'); }
         if (onlyIfChanged && json(state) === json(before)) { changed = false; return; }
         this.#sync(before, state);
+        if (afterSync) {
+          const receipt = afterSync(result);
+          if (receipt?.then) { Promise.resolve(receipt).catch(() => {}); throw new TypeError('Store commit hooks must be synchronous.'); }
+        }
         const commit = this.db.prepare('UPDATE workspace_state SET version=version+1,state_json=? WHERE id=1 AND version=?').run(json(state), snapshotVersion);
         if (!commit.changes) throw durableError('STORE_CONFLICT', 'The workspace snapshot changed.');
       });

@@ -14,8 +14,10 @@ const page = await context.newPage(), errors = [], checks = [];
 page.on('pageerror', error => errors.push(error.message));
 const record = id => checks.push({ id, passed: true });
 let grantAccount = 'reader-a';
+let lastRequestedScopes = [];
 await context.route('https://accounts.google.com/o/oauth2/v2/auth?**', async route => {
   const url = new URL(route.request().url());
+  lastRequestedScopes = url.searchParams.get('scope').split(' ');
   const callback = new URL(url.searchParams.get('redirect_uri'));
   callback.searchParams.set('state', url.searchParams.get('state')); callback.searchParams.set('code', grantAccount);
   await route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>Scripted Google consent</title><p>Test fixture, not real Google consent.</p><a id="grant" href="${callback.href.replaceAll('&', '&amp;')}">Grant selected access</a>` });
@@ -47,6 +49,9 @@ try {
   assert.match(await initial.locator('[data-connection-error]').innerText(), /Web client/);
   record('wrong-client-type-has-an-inline-recovery-without-losing-model-settings');
   fixture.controls.apiDisabled = true;
+  const additionalScope = 'https://www.googleapis.com/auth/calendar.events';
+  fixture.controls.extraGrantedScopes = [additionalScope];
+  await client.locator('[name="additionalScopes"]').fill(additionalScope);
   await client.locator('[name="clientJson"]').setInputFiles({ name: 'desktop-client.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ installed: { client_id: 'fixture.apps.googleusercontent.com', client_secret: 'PRIVATE_DESKTOP_CLIENT' } })) });
   const processId = (await (await page.request.get(fixture.base + '/api/health')).json()).processId;
   await grantFrom(client.locator('button[type="submit"]'));
@@ -71,11 +76,15 @@ try {
   await settings.locator('[data-preserve="google-write-access"] > summary').click();
   await settings.locator('[name="gmailSend"]').check();
   await grantFrom(settings.locator('[data-preserve="google-write-access"] [data-scope-form] button[type="submit"]'));
+  assert.ok(lastRequestedScopes.includes(additionalScope), 'adding send access preserves previously selected additional scopes');
   await page.waitForFunction(() => document.querySelector('#setupContent [name="allowExternalWrites"]')?.checked);
   const runtime = await (await page.request.get(fixture.base + '/api/runtime')).json();
   assert.equal(runtime.google.sendEnabled, true);
   assert.equal((await (await page.request.get(fixture.base + '/api/state')).json()).outbox.length, 0);
   record('incremental-send-access-applies-immediately-without-executing-an-action');
+  const googleDraftScope = page.locator('#artifactPermissions [data-artifact-scope="google"]');
+  assert.equal(await googleDraftScope.locator('[name="additionalScopes"]').inputValue(), additionalScope);
+  record('google-draft-and-send-reauthorization-preserve-additional-scopes');
   await page.locator('#observationContent [name="enabled"]').uncheck();
   await page.locator('#observationContent [data-monitor-form] button[type="submit"]').click();
   await page.waitForFunction(() => document.querySelector('#observationContent')?.textContent.includes('Automatic checks paused'));

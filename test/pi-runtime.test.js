@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { PiReasoner, ReasoningBudget, createReasoner } from '../src/reasoning.js';
-import { piSupported, PI_LIMITS } from '../src/pi-runtime.js';
+import { piSupported, PI_LIMITS, piProviderBaseUrl } from '../src/pi-runtime.js';
 import { interpretRequest } from '../src/requests.js';
 import { SqliteStore } from '../src/durable/store.js';
 import { DurableDatabase } from '../src/durable/database.js';
@@ -62,6 +62,36 @@ piTest('Pi calls a real MCP stdio tool and feeds its result back into the model'
   assert.equal(records.length, 1);
   assert.equal(reasoner.runSummary('pi-mcp').tools[0].name, lookup.name);
   assert.equal(reasoner.calls, 2);
+});
+
+test('Pi strips one trailing /v1 only when the protocol is Anthropic messages', () => {
+  assert.equal(piProviderBaseUrl('https://scripted.invalid/v1', 'messages'), 'https://scripted.invalid');
+  assert.equal(piProviderBaseUrl('https://api.anthropic.com/v1/v1', 'messages'), 'https://api.anthropic.com/v1');
+  assert.equal(piProviderBaseUrl('https://provider.example', 'messages'), 'https://provider.example');
+  assert.equal(piProviderBaseUrl('https://scripted.invalid/v1', 'chat-completions'), 'https://scripted.invalid/v1');
+  assert.equal(piProviderBaseUrl('https://scripted.invalid/v1', 'responses'), 'https://scripted.invalid/v1');
+});
+
+piTest('Pi messages hands the stream a base without the trailing /v1', async () => {
+  const { createAssistantMessageEventStream } = await import('@earendil-works/pi-ai');
+  const seen = [];
+  const streamFn = async model => {
+    seen.push(model.baseUrl);
+    const stream = createAssistantMessageEventStream();
+    const message = {
+      role: 'assistant', content: [{ type: 'text', text: '{"probes":[]}' }], api: model.api, provider: model.provider, model: model.id,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: 'stop', timestamp: Date.now()
+    };
+    stream.push({ type: 'done', reason: 'stop', message }); stream.end(message);
+    return stream;
+  };
+  const messages = new PiReasoner({ baseUrl: 'https://scripted.invalid/v1', model: 'scripted', protocol: 'messages', runtimeOptions: { streamFn } });
+  assert.deepEqual(await messages.proposeProbes(input, 'pi-messages-base'), []);
+  assert.equal(seen[0], 'https://scripted.invalid');
+  const chat = new PiReasoner({ baseUrl: 'https://scripted.invalid/v1', model: 'scripted', protocol: 'chat-completions', runtimeOptions: { streamFn } });
+  assert.deepEqual(await chat.proposeProbes(input, 'pi-chat-base'), []);
+  assert.equal(seen[1], 'https://scripted.invalid/v1');
 });
 
 test('Pi selection is explicit and the classic no-install path remains the default', () => {
@@ -267,8 +297,8 @@ piTest('native Pi document reads share the durable task guard and execution ledg
   t.after(async () => { await runtime.close(); await engine.whenSettled(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   for (const event of fixture.events) engine.ingest(structuredClone(event));
   await engine.whenSettled();
-  const reads = runtime.ledger.list().filter(row => row.provider === 'document_store');
-  assert.deepEqual(reads.map(row => row.tool).sort(), ['read_document', 'search_documents']);
+  const reads = runtime.ledger.list().filter(row => row.provider === 'workspace');
+  assert.deepEqual(reads.map(row => row.tool).sort(), ['read_document', 'search_documents'], JSON.stringify({ tools: runtime.ledger.list().map(row => [row.provider, row.tool, row.status]), reasoner: reasoner.status() }));
   assert.ok(reads.every(row => row.status === 'verified' && row.is_write === 0));
   assert.equal(store.state.outbox.length, 0);
 });

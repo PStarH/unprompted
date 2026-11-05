@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en" data-root="../" data-copy="Copy" data-copied="Copied" data-no-results="No matches" data-search-start="Type to search the documentation." data-close="Close">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Security · Unprompted Docs</title>
+  <meta name="description" content="How to report a vulnerability, and the boundaries of this localhost prototype.">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/security/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/security/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/security/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/security/">
+  <meta property="og:title" content="Security · Unprompted Docs">
+  <meta property="og:description" content="How to report a vulnerability, and the boundaries of this localhost prototype.">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/security/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../sitemap.xml">
+  <link rel="stylesheet" href="../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Security","description":"How to report a vulnerability, and the boundaries of this localhost prototype.","inLanguage":"en","url":"https://pstarh.github.io/unprompted/docs/security/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Docs","item":"https://pstarh.github.io/unprompted/docs/"},{"@type":"ListItem","position":2,"name":"Reference"},{"@type":"ListItem","position":3,"name":"Security","item":"https://pstarh.github.io/unprompted/docs/security/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">Docs</span></a>
+    <button class="search-button" type="button" data-search><span>Search documentation</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="Language"><a href="../security/" hreflang="en" aria-current="true">EN</a><a href="../zh/security/" hreflang="zh-CN">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>Documentation menu</summary><section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/">Architecture</a></li><li><a href="../development/">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/" aria-current="page">Security</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/">Architecture</a></li><li><a href="../development/">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/" aria-current="page">Security</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="Breadcrumb"><a href="../">Docs</a><span class="crumb-sep" aria-hidden="true">/</span><span>Reference</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">Security</span></nav>
+      <p class="page-kicker">Reference</p><h1 class="page-title">Security</h1>
+      <details class="mobile-toc"><summary>On this page</summary><ol><li><a class="" href="#report-a-vulnerability">Report a vulnerability</a></li><li><a class="" href="#boundaries">Boundaries</a></li></ol></details>
+      <article class="prose"><p>Unprompted is a pre-1.0 prototype. Fixes land on <code>main</code>. There is no separate supported release branch, no bounty, and no promised response time.</p>
+<p>Everyday permissions are on <a href="../permissions/">Permissions and privacy</a>. This page is how to report a vulnerability, and what must stay out of a public issue.</p>
+<h2 id="report-a-vulnerability">Report a vulnerability<a class="heading-link" href="#report-a-vulnerability" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<p>Use <a href="https://github.com/PStarH/unprompted/security/advisories/new" rel="noreferrer">GitHub private vulnerability reporting</a>. If that page is unavailable, contact <a href="https://github.com/PStarH" rel="noreferrer">the maintainer</a> through a private method listed on their profile.</p>
+<p>Do not post exploit details, credentials, or private content in a public issue. If you cannot find a private channel, open a short issue that only asks for one, and leave the technical detail out.</p>
+<p>Include the affected commit, the impact, synthetic steps to reproduce, and the mode or settings involved. Say whether live Google access, the send opt-in, or turning shadow mode off is part of it.</p>
+<p>Do not include OAuth credentials, API keys, email, document links, or state files.</p>
+<p>The repository policy is <a href="https://github.com/PStarH/unprompted/blob/main/SECURITY.md" rel="noreferrer">SECURITY.md</a>.</p>
+<h2 id="boundaries">Boundaries<a class="heading-link" href="#boundaries" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<ul><li>The server binds to localhost and has no authentication. Do not expose it through a public host, reverse proxy, or tunnel.</li><li>Normal mode is read-only until you grant a write. An explicit <code>UNPROMPTED_SHADOW_MODE=true</code> blocks external writes.</li><li><code>npm run demo</code> keeps its own state and only simulates sending.</li><li>A model reply cannot approve an action, widen a permission, or stand in as evidence. A remote model can receive the task content from the sources you connected.</li><li>Local state holds synchronized content and evidence. It is not encrypted.</li><li>Local folders and Apple Notes stay inside the scopes you selected. Apple Notes needs macOS Automation permission. Revoking access invalidates that source evidence. It does not mark the work complete.</li></ul>
+<p>A mistake in these pages, or an ordinary product bug, can be a public issue. Use <strong>Report a problem with this page</strong> at the bottom. Keep secrets out of it.</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>Copy page</button><script type="application/json" id="page-markdown">"# Security\n\n> How to report a vulnerability, and the boundaries of this localhost prototype.\n\nUnprompted is a pre-1.0 prototype. Fixes land on `main`. There is no separate supported release branch, no bounty, and no promised response time.\n\nEveryday permissions are on [Permissions and privacy](https://pstarh.github.io/unprompted/docs/permissions/). This page is how to report a vulnerability, and what must stay out of a public issue.\n\n## Report a vulnerability\n\nUse [GitHub private vulnerability reporting](https://github.com/PStarH/unprompted/security/advisories/new). If that page is unavailable, contact [the maintainer](https://github.com/PStarH) through a private method listed on their profile.\n\nDo not post exploit details, credentials, or private content in a public issue. If you cannot find a private channel, open a short issue that only asks for one, and leave the technical detail out.\n\nInclude the affected commit, the impact, synthetic steps to reproduce, and the mode or settings involved. Say whether live Google access, the send opt-in, or turning shadow mode off is part of it.\n\nDo not include OAuth credentials, API keys, email, document links, or state files.\n\nThe repository policy is [SECURITY.md](https://github.com/PStarH/unprompted/blob/main/SECURITY.md).\n\n## Boundaries\n\n- The server binds to localhost and has no authentication. Do not expose it through a public host, reverse proxy, or tunnel.\n- Normal mode is read-only until you grant a write. An explicit `UNPROMPTED_SHADOW_MODE=true` blocks external writes.\n- `npm run demo` keeps its own state and only simulates sending.\n- A model reply cannot approve an action, widen a permission, or stand in as evidence. A remote model can receive the task content from the sources you connected.\n- Local state holds synchronized content and evidence. It is not encrypted.\n- Local folders and Apple Notes stay inside the scopes you selected. Apple Notes needs macOS Automation permission. Revoking access invalidates that source evidence. It does not mark the work complete.\n\nA mistake in these pages, or an ordinary product bug, can be a public issue. Use **Report a problem with this page** at the bottom. Keep secrets out of it.\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=Docs%3A%20Security&amp;body=Page%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fsecurity%2F%0A%0AWhat%20is%20wrong%3A%0A%0A" rel="noreferrer">Report a problem with this page</a><span>Version 0.3.0 · Current main branch</span></div>
+      <nav class="pager" aria-label="Previous"><a href="../changelog/"><span>Previous</span><strong>Changelog</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="On this page"><h2>On this page</h2><ol><li><a class="" href="#report-a-vulnerability">Report a vulnerability</a></li><li><a class="" href="#boundaries">Boundaries</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../">Website</a><a href="../">Docs</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="Open menu">
+    <div class="drawer-head"><strong>Docs</strong><button class="icon-button" type="button" data-menu-close aria-label="Close">×</button></div>
+    <section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/">Architecture</a></li><li><a href="../development/">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/" aria-current="page">Security</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="Search">
+    <div class="search-head"><strong>Search</strong><button class="icon-button" type="button" data-search-close aria-label="Close">×</button></div>
+    <input type="search" placeholder="Search documentation" aria-label="Search">
+    <p class="search-status">Type to search the documentation.</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

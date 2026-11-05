@@ -73,19 +73,15 @@ operator's responsibility on a later boot.
 ## GitHub, Outlook, Slack and Notion client provisioning
 
 Set `UNPROMPTED_GITHUB_CLIENT_ID` or `UNPROMPTED_MICROSOFT_CLIENT_ID` to the
-registered public application ID. Slack and Notion also need
-`UNPROMPTED_SLACK_CLIENT_ID` with `UNPROMPTED_SLACK_CLIENT_SECRET`, and
-`UNPROMPTED_NOTION_CLIENT_ID` with `UNPROMPTED_NOTION_CLIENT_SECRET`.
+registered public application ID. Slack PKCE needs `UNPROMPTED_SLACK_CLIENT_ID`; its legacy secret setting is optional. Native Notion needs `UNPROMPTED_NOTION_CLIENT_ID` with `UNPROMPTED_NOTION_CLIENT_SECRET`.
 Alternatively set `UNPROMPTED_CONNECTOR_CLIENTS_FILE` to a JSON file with
-`github.clientId`, `microsoft.clientId`, and Slack or Notion `clientId` plus
-`clientSecret`. The local app builder accepts `--connector-clients PATH`.
+`github.clientId`, `microsoft.clientId`, `slack.clientId`, and native Notion `clientId` plus `clientSecret`. The local app builder accepts `--connector-clients PATH`.
 
-GitHub and Outlook use device OAuth. Slack and Notion use a browser authorization
+GitHub uses device OAuth. Outlook uses browser authorization with PKCE and a dynamically selected local port; register `http://localhost/oauth/microsoft` as a mobile and desktop redirect. Slack and Notion use a browser authorization
 code and the fixed redirects `http://localhost:53682/oauth/slack` and
 `http://localhost:53682/oauth/notion`. End users authorize their own accounts.
 Access tokens are not pasted into the app. Refresh tokens stay in private local
-setup. These integrations are read-only. See [Connectors](CONNECTORS.md) for
-registration, scopes and supported behavior.
+setup. Observation is the default; platform actions require provider-granted scopes and explicit local authorization. Native Notion exchanges its secret locally, so bundling it does not create a confidential client. See [Connectors](CONNECTORS.md) and the [complete setup tutorial (Chinese)](CONNECTOR_SETUP.zh-CN.md) for registration, scopes, distribution boundaries and supported behavior.
 
 ## Google client provisioning
 

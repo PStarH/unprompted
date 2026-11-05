@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en" data-root="../" data-copy="Copy" data-copied="Copied" data-no-results="No matches" data-search-start="Type to search the documentation." data-close="Close">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture · Unprompted Docs</title>
+  <meta name="description" content="How one piece of work moves through the local Node.js process, and what is not implemented.">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/architecture/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/architecture/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/architecture/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/architecture/">
+  <meta property="og:title" content="Architecture · Unprompted Docs">
+  <meta property="og:description" content="How one piece of work moves through the local Node.js process, and what is not implemented.">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/architecture/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../sitemap.xml">
+  <link rel="stylesheet" href="../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Architecture","description":"How one piece of work moves through the local Node.js process, and what is not implemented.","inLanguage":"en","url":"https://pstarh.github.io/unprompted/docs/architecture/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Docs","item":"https://pstarh.github.io/unprompted/docs/"},{"@type":"ListItem","position":2,"name":"Reference"},{"@type":"ListItem","position":3,"name":"Architecture","item":"https://pstarh.github.io/unprompted/docs/architecture/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../"><img src="../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">Docs</span></a>
+    <button class="search-button" type="button" data-search><span>Search documentation</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="Language"><a href="../architecture/" hreflang="en" aria-current="true">EN</a><a href="../zh/architecture/" hreflang="zh-CN">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>Documentation menu</summary><section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/" aria-current="page">Architecture</a></li><li><a href="../development/">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/">Security</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/" aria-current="page">Architecture</a></li><li><a href="../development/">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/">Security</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="Breadcrumb"><a href="../">Docs</a><span class="crumb-sep" aria-hidden="true">/</span><span>Reference</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">Architecture</span></nav>
+      <p class="page-kicker">Reference</p><h1 class="page-title">Architecture</h1>
+      <details class="mobile-toc"><summary>On this page</summary><ol><li><a class="" href="#one-piece-of-work">One piece of work</a></li><li><a class="" href="#modules">Modules</a></li><li><a class="" href="#not-implemented">Not implemented</a></li></ol></details>
+      <article class="prose"><p>Unprompted is a Node.js process with SQLite, a browser interface in <code>public/</code>, and HTTP in <code>server.js</code>. <code>better-sqlite3</code> is required. Pi Agent Core and the MCP client are optional. The demo keeps a JSON store.</p>
+<h2 id="one-piece-of-work">One piece of work<a class="heading-link" href="#one-piece-of-work" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<div class="code-block"><span class="code-label">text</span><pre><code>event → normalize → request → correlate → evidence
+      → prepare → check authority → execute → verify</code></pre><button type="button" class="code-copy">Copy</button></div>
+<p>A later event can reassess an open request. An unrelated event is stored without a task. If newer evidence invalidates a draft, the draft is withdrawn. Completion requires a verified result, not a model sentence.</p>
+<h2 id="modules">Modules<a class="heading-link" href="#modules" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<div class="table-wrap"><table><thead><tr><th>Layer</th><th>Role</th><th>Where</th></tr></thead><tbody><tr><td>Connectors</td><td>Read sources and keep cursors</td><td><code>src/connectors/</code></td></tr><tr><td>Context</td><td>Requests, documents, freshness</td><td><code>src/requests.js</code>, <code>src/store.js</code></td></tr><tr><td>Planning</td><td>Interpret and choose checks</td><td><code>src/reasoning.js</code>, <code>src/pi-runtime.js</code></td></tr><tr><td>Authority</td><td>Evidence and permissions</td><td><code>src/evidence.js</code>, <code>src/permissions.js</code></td></tr><tr><td>Execution</td><td>Prepare and run allowed actions</td><td><code>src/engine.js</code></td></tr><tr><td>MCP</td><td>Optional read tools</td><td><code>src/mcp.js</code>, <code>src/tool-loop.js</code></td></tr><tr><td>Interface</td><td>The local workspace</td><td><code>public/</code></td></tr></tbody></table></div>
+<p><code>src/contracts.js</code> defines the shapes those layers exchange.</p>
+<h2 id="not-implemented">Not implemented<a class="heading-link" href="#not-implemented" aria-label="Link to this section"><span aria-hidden="true">#</span></a></h2>
+<p>General desktop control, calendar, and unrestricted document rewriting are not implemented. There is no hosted service, no authentication, and no multi-user tenancy.</p>
+<p>Google sync polls. It does not renew a push channel. Tests and scenario scores are about their fixtures. They are not a measurement of time saved or of production reliability.</p>
+<p>The longer design note is <a href="https://github.com/PStarH/unprompted/blob/main/docs/ARCHITECTURE.md" rel="noreferrer">docs/ARCHITECTURE.md</a>. The v0.3 baseline is <a href="https://github.com/PStarH/unprompted/blob/main/docs/PRD.md" rel="noreferrer">docs/PRD.md</a>.</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>Copy page</button><script type="application/json" id="page-markdown">"# Architecture\n\n> How one piece of work moves through the local Node.js process, and what is not implemented.\n\nUnprompted is a Node.js process with SQLite, a browser interface in `public/`, and HTTP in `server.js`. `better-sqlite3` is required. Pi Agent Core and the MCP client are optional. The demo keeps a JSON store.\n\n## One piece of work\n\n```text\nevent → normalize → request → correlate → evidence\n      → prepare → check authority → execute → verify\n```\n\nA later event can reassess an open request. An unrelated event is stored without a task. If newer evidence invalidates a draft, the draft is withdrawn. Completion requires a verified result, not a model sentence.\n\n## Modules\n\n| Layer | Role | Where |\n| --- | --- | --- |\n| Connectors | Read sources and keep cursors | `src/connectors/` |\n| Context | Requests, documents, freshness | `src/requests.js`, `src/store.js` |\n| Planning | Interpret and choose checks | `src/reasoning.js`, `src/pi-runtime.js` |\n| Authority | Evidence and permissions | `src/evidence.js`, `src/permissions.js` |\n| Execution | Prepare and run allowed actions | `src/engine.js` |\n| MCP | Optional read tools | `src/mcp.js`, `src/tool-loop.js` |\n| Interface | The local workspace | `public/` |\n\n`src/contracts.js` defines the shapes those layers exchange.\n\n## Not implemented\n\nGeneral desktop control, calendar, and unrestricted document rewriting are not implemented. There is no hosted service, no authentication, and no multi-user tenancy.\n\nGoogle sync polls. It does not renew a push channel. Tests and scenario scores are about their fixtures. They are not a measurement of time saved or of production reliability.\n\nThe longer design note is [docs/ARCHITECTURE.md](https://github.com/PStarH/unprompted/blob/main/docs/ARCHITECTURE.md). The v0.3 baseline is [docs/PRD.md](https://github.com/PStarH/unprompted/blob/main/docs/PRD.md).\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=Docs%3A%20Architecture&amp;body=Page%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Farchitecture%2F%0A%0AWhat%20is%20wrong%3A%0A%0A" rel="noreferrer">Report a problem with this page</a><span>Version 0.3.0 · Current main branch</span></div>
+      <nav class="pager" aria-label="Previous"><a href="../api/"><span>Previous</span><strong>Local API</strong></a><a class="next" href="../development/"><span>Next</span><strong>Development and testing</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="On this page"><h2>On this page</h2><ol><li><a class="" href="#one-piece-of-work">One piece of work</a></li><li><a class="" href="#modules">Modules</a></li><li><a class="" href="#not-implemented">Not implemented</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../">Website</a><a href="../">Docs</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="Open menu">
+    <div class="drawer-head"><strong>Docs</strong><button class="icon-button" type="button" data-menu-close aria-label="Close">×</button></div>
+    <section class="nav-section"><h2>Start here</h2><ul><li><a href="../">Overview</a></li><li><a href="../quickstart/">Install and first run</a></li><li><a href="../models/">Models</a></li><li><a href="../connectors/">Connectors</a></li><li><a href="../google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>Use Unprompted</h2><ul><li><a href="../workspace/">Workspace</a></li><li><a href="../shortcuts/">Keyboard shortcuts</a></li><li><a href="../workflows/">How work moves</a></li><li><a href="../follow-up/">Automatic follow-up</a></li><li><a href="../permissions/">Permissions and privacy</a></li></ul></section><section class="nav-section"><h2>Help</h2><ul><li><a href="../troubleshooting/">Troubleshooting</a></li><li><a href="../faq/">FAQ</a></li><li><a href="../contributing/">Contributing</a></li></ul></section><section class="nav-section"><h2>Reference</h2><ul><li><a href="../configuration/">Configuration</a></li><li><a href="../api/">Local API</a></li><li><a href="../architecture/" aria-current="page">Architecture</a></li><li><a href="../development/">Development and testing</a></li><li><a href="../glossary/">Glossary</a></li><li><a href="../changelog/">Changelog</a></li><li><a href="../security/">Security</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="Search">
+    <div class="search-head"><strong>Search</strong><button class="icon-button" type="button" data-search-close aria-label="Close">×</button></div>
+    <input type="search" placeholder="Search documentation" aria-label="Search">
+    <p class="search-status">Type to search the documentation.</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

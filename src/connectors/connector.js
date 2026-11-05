@@ -1,9 +1,10 @@
+import { PLATFORM_APIS, API_METHODS, performPlatformRequest } from './platform-api.js';
 import { normalizeEvent, validateEventPayload } from './events.js';
 
 /** Native provider identifiers and filesystem metadata stay in private cursors. */
 export function publicSourceCursors(cursors = {}) {
   return Object.fromEntries(Object.entries(cursors).map(([id, cursor]) => [id,
-    ['local_files', 'apple_notes'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || {}).length, counts: cursor.counts || {} }
+    ['local_files', 'apple_notes', 'apple_calendar', 'apple_mail', 'apple_contacts'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || cursor.messages || {}).length, counts: cursor.counts || {} }
       : cursor ? { checkpointStored: true, ...(cursor.recovering === true ? { recovering: true } : {}) } : null]));
 }
 
@@ -60,10 +61,14 @@ export class Connector {
 
   // Enabled operations for this configured instance, never provider marketing
   // capabilities or evidence that a remote grant is still valid.
+  platformCapabilities() { const api = PLATFORM_APIS[this.id]; return api ? { available: this.live, origin: api.origin, methods: API_METHODS, authorization: api.authorization, scopeEnforcedBy: 'provider', writesRequireUserGrant: true } : null; }
+
+  requestApi(input, context) { return performPlatformRequest(this, input, context); }
+
   capabilities() { return { read: [], search: [], pagination: [], incremental: [], observation: 'none', providerPush: false, write: [], verify: [] }; }
 
   describe() {
-    return { id: this.id, kind: this.kind, live: this.live, shadow: Boolean(this.shadow), ...this.validate(), capabilities: this.capabilities() };
+    return { id: this.id, kind: this.kind, live: this.live, shadow: Boolean(this.shadow), ...this.validate(), capabilities: this.capabilities(), platformApi: this.platformCapabilities() };
   }
 }
 
@@ -99,6 +104,16 @@ export class CursorStore {
     });
   }
 
+  observe(connectorId, observation) {
+    // A small durable heartbeat, separate from the large content snapshot.
+    if (this.store.database) this.store.database.atomic(() => this.store.database.set(`connector_observation:${connectorId}`, JSON.stringify(observation)));
+    else { this.observations ||= new Map(); this.observations.set(connectorId, observation); }
+  }
+
+  observation(connectorId) {
+    return this.store.database ? JSON.parse(this.store.database.get(`connector_observation:${connectorId}`, 'null')) : this.observations?.get(connectorId) || null;
+  }
+
   describe() {
     return {
       cursors: publicSourceCursors(this.store.state.cursors),
@@ -117,3 +132,22 @@ export function toNormalizedEvents(connectorId, source, records) {
 }
 
 export const connectorApi = { Connector, ConnectorError, CursorStore, toNormalizedEvents };
+
+/**
+ * Checkpoints acknowledge ingested provider pages, never wall-clock success.
+ * complete: acknowledge cursor; partial: acknowledge successful scopes/pages only;
+ * failed: retain checkpoint; expired: re-enumerate before establishing a baseline.
+ * `recovering`/`hasMore` prevent a recovery page from claiming complete coverage.
+ */
+export function acknowledgedCursor(previous, pulled) {
+  const outcomes = pulled.scopes;
+  if (!outcomes) return pulled.cursor ?? previous;
+  const next = { ...(previous || {}) };
+  for (const [scope, result] of Object.entries(outcomes)) {
+    if (!['complete', 'partial', 'failed', 'recovering'].includes(result?.status)) throw new ConnectorError('Invalid scope checkpoint outcome.');
+    if (result.status === 'failed') continue;
+    if (!Object.hasOwn(result, 'cursor')) throw new ConnectorError('An acknowledged scope requires its checkpoint.');
+    next[scope] = result.cursor;
+  }
+  return next;
+}

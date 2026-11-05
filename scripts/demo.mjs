@@ -6,9 +6,10 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEMO_MEMORY_LIMIT } from '../src/demo-memories.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const usage = 'Usage: npm run demo -- [--port 4173] [--memories 0..100] [--no-open | --open]';
+export const DEMO_USAGE = `Usage: npm run demo -- [--port 4173] [--memories 0..${DEMO_MEMORY_LIMIT}] [--no-open | --open]`;
 
 export async function chooseDemoPort(preferred, { strict = false, attempts = 20 } = {}) {
   for (let offset = 0; offset < (strict ? 1 : attempts); offset++) {
@@ -24,29 +25,38 @@ export async function chooseDemoPort(preferred, { strict = false, attempts = 20 
   throw new Error(`Port ${preferred}${strict ? '' : ` through ${Math.min(preferred + attempts - 1, 65535)}`} is unavailable. Try: npm run demo -- --port ${preferred < 65535 ? Math.min(preferred + attempts, 65535) : 4180}`);
 }
 
-export async function launchDemo(args = process.argv.slice(2)) {
+export function parseDemoArgs(args = [], { env = process.env, isTTY = Boolean(process.stdin.isTTY) } = {}) {
   if (args.includes('--help')) {
-    console.log(`${usage}\nStarts when you open the page. No install, account, API key or external send.\nA busy default port is replaced automatically. Ctrl+C stops the demo.`);
-    return;
+    return { help: true, requested: env.PORT || '4173', strict: Boolean(env.PORT), openBrowser: Boolean(isTTY && !env.CI), memoryCount: 0 };
   }
-  let requested = process.env.PORT || '4173';
-  let strict = Boolean(process.env.PORT);
-  let openBrowser = Boolean(process.stdin.isTTY && !process.env.CI);
+  let requested = env.PORT || '4173';
+  let strict = Boolean(env.PORT);
+  let openBrowser = Boolean(isTTY && !env.CI);
   let memoryCount = 0;
   for (let index = 0; index < args.length; index++) {
     if (args[index] === '--port' && args[index + 1]) { requested = args[++index]; strict = true; }
     else if (args[index] === '--memories' && args[index + 1]) {
       const value = args[++index];
-      if (!/^\d+$/.test(value) || Number(value) > 100) throw new Error(usage);
+      if (!/^\d+$/.test(value) || Number(value) > DEMO_MEMORY_LIMIT) throw new Error(DEMO_USAGE);
       memoryCount = Number(value);
     }
     else if (args[index] === '--no-open') openBrowser = false;
     else if (args[index] === '--open') openBrowser = true;
-    else throw new Error(usage);
+    else throw new Error(DEMO_USAGE);
   }
   if (!/^\d+$/.test(requested) || Number(requested) < 1 || Number(requested) > 65535) {
-    throw new Error(`${usage}\nThe port must be between 1 and 65535.`);
+    throw new Error(`${DEMO_USAGE}\nThe port must be between 1 and 65535.`);
   }
+  return { help: false, requested, strict, openBrowser, memoryCount };
+}
+
+export async function launchDemo(args = process.argv.slice(2)) {
+  const options = parseDemoArgs(args);
+  if (options.help) {
+    console.log(`${DEMO_USAGE}\nStarts when you open the page. No install, account, API key or external send.\nA busy default port is replaced automatically. Ctrl+C stops the demo.`);
+    return;
+  }
+  let { requested, strict, openBrowser, memoryCount } = options;
   const port = await chooseDemoPort(Number(requested), { strict });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-demo-'));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GOOGLE_|UNPROMPTED_)/i.test(key)));
@@ -55,7 +65,8 @@ export async function launchDemo(args = process.argv.slice(2)) {
     UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'),
     UNPROMPTED_STATE_FILE: path.join(directory, 'state.json'),
     UNPROMPTED_SHADOW_MODE: 'false', UNPROMPTED_FORCE_SIMULATION: 'true',
-    UNPROMPTED_SYNC_INTERVAL_MS: '0', UNPROMPTED_DEMO_MEMORY_COUNT: String(memoryCount)
+    UNPROMPTED_SYNC_INTERVAL_MS: '0', UNPROMPTED_DEMO_MEMORY_COUNT: String(memoryCount),
+    UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(directory, 'unused-oauth-client.json')
   });
   console.log('\nStarting a fresh Unprompted demo…');
   if (port !== Number(requested)) console.log(`Port ${requested} is busy; using ${port}.`);

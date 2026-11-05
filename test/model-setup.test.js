@@ -12,6 +12,30 @@ import { buildScenario } from '../src/connectors/simulated.js';
 const response = content => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(content) } }] }) });
 const reading = { deliverable: 'proposal', subjectEntity: 'Cedar', intent: 'update_and_send', requiredContent: [{ text: 'sample size', sourceQuote: 'sample size', sourceField: 'body' }] };
 
+test('each supported protocol is stored and called on its own path', async () => {
+  const cases = [
+    ['chat-completions', 'https://provider.example/v1/chat/completions', 'authorization', 'Bearer private-fixture-key'],
+    ['responses', 'https://provider.example/v1/responses', 'authorization', 'Bearer private-fixture-key'],
+    ['messages', 'https://provider.example/v1/messages', 'x-api-key', 'private-fixture-key']
+  ];
+  for (const [protocol, url, header, value] of cases) {
+    const requests = [];
+    const settings = normalizeModelSettings({ baseUrl: `https://provider.example/v1/${protocol === 'chat-completions' ? 'chat/completions' : protocol}`, model: 'fixture', apiKey: 'private-fixture-key', protocol });
+    assert.equal(settings.protocol, protocol);
+    assert.equal(settings.baseUrl, 'https://provider.example/v1');
+    const checked = await validateModelSettings(settings, { fetchImpl: async (requestUrl, options) => {
+      requests.push({ requestUrl, headers: options.headers });
+      if (protocol === 'responses') return { ok: true, json: async () => ({ status: 'completed', output_text: JSON.stringify(reading) }) };
+      if (protocol === 'messages') return { ok: true, json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(reading) }] }) };
+      return response(reading);
+    } });
+    assert.equal(requests[0].requestUrl, url);
+    assert.equal(requests[0].headers[header], value);
+    assert.equal(checked.reasoner.protocol, protocol);
+  }
+  assert.throws(() => normalizeModelSettings({ baseUrl: 'https://provider.example/v1', model: 'fixture', protocol: 'legacy' }), /supported API protocol/);
+});
+
 test('model setup preserves a key only for the same endpoint and never accepts credentials in URLs', () => {
   const prior = { baseUrl: 'https://provider.example/v1', apiKey: 'private-fixture-key' };
   assert.equal(normalizeModelSettings({ baseUrl: prior.baseUrl + '/chat/completions', model: 'model' }, prior).apiKey, prior.apiKey);
@@ -122,7 +146,7 @@ test('the persistent source launcher starts unconfigured without playing the rul
   const root = fileURLToPath(new URL('../', import.meta.url));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GOOGLE_|UNPROMPTED_)/i.test(key)));
   const child = spawn(process.execPath, ['scripts/start.mjs', '--no-open'], { cwd: root,
-    env: { ...env, UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'), UNPROMPTED_STATE_FILE: path.join(directory, 'state.json') },
+    env: { ...env, UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'), UNPROMPTED_STATE_FILE: path.join(directory, 'state.json'), UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(directory, 'no-google-client.json') },
     stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });

@@ -226,3 +226,12 @@ test('an environment account never inherits another saved account credentials, s
   assert.equal(env.GOOGLE_SEND_ENABLED, undefined);
   assert.equal(env.UNPROMPTED_SHADOW_MODE, 'true');
 });
+
+test('Google additional provider scopes are consented and retained without a fixed local scope list', async t => {
+  const { store } = tempStore(t); store.saveDesktopClientJson(desktopClient);
+  const scope = 'https://www.googleapis.com/auth/calendar.events';
+  const oauth = new GoogleOAuthSetup(store, { timeoutMs: 10000 }); t.after(() => oauth.cancel());
+  const started = await oauth.start({ scopes: { additionalScopes: [scope], readGmail: false, readDrive: false } });
+  assert.ok(new URL(started.authorizeUrl).searchParams.get('scope').split(' ').includes(scope));
+  assert.deepEqual(store.get().google.scopes.additionalScopes, [scope]);
+});

@@ -45,7 +45,7 @@ description: 运行模式、设置保存在哪里，以及会改变行为的环�
 | 应用 | 构建里包含什么 | 用户怎么做 |
 | --- | --- | --- |
 | GitHub | 公开 Client ID，设备码流程，以及议题、拉取请求、内容、Actions 和 Metadata 的读取权限。不要申请 `repo` 范围 | **获取授权码** |
-| Outlook | 公开 Client ID，设备码流程。委托权限为 `openid`、`profile`、`offline_access`、`User.Read` 和 `Mail.Read`。草稿以后再加 `Mail.ReadWrite` | **获取授权码** |
+| Outlook | 公开 Client ID，浏览器 PKCE 授权；移动和桌面平台的重定向 URI 为 `http://localhost/oauth/microsoft`。委托权限为 `openid`、`profile`、`offline_access`、`User.Read` 和 `Mail.Read`。草稿以后再加 `Mail.ReadWrite` | **连接**，然后登录并同意 |
 | Slack | Client ID 和 Client Secret，并启用 PKCE。回调为 `http://localhost:53682/oauth/slack`。用户范围是 `im:read`、`im:history`、`mpim:read`、`mpim:history` 和 `users:read`。不要加机器人或写入范围 | **连接** |
 | Notion | Client ID 和 Client Secret。回调为 `http://localhost:53682/oauth/notion`。读取内容和用户信息；用户要创建页面时再开启 **Insert content** | **连接** |
 | Google | 桌面客户端文件，其中不能有用户的刷新令牌 | **连接 Google** |

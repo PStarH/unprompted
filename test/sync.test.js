@@ -75,7 +75,7 @@ test('public sync status does not disclose provider continuation tokens or accou
   assert.doesNotMatch(JSON.stringify(result), /private/);
 });
 
-test('a pull that never returns times out, commits no cursor, and allows the next run', async () => {
+test('a timed-out pull remains fenced while other connectors can proceed', async () => {
   const { store, engine, cursors } = setup();
   let calls = 0;
   const connector = new ScriptedConnector('google', []);
@@ -99,9 +99,14 @@ test('a pull that never returns times out, commits no cursor, and allows the nex
   assert.equal(sync.running, false, 'the next run must be allowed to start');
 
   const second = await sync.run();
-  assert.equal(second.results[0].failed, false);
-  assert.equal(second.results[0].ingested, 1);
-  assert.equal(cursors.get('google').gmail.historyId, 'h9');
+  assert.equal(second.results[0].failed, true);
+  assert.match(second.results[0].error, /still in flight/);
+  assert.equal(calls, 1);
+  const other = new ScriptedConnector('microsoft', [{ events: [], cursor: { page: 1 }, errors: [] }]);
+  sync.connectors.push(other);
+  const third = await sync.run();
+  assert.equal(third.results[1].failed, false);
+  assert.deepEqual(cursors.get('microsoft'), { page: 1 });
 });
 
 test('a successful sync ingests events and commits the cursor the provider acknowledged', async () => {
@@ -259,6 +264,51 @@ test('a bounded sync follows pages immediately and commits only ingested pages',
   assert.equal(result.failed, true); assert.equal(result.ingested, 2); assert.equal(result.pages, 3);
   assert.deepEqual(cursors.get('google'), { page: 2 });
   assert.equal(store.state.events.length, 2);
+});
+
+test('a revoked connector is not pulled and keeps the cursor already stored', async () => {
+  const { cursors } = setup();
+  cursors.set('google', { page: 4 });
+  const connector = new ScriptedConnector('google', [{ events: [liveEmail('m-9')], cursor: { page: 9 }, errors: [] }]);
+  const sync = new ConnectorSync({
+    connectors: [connector], cursors,
+    engine: { durableRuntime: { privacy: { permissionRevoked: () => true } }, ingest() { throw new Error('must not ingest'); } }
+  });
+  const result = await sync.run();
+  assert.deepEqual(result.results, []);
+  assert.equal(connector.calls.length, 0);
+  assert.deepEqual(cursors.get('google'), { page: 4 });
+});
+
+test('revocation during a pull or a permission_revoked ingest does not commit the new cursor', async () => {
+  const during = setup();
+  during.cursors.set('google', { page: 1 });
+  let checks = 0;
+  const pulling = new ScriptedConnector('google', [{ events: [liveEmail('m-9')], cursor: { page: 2 }, errors: [] }]);
+  const mid = new ConnectorSync({
+    connectors: [pulling], cursors: during.cursors,
+    engine: {
+      durableRuntime: { privacy: { permissionRevoked: () => { checks += 1; return checks > 1; } } },
+      ingest() { throw new Error('must not ingest'); }
+    }
+  });
+  const revokedMidPull = await mid.run();
+  assert.equal(revokedMidPull.results[0].failed, true);
+  assert.match(revokedMidPull.results[0].error, /disabled during synchronization/);
+  assert.equal(pulling.calls.length, 1);
+  assert.deepEqual(during.cursors.get('google'), { page: 1 });
+
+  const ingested = setup();
+  ingested.cursors.set('google', { page: 1 });
+  const connector = new ScriptedConnector('google', [{ events: [liveEmail('m-8')], cursor: { page: 3 }, errors: [] }]);
+  const sync = new ConnectorSync({
+    connectors: [connector], cursors: ingested.cursors,
+    engine: { ingest: () => ({ duplicate: true, disposition: 'permission_revoked' }) }
+  });
+  const outcome = await sync.run();
+  assert.equal(outcome.results[0].failed, true);
+  assert.match(outcome.results[0].error, /cursor was not advanced/);
+  assert.deepEqual(ingested.cursors.get('google'), { page: 1 });
 });
 
 test('a sync caps page bursts and refuses a non-advancing continuation', async () => {

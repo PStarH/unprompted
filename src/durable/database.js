@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { randomBytes, createHmac } from 'node:crypto';
 
-export const SQLITE_RUNTIME = Object.freeze({ package: 'better-sqlite3', packageVersion: '12.11.1', sqliteVersion: '3.53.2', schemaVersion: 5 });
+export const SQLITE_RUNTIME = Object.freeze({ package: 'better-sqlite3', packageVersion: '12.11.1', sqliteVersion: '3.53.2', schemaVersion: 7 });
 export const durableError = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
 export const iso = value => new Date(value ?? Date.now()).toISOString();
 export const parse = value => value == null ? null : JSON.parse(value);
@@ -91,6 +91,7 @@ export class DurableDatabase {
           if (!artifacts.has('situation_id')) this.db.exec('ALTER TABLE artifacts ADD COLUMN situation_id TEXT');
           if (!artifacts.has('situation_version')) this.db.exec('ALTER TABLE artifacts ADD COLUMN situation_version INTEGER');
           if (!artifacts.has('stale')) this.db.exec('ALTER TABLE artifacts ADD COLUMN stale INTEGER NOT NULL DEFAULT 0');
+          this.migrateMemorySpace();
           this.db.pragma(`user_version=${SQLITE_RUNTIME.schemaVersion}`);
         }
         if (this.db.prepare("SELECT v FROM memory_fts_config WHERE k='secure-delete'").get()?.v !== 1) throw durableError('FTS_CONFIGURATION', 'FTS secure deletion is not enabled.', 503);
@@ -103,6 +104,65 @@ export class DurableDatabase {
   }
   atomic(callback) { return this.db.inTransaction ? callback(this.db) : this.writes.sync(callback); }
   write(callback) { return this.writes.write(callback); }
+  /** Additive, idempotent upgrade through v7 for the Memory Space storage layer.
+   * Existing rows keep their content; inactive task_memory sources become
+   * deleted. Each memory gets one labelled baseline snapshot, never a
+   * fabricated edit history. */
+  migrateMemorySpace() {
+    const columns = new Set(this.db.pragma('table_info(user_memories)').map(column => column.name));
+    if (!columns.has('memory_kind')) this.db.exec("ALTER TABLE user_memories ADD COLUMN memory_kind TEXT NOT NULL DEFAULT 'fact' CHECK(memory_kind IN ('fact','preference'))");
+    if (!columns.has('lifecycle_state')) this.db.exec("ALTER TABLE user_memories ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_state IN ('active','disabled','archived','deleted','superseded'))");
+    if (!columns.has('valid_until')) this.db.exec('ALTER TABLE user_memories ADD COLUMN valid_until TEXT');
+    if (!columns.has('lifecycle_updated_at')) this.db.exec('ALTER TABLE user_memories ADD COLUMN lifecycle_updated_at TEXT');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS memory_versions (
+      memory_id TEXT NOT NULL REFERENCES user_memories(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL, content TEXT NOT NULL, scope_type TEXT NOT NULL, scope_key TEXT NOT NULL,
+      memory_kind TEXT NOT NULL CHECK(memory_kind IN ('fact','preference')),
+      source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
+      lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('active','disabled','archived','deleted','superseded')),
+      valid_until TEXT, change_kind TEXT NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY(memory_id,version)
+    )`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS memory_relations (
+      id TEXT PRIMARY KEY,
+      source_memory_id TEXT NOT NULL REFERENCES user_memories(id),
+      target_memory_id TEXT NOT NULL REFERENCES user_memories(id),
+      relation_kind TEXT NOT NULL CHECK(relation_kind IN ('belongs_to','mentions','related_to','derived_from','supersedes','contradicts')),
+      status TEXT NOT NULL DEFAULT 'established' CHECK(status IN ('established','suggested')),
+      evidence_kind TEXT, evidence_ref TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE(source_memory_id,target_memory_id,relation_kind),
+      CHECK(source_memory_id <> target_memory_id),
+      CHECK(relation_kind NOT IN ('related_to','contradicts') OR source_memory_id < target_memory_id)
+    )`);
+    this.db.exec('CREATE INDEX IF NOT EXISTS ix_memory_relations_target ON memory_relations(target_memory_id,relation_kind,status)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS ix_memory_relations_source ON memory_relations(source_memory_id,relation_kind)');
+    this.db.prepare(`UPDATE user_memories SET lifecycle_state='deleted', lifecycle_updated_at=COALESCE(lifecycle_updated_at, ?)
+      WHERE source_kind='task_memory' AND lifecycle_state='active'
+      AND EXISTS (SELECT 1 FROM source_records s WHERE s.kind=user_memories.source_kind AND s.id=user_memories.source_id AND s.active=0)`)
+      .run(new Date(this.now()).toISOString());
+    this.db.exec(`INSERT OR IGNORE INTO memory_versions(memory_id,version,content,scope_type,scope_key,memory_kind,source_kind,source_id,lifecycle_state,valid_until,change_kind,created_at)
+      SELECT id,version,content,scope_type,scope_key,memory_kind,source_kind,source_id,lifecycle_state,valid_until,'current_snapshot',updated_at FROM user_memories`);
+    // v6 correction writers reversed `supersedes`. Repair only their known
+    // fingerprint; preserve user relations and all provenance/history.
+    const reversed = this.db.prepare(`SELECT r.* FROM memory_relations r
+      JOIN user_memories old ON old.id=r.source_memory_id
+      WHERE r.relation_kind='supersedes' AND r.evidence_kind='direct_correction'
+      AND r.evidence_ref=r.source_memory_id AND old.lifecycle_state='superseded'`).all();
+    for (const edge of reversed) {
+      this.db.prepare('DELETE FROM memory_relations WHERE id=?').run(edge.id);
+      this.db.prepare(`INSERT OR IGNORE INTO memory_relations
+        (id,source_memory_id,target_memory_id,relation_kind,status,evidence_kind,evidence_ref,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(edge.id, edge.target_memory_id, edge.source_memory_id,
+          edge.relation_kind, edge.status, edge.evidence_kind, edge.evidence_ref, edge.created_at, edge.updated_at);
+    }
+    if (reversed.length) this.bump('context_version');
+    const at = new Date(this.now()).toISOString();
+    const changed = this.db.prepare(`DELETE FROM hot_context_items WHERE origin_kind='memory' AND origin_id NOT IN (
+      SELECT m.id FROM user_memories m JOIN source_records s ON s.kind=m.source_kind AND s.id=m.source_id AND s.active=1
+      WHERE m.lifecycle_state='active' AND (m.valid_until IS NULL OR m.valid_until > ?)
+      AND NOT EXISTS (SELECT 1 FROM memory_relations r WHERE r.target_memory_id=m.id AND r.relation_kind='supersedes' AND r.status='established'))`).run(at).changes;
+    if (changed) this.bump('context_version');
+  }
   get(key, fallback = null) { return this.db.prepare('SELECT value FROM metadata WHERE key=?').get(key)?.value ?? fallback; }
   set(key, value) { this.db.prepare('INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, String(value)); }
   bump(key) { const value = Number(this.get(key, '0')) + 1; this.set(key, value); return value; }

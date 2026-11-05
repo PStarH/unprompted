@@ -504,17 +504,18 @@ test('drive change tracking exports google docs into normalized document events'
       newStartPageToken: 'p-2',
       changes: [
         { fileId: 'doc-1', file: { id: 'doc-1', name: 'Northstar project proposal', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-10-16T09:00:00.000Z', version: '7' } },
-        { fileId: 'sheet-1', file: { id: 'sheet-1', name: 'Data', mimeType: 'application/vnd.google-apps.spreadsheet' } },
+        { fileId: 'sheet-1', file: { id: 'sheet-1', name: 'Data', mimeType: 'application/vnd.google-apps.spreadsheet', modifiedTime: '2026-10-16T08:00:00.000Z', version: '1' } },
         { fileId: 'gone', removed: true }
       ]
     })],
+    ['drive/v3/files/sheet-1/export', textResponse('Metric,Value\nSample,100')],
     ['drive/v3/files/doc-1/export', textResponse('## Experiment results\nRun date: 2026-10-16\n')],
     ['drive/v3/files?', jsonResponse({ files: [] })]
   ]);
   const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readGmail: false }, fetchImpl });
   const result = await connector.pull({ cursor: { drive: { pageToken: 'p-1' } } });
   assert.equal(result.errors.length, 0);
-  assert.equal(result.events.filter(event => event.type === 'document.modified').length, 1, 'only Google Docs are tracked');
+  assert.equal(result.events.filter(event => event.type === 'document.modified').length, 2, 'Docs and Sheets are tracked');
   assert.equal(result.events.filter(event => event.type === 'document.unavailable').length, 1, 'a removed file is invalidated, not ignored');
   const [event] = result.events.filter(item => item.type === 'document.modified');
   assert.equal(event.type, 'document.modified');
@@ -543,6 +544,7 @@ test('an incremental drive sync lists accessible Google Docs and exports their c
         ]
       });
     }],
+    ['drive/v3/files/sheet-1/export', textResponse('Metric,Value\nSample,100')],
     ['drive/v3/files/doc-a/export', textResponse('## Experiment results\nSample size: 1,200\n')],
     ['drive/v3/files/doc-b/export', textResponse('Incident count: 4\n')]
   ]);
@@ -550,8 +552,8 @@ test('an incremental drive sync lists accessible Google Docs and exports their c
   const result = await connector.pull({ cursor: { drive: { pageToken: 'p-1' } } });
   assert.equal(result.partial, false);
   assert.equal(result.errors.length, 0);
-  assert.equal(result.events.length, 2);
-  const [newer, older] = result.events;
+  assert.equal(result.events.length, 3);
+  const [newer, , older] = result.events;
   assert.equal(newer.type, 'document.modified');
   assert.equal(newer.source, 'google');
   assert.equal(newer.payload.externalId, 'doc-a');
@@ -1164,4 +1166,24 @@ test('an incomplete Gmail bootstrap listing cannot silently discard a message an
   const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false }, fetchImpl });
   const result = await connector.pull();
   assert.equal(result.partial, true); assert.equal(result.cursor.gmail, undefined); assert.equal(result.events.length, 0);
+});
+
+test('gmail history reports deleted and trashed messages as email.unavailable without refetching them', async () => {
+  const { fetchImpl, calls } = scriptedFetch([
+    tokenRoute,
+    ['gmail/v1/users/me/history', jsonResponse({ history: [
+      { messagesAdded: [{ message: { id: 'm-new' } }, { message: { id: 'm-trashed' } }] },
+      { messagesDeleted: [{ message: { id: 'm-old' } }] },
+      { labelsAdded: [{ message: { id: 'm-trashed' }, labelIds: ['TRASH'] }, { message: { id: 'm-new' }, labelIds: ['STARRED'] }] }
+    ], historyId: 'h9' })],
+    ['gmail/v1/users/me/messages/m-new', jsonResponse(mailMessage('m-new', 'New'))]
+  ]);
+  const connector = new GoogleWorkspaceConnector({ config: { ...CREDENTIALS, readDrive: false }, fetchImpl });
+  const result = await connector.pull({ cursor: { gmail: { historyId: 'h2' } } });
+  const historyCall = calls.find(call => String(call.url).includes('/history'));
+  assert.deepEqual(new URL(historyCall.url).searchParams.getAll('historyTypes'), ['messageAdded', 'messageDeleted', 'labelAdded']);
+  assert.equal(calls.some(call => String(call.url).includes('messages/m-trashed')), false, 'a trashed message is not read as new mail');
+  assert.deepEqual(result.events.map(event => [event.type, event.payload.id, event.payload.reason || null]),
+    [['email.received', 'm-new', null], ['email.unavailable', 'm-old', 'deleted'], ['email.unavailable', 'm-trashed', 'trashed']]);
+  assert.equal(result.cursor.gmail.historyId, 'h9');
 });

@@ -27,7 +27,10 @@ export function setActivationFlags(database, patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length || Object.keys(patch).some(key => !KEYS.includes(key) || typeof patch[key] !== 'boolean')) {
     throw durableError('INVALID_ACTIVATION_FLAGS', 'Activation flags accept only known boolean switches.', 400);
   }
-  const next = { ...activationFlags(database), ...patch };
-  database.atomic(() => database.set('activation_flags', json(next)));
+  const previous = activationFlags(database), next = { ...previous, ...patch };
+  database.atomic(() => {
+    database.set('activation_flags', json(next)); database.bump('activation_config_version');
+    for (const key of Object.keys(patch)) if (previous[key] !== next[key]) database.bump(`activation_generation:${key}`);
+  });
   return next;
 }

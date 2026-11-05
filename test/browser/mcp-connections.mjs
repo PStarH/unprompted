@@ -54,6 +54,15 @@ try {
   assert.equal(status.servers[0].tools.find(tool => tool.name === 'lookup').allowed, false);
   assert.equal(status.servers[0].tools.find(tool => tool.name === 'slow').allowed, true);
   check('tool-access-is-explicit-and-can-be-revoked-with-one-checkbox');
+  const writeTool = server.locator('[data-mcp-tool="write_item"]');
+  assert.equal(await writeTool.isEnabled(), true);
+  await writeTool.check();
+  await page.waitForFunction(() => document.querySelector('[data-mcp-server="work-tools"] [data-mcp-tool="write_item"]')?.checked && !document.querySelector('[data-mcp-server="work-tools"] [data-mcp-tool="write_item"]').disabled);
+  assert.equal((await (await page.request.get(fixture.base + '/api/mcp')).json()).servers[0].tools.find(tool => tool.name === 'write_item').allowed, true);
+  await writeTool.uncheck();
+  await page.waitForFunction(() => !document.querySelector('[data-mcp-server="work-tools"] [data-mcp-tool="write_item"]')?.checked && !document.querySelector('[data-mcp-server="work-tools"] [data-mcp-tool="write_item"]').disabled);
+  check('write-tool-permission-can-be-explicitly-granted-and-revoked');
+
   await server.locator('[data-mcp-action="disable"]').click();
   await server.locator('[data-mcp-action="enable"]').waitFor();
   status = await (await page.request.get(fixture.base + '/api/mcp')).json();

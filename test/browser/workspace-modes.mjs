@@ -19,9 +19,22 @@ try {
   assert.equal(await page.locator('#taskContent .ws-inspector').count(), 0);
   await page.locator('#taskContent [data-select-task]').first().click();
   await page.locator('#taskContent .ws-inspector [data-action="approve"]').waitFor();
+  assert.equal(await page.locator('#taskContent .ws-task-page').count(), 1);
+  assert.equal(await page.locator('#taskContent .ws-task-index').count(), 0);
+  assert.equal(await page.locator('#pageCrumb').textContent(), '任务详情');
+  assert.equal(await page.locator('#viewHome .ws-workspace-toolbar').isVisible(), false);
+  assert.equal(await page.locator('#viewHome #homeAmbient').isVisible(), false);
+  check('task-details-are-a-standalone-page-without-dashboard-content-or-a-task-index');
   check('field-is-default-and-task-details-stay-closed-until-a-card-is-selected');
   const id = await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task');
   const input = () => page.locator('#taskContent [data-direction-input]');
+  const openDirection = async () => {
+    const disclosure = page.locator('#taskContent [data-direction-disclosure]');
+    if (await disclosure.count() && !await disclosure.evaluate(node => node.open)) {
+      await disclosure.locator('summary').click();
+      await input().waitFor();
+    }
+  };
   const modes = ['field', 'index', 'lanes', 'spotlight', 'pulse'];
   const switchMode = async mode => {
     await page.locator('[data-view="preferences"]').click();
@@ -30,6 +43,22 @@ try {
   };
   const state = async () => (await page.request.get(fixture.base + '/api/state')).json();
   assert.equal(await page.locator('#taskContent').getAttribute('data-mode'), 'field');
+  assert.equal(await page.locator('#taskContent .ws-inspector').count(), 1);
+  assert.equal(await page.locator('#taskDialog').count(), 0);
+  assert.equal(await page.locator('#taskContent [data-open-task]').count(), 0);
+  assert.equal(await page.locator('#taskContent [data-proof]').count(), 0);
+  assert.equal(await page.locator('#taskContent [data-snooze], #snoozedSummary').count(), 0);
+  const followUpSettings = page.locator('#taskContent details[data-preserve^="ws-management-"]');
+  assert.equal(await followUpSettings.count(), 1);
+  assert.equal(await followUpSettings.evaluate(node => node.open), false);
+  await followUpSettings.locator('summary').click();
+  assert.equal(await followUpSettings.locator('[data-wait-form]').count(), 1);
+  const evidenceDetails = page.locator('#taskContent details[data-preserve^="full-evidence-"]');
+  assert.match(await evidenceDetails.locator('summary').innerText(), /要求与来源依据/);
+  await evidenceDetails.locator('summary').click();
+  assert.match(await evidenceDetails.innerText(), /原始请求的要求.*来源中的对应内容/);
+  check('one-task-page-keeps-evidence-and-follow-up-settings-without-a-duplicate-record-dialog-or-snooze');
+  await openDirection();
   await input().fill('这段方向仍未提交：请包含预算明细。');
   for (const mode of modes) {
     await switchMode(mode);
@@ -54,14 +83,14 @@ try {
   assert.equal(await input().inputValue(), '这段方向仍未提交：请包含预算明细。');
   assert.equal(await page.evaluate(() => Boolean(document.activeElement.closest('.ws-composer'))), true);
   check('sources-and-memory-open-in-dialogs-and-return-to-the-same-draft-and-focus');
-  await page.locator('#taskContent [data-open-task]').first().click();
-  const modalInput = page.locator('#taskDialog [data-direction-input]');
-  assert.equal(await modalInput.inputValue(), await input().inputValue());
-  await modalInput.fill('在记录面板里继续编辑');
-  await page.keyboard.press('Escape');
-  await page.waitForFunction(() => !document.querySelector('#taskDialog').open);
-  assert.equal(await input().inputValue(), '在记录面板里继续编辑');
-  check('record-inspector-and-workspace-share-the-same-draft');
+  await page.locator('#taskContent .ws-composer [data-task-context="memory"]').click();
+  await page.locator('#taskContextDialog [data-memory-scope="task"]').click();
+  await page.waitForFunction(() => !document.querySelector('#taskContextDialog').open);
+  await input().fill('在任务页继续编辑');
+  await page.locator('#taskContent [data-task-step="1"]').click();
+  await page.locator('#taskContent [data-task-step="-1"]').click();
+  assert.equal(await input().inputValue(), '在任务页继续编辑');
+  check('task-page-navigation-preserves-the-same-draft-without-a-second-inspector');
   await page.locator('#taskContent .ws-inspector [data-task-control="pause"]').click();
   await page.locator('#taskContent .ws-paused-note').waitFor();
   assert.equal((await state()).tasks.find(task => task.id === id).control.paused, true);
@@ -86,9 +115,9 @@ try {
   await page.locator('#taskContent .ws-composer button[type="submit"]').click();
   await page.locator('#taskContent .ws-direction-receipt').waitFor();
   await page.locator('[data-view="memory"]').click();
+  await page.locator('.memory-space-node').first().waitFor();
   assert.equal(await page.locator('.memory-inspector').count(), 0);
-  await page.locator('[data-memory-cluster]').first().click();
-  await page.locator('.ws-memory').waitFor();
+  assert.equal(await page.locator('.memory-space-node').count(), 1);
   const memorySearch = page.locator('[data-memory-search]');
   await memorySearch.evaluate(input => {
     input.focus();
@@ -99,34 +128,36 @@ try {
     input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '预算' }));
   });
   assert.equal(await memorySearch.inputValue(), '预算');
-  assert.equal(await page.locator('.ws-memory').count(), 0);
+  await page.waitForFunction(() => document.querySelectorAll('.memory-space-node').length === 0 && document.querySelector('.memory-empty'));
+  assert.equal(await page.evaluate(() => document.activeElement.hasAttribute('data-memory-search')), true);
   await memorySearch.fill('');
-  await page.locator('.ws-memory').waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('.memory-space-node').length === 1);
   check('memory-search-preserves-ime-composition-and-applies-the-final-query');
-  await page.locator('[data-memory-view="library"]').click();
-  assert.equal(await page.locator('.memory-library .ws-memory').count(), 1);
-  assert.equal(await page.locator('[data-memory-view="library"]').getAttribute('aria-pressed'), 'true');
-  await page.locator('[data-memory-view="space"]').click();
-  assert.equal(await page.locator('.memory-inspector .ws-memory').count(), 1);
+  await page.locator('.memory-space-node').first().click();
+  await page.locator('.memory-inspector').waitFor();
+  assert.equal(await page.locator('.memory-space-node').getAttribute('aria-pressed'), 'true');
+  assert.match(await page.locator('.memory-inspector').innerText(), /演示预览为只读/);
+  assert.equal(await page.locator('.memory-inspector [data-memory-operation]').count(), 0);
   await page.screenshot({ path: `${output}/memory-populated-1440.png`, fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.screenshot({ path: `${output}/memory-populated-390.png`, fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  check('memory-space-and-library-share-real-records-at-desktop-and-mobile-widths');
-  await page.locator('[data-memory-operation="edit"]').click();
-  await page.locator('[data-memory-edit] textarea').fill('Include signed customer feedback.');
-  await page.locator('[data-memory-edit] button[type="submit"]').click();
-  await page.waitForFunction(() => document.querySelector('.ws-memory-content > p')?.textContent.includes('signed'));
-  await page.locator('[data-memory-operation="delete"]').click();
-  await page.waitForFunction(() => !document.querySelector('.ws-memory'));
-  await page.locator('#memoryDeleted summary').click();
-  await page.locator('[data-memory-operation="restore"]').click();
-  await page.locator('.ws-memory').waitFor();
+  await page.locator('[data-memory-view="list"]').click();
+  assert.equal(await page.locator('[data-memory-view="list"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('.memory-library .ws-memory').count(), 1);
+  assert.equal(await page.locator('.memory-space-node').count(), 0);
+  const memoryId = await page.locator('.memory-library .ws-memory').getAttribute('data-memory-id');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.memory-inspector').count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement.dataset.memoryFocus), memoryId);
+  await page.locator('[data-memory-view="space"]').click();
+  await page.waitForFunction(() => document.querySelectorAll('.memory-space-node').length === 1);
+  check('memory-space-and-list-share-one-filtered-record-and-inspector');
   current = await state();
   assert.equal(current.taskMemories.filter(memory => !memory.deletedAt).length, 1);
   assert.equal(current.outbox.length, 0);
-  check('scoped-memory-can-be-created-edited-deleted-and-restored');
+  check('task-direction-memory-appears-in-the-memory-space-without-extra-writes');
   for (const view of ['memory', 'sources', 'preferences']) {
     await page.locator(`[data-view="${view}"]`).click();
     assert.equal(await page.locator('dialog[open]').count(), 0);
@@ -143,6 +174,7 @@ try {
       await page.selectOption('#languageSelect', language);
       for (const mode of modes) {
         await switchMode(mode);
+        await openDirection();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${width}/${language}/${mode} overflows`);
         const control = page.locator('#taskContent .ws-composer button[type="submit"]');
         assert.equal(await control.isVisible(), true);
@@ -166,7 +198,8 @@ try {
   await page.waitForFunction(() => document.querySelector('#taskContent')?.dataset.mode === 'lanes');
   check('explicit-view-choice-survives-reload');
   await page.locator('#themeToggle').click();
-  const darkActionContrast = await page.locator('#agentStatus .primary-button').evaluate(button => {
+  await page.locator('#taskContent [data-select-task]').first().click();
+  const darkActionContrast = await page.locator('#taskContent .ws-composer .primary-button').evaluate(button => {
     const style = getComputedStyle(button);
     const luminance = color => {
       const channels = color.match(/\d+(?:\.\d+)?/g).slice(0, 3).map(Number).map(value => {
@@ -208,7 +241,25 @@ try {
   await emit();
   await switchMode('field');
   await page.locator('[data-select-task="working-a"]').click();
+  assert.equal(await page.locator('#viewHome .ws-inspector h1').count(), 1);
+  await page.screenshot({ path: `${output}/field-quiet-1440.png`, fullPage: true, animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.sidebar')).flexDirection === 'row');
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.topbar').count(), 1);
+  await page.screenshot({ path: `${output}/field-quiet-390.png`, fullPage: true, animations: 'disabled' });
+  const targetSizes = await page.locator('#taskContent .ws-task-controls .icon-button, #taskContent .ws-task-step').evaluateAll(nodes => nodes.map(node => [node.getBoundingClientRect().width, node.getBoundingClientRect().height]));
+  assert.equal(targetSizes.every(([width, height]) => width >= 44 && height >= 44), true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openDirection();
+  await input().waitFor();
+  assert.equal(await page.locator('#taskContent [data-satisfied-evidence]').getAttribute('open'), null);
+  assert.equal(await page.locator('#taskContent [data-satisfied-evidence] [data-check="met"]').count(), 6);
+  assert.equal(await page.locator('#taskContent .ws-checklist > ul > [data-check="missing"]').count(), 1);
+  assert.equal(await page.locator('#taskContent .ws-source-chip').count(), 1);
   await input().fill('仍在输入，请保留光标');
+  assert.equal(await page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); return !dispatchEvent(event) && event.defaultPrevented; }), true);
   await input().evaluate(node => node.setSelectionRange(2, 5));
   const retained = await input().elementHandle();
   await input().dispatchEvent('compositionstart', { data: '输入' });
@@ -217,10 +268,37 @@ try {
   assert.equal(await retained.evaluate(node => node.isConnected), true);
   await input().dispatchEvent('compositionend', { data: '输入' });
   assert.deepEqual(await input().evaluate(node => [node.value, node.selectionStart, node.selectionEnd, node === document.activeElement]), ['仍在输入，请保留光标', 2, 5, true]);
-  await page.locator('[data-select-task="working-b"]').click();
+  await page.locator('[data-task-step="1"]').click();
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'working-b');
+  await openDirection();
   await input().fill('另一件事的独立草稿');
-  await page.locator('[data-select-task="working-a"]').click();
+  await page.locator('[data-task-step="-1"]').click();
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'working-a');
   assert.equal(await input().inputValue(), '仍在输入，请保留光标');
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'needs');
+  assert.equal(await page.locator('[data-task-step="-1"]').isDisabled(), true);
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'needs');
+  await input().fill('Keyboard input must not change tasks');
+  await input().focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'needs');
+  await page.locator('.ws-detail-drawer').focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'working-a');
+  assert.equal(await input().inputValue(), '仍在输入，请保留光标');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'working-b');
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'), 'working-a');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#taskContent .ws-task-page').count(), 0);
+  assert.equal(await page.locator('#viewHome .ws-workspace-toolbar').isVisible(), true);
+  assert.equal(await page.evaluate(() => document.activeElement.dataset.selectTask), 'working-a');
+  await page.locator('[data-select-task="working-a"]').click();
+  check('task-steppers-and-arrow-keys-respect-order-bounds-input-focus-and-return-focus');
+  check('arrow-keys-move-between-task-pages-and-preserve-drafts');
   check('draft-caret-and-ime-preservation');
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1000 });

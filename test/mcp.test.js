@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { McpManager, McpConfigStore, normalizeMcpConfig, parseMcpImport } from '../src/mcp.js';
+import { McpManager, McpConfigStore, normalizeMcpConfig, parseMcpImport, MCP_LIMITS } from '../src/mcp.js';
 import { OpenAiCompatibleReasoner, NullReasoner } from '../src/reasoning.js';
 import { WorkEngine } from '../src/engine.js';
 import { JsonStore } from '../src/store.js';
@@ -31,11 +31,13 @@ async function connected(t) {
 
 test('MCP import validates transports, local execution arguments and credentials without evaluating commands', () => {
   assert.equal(normalizeMcpConfig('notes', { url: 'https://example.test/mcp', type: 'streamable-http' }).type, 'http');
+  assert.equal(normalizeMcpConfig('legacy', { type: 'sse', url: 'https://example.test/sse' }).type, 'sse');
   assert.equal(normalizeMcpConfig('项目工具 GitHub', { url: 'https://example.test/mcp' }).type, 'http');
   assert.equal(normalizeMcpConfig('notes', { url: 'http://127.0.0.1:9999/mcp' }).type, 'http');
   for (const value of [{ url: 'http://example.test/mcp' }, { url: 'https://user:pass@example.test' }, { url: 'file:///tmp/mcp' }, { command: 'node', args: 'shell-string' }, { command: 'node', env: { bad: 1 } }, { command: 'node', enabled: 'false' }]) assert.throws(() => normalizeMcpConfig('notes', value), /Invalid|requires/);
   assert.throws(() => parseMcpImport('{bad'), /JSON/);
   assert.throws(() => parseMcpImport({ mcpServers: { constructor: stdioConfig } }), /Invalid/);
+  assert.throws(() => parseMcpImport({ mcpServers: { notion: { url: 'https://mcp.notion.com/mcp', oauth: { tokens: { access_token: 'secret-token' } } } } }), /cannot be imported/);
   assert.equal(parseMcpImport({ mcpServers: { notes: stdioConfig } }).notes.allowDeclaredRead, false);
 });
 
@@ -90,7 +92,7 @@ test('resource-only MCP servers require per-resource consent and revoke captured
 test('MCP permission changes invalidate captured tools, and disabled processes are closed', async t => {
   const { manager } = await connected(t);
   const adapter = manager.tools({ isCurrent: () => true }).find(tool => tool.label.includes('lookup'));
-  await manager.update('local', { allowDeclaredRead: false, readTools: ['unannotated', 'write_item'] });
+  await manager.update('local', { allowDeclaredRead: false, readTools: [], writeTools: ['unannotated'] });
   await assert.rejects(adapter.execute('revoked', { query: 'Draco' }), /no longer current/);
   assert.equal(manager.tools({ isCurrent: () => true }).length, 1);
   await manager.update('local', { enabled: false });
@@ -252,4 +254,135 @@ test('known MCP credentials are redacted from catalog and model-facing metadata,
   entry.tools[0].inputSchema = { type: 'object', properties: { query: { type: 'string', description: secret } } };
   assert.ok(!JSON.stringify(manager.describe()).includes(JSON.stringify(secret).slice(1, -1)));
   assert.equal(manager.tools({ isCurrent: () => true })[0].parameters.properties.query.description, '[redacted]');
+});
+
+test('built-in MCP presets offer Fetch, hosted sign-in, and API-key search', t => {
+  const { manager } = managerFor(t);
+  const status = manager.describe();
+  assert.ok(Array.isArray(status.presets));
+  assert.equal(status.presets.length, 11);
+  const ids = status.presets.map(item => item.id);
+  assert.deepEqual(ids, ['fetch', 'git', 'filesystem', 'time', 'deepwiki', 'notion', 'linear', 'atlassian', 'todoist', 'brave-search', 'firecrawl']);
+  const fetchPreset = status.presets.find(item => item.id === 'fetch');
+  assert.equal(fetchPreset.defaultEnabled, true);
+  assert.equal(fetchPreset.requiresAuth, false);
+  assert.equal(fetchPreset.auth, 'none');
+  assert.equal(fetchPreset.connection.type, 'stdio');
+  assert.equal(fetchPreset.connection.command, process.execPath);
+  assert.ok(!JSON.stringify(fetchPreset.connection).includes('/Users/sampan'));
+  const searchPreset = status.presets.find(item => item.id === 'brave-search');
+  assert.equal(searchPreset.defaultEnabled, false);
+  assert.equal(searchPreset.requiresAuth, true);
+  assert.equal(searchPreset.auth, 'key');
+  for (const id of ['notion', 'linear', 'atlassian', 'todoist']) {
+    const preset = status.presets.find(item => item.id === id);
+    assert.equal(preset.auth, 'oauth');
+    assert.equal(preset.requiresAuth, true);
+    assert.equal(preset.defaultEnabled, false);
+    assert.deepEqual(preset.fields, []);
+    assert.equal(preset.connection.type, 'http');
+  }
+  assert.equal(status.presets.find(item => item.id === 'notion').connection.url, 'https://mcp.notion.com/mcp');
+  assert.equal(status.presets.find(item => item.id === 'linear').connection.url, 'https://mcp.linear.app/mcp');
+  assert.equal(status.presets.find(item => item.id === 'atlassian').connection.url, 'https://mcp.atlassian.com/v1/mcp/authv2');
+  assert.equal(status.presets.find(item => item.id === 'todoist').connection.url, 'https://ai.todoist.net/mcp');
+  assert.equal(status.limits.oauthBytes, 32 * 1024);
+});
+
+test('MCP write tools require explicit selection and dispatch through the durable executor', async t => {
+  const { manager } = await connected(t);
+  assert.ok(!manager.tools().some(tool => tool.label.endsWith('write_item')));
+  await manager.update('local', { writeTools: ['write_item'] });
+  const selected = manager.tools({ taskId: 'task-1', isCurrent: () => true }).find(tool => tool.label.endsWith('write_item'));
+  assert.equal(selected.effect, 'write');
+  await assert.rejects(selected.execute('no-executor', {}), /durable task/);
+  let invoked = 0;
+  const action = manager.tools({ taskId: 'task-1', isCurrent: () => true, executeWrite: async request => {
+    assert.equal(request.tool, 'write_item'); assert.equal(request.check(), true); invoked++;
+    return { state: 'accepted' };
+  } }).find(tool => tool.label.endsWith('write_item'));
+  assert.match((await action.execute('write-1', {})).content[0].text, /accepted/); assert.equal(invoked, 1);
+  await manager.update('local', { writeTools: [] });
+  await assert.rejects(action.execute('revoked', {}), /no longer current/);
+});
+
+test('authorized tools beyond the inline limit remain searchable and callable with current permissions', async t => {
+  const { manager } = await connected(t), entry = manager.connections.get('local');
+  entry.tools.push(...Array.from({ length: 40 }, (_, index) => ({ name: `extra_${index}`, description: `Capability number ${index}`, inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } })));
+  const catalog = manager.tools({ taskId: 'task-1', isCurrent: () => true });
+  assert.equal(catalog.length, 24);
+  const search = catalog.find(tool => tool.name === 'find_connected_tools');
+  const found = JSON.parse((await search.execute('find', { query: 'extra_39' })).content[0].text);
+  assert.equal(found.tools.length, 1); assert.ok(found.tools[0].parameters);
+  const call = catalog.find(tool => tool.name === 'call_connected_tool');
+  assert.match((await call.execute('call', { name: found.tools[0].name, arguments: {} })).content[0].text, /extra_39/);
+  await manager.update('local', { allowDeclaredRead: false });
+  await assert.rejects(call.execute('revoked', { name: found.tools[0].name, arguments: {} }), /not currently authorized/);
+});
+
+test('re-importing the same stdio server keeps its secret and empty permission lists', async t => {
+  const { manager, configStore } = managerFor(t);
+  const resource = 'a'.repeat(64);
+  await manager.import({ mcpServers: {
+    local: { ...stdioConfig, enabled: false },
+    other: { command: process.execPath, args: ['other-server.js'], enabled: false }
+  } });
+  assert.equal(configStore.get().local.env.MCP_FIXTURE_SECRET, 'fixture-private-value');
+  assert.deepEqual(configStore.get().other.env, {});
+  await manager.update('local', { writeTools: ['write_item'], readTools: ['lookup'], readResources: [resource] });
+  await manager.import({ mcpServers: { local: { command: process.execPath, args: [fixturePath, '--stdio'], enabled: false } } });
+  const saved = configStore.get();
+  assert.equal(saved.local.env.MCP_FIXTURE_SECRET, 'fixture-private-value');
+  assert.deepEqual(saved.local.writeTools, ['write_item']);
+  assert.deepEqual(saved.local.readTools, ['lookup']);
+  assert.deepEqual(saved.local.readResources, [resource]);
+  assert.deepEqual(saved.other.env, {});
+  assert.ok(!JSON.stringify(manager.describe()).includes('fixture-private-value'));
+  await manager.update('local', { remove: true });
+  assert.equal(configStore.get().local, undefined);
+});
+
+test('an oversized MCP tool page stays connected and keeps the prefix that fits', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-mcp-'));
+  const configStore = new McpConfigStore(directory);
+  let options, requestInit;
+  const tools = Array.from({ length: MCP_LIMITS.tools + 1 }, (_, index) => ({
+    name: `read_${index}`, description: 'read', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true }
+  }));
+  const load = async () => ({
+    fromJsonSchema: () => () => true,
+    getDefaultEnvironment: () => ({}),
+    Client: class {
+      constructor(_info, clientOptions) { options = clientOptions; }
+      async connect() {}
+      getServerCapabilities() { return { tools: {} }; }
+      async listTools() { return { tools }; }
+      async close() {}
+    },
+    StreamableHTTPClientTransport: class { constructor(_url, transportOptions) { requestInit = transportOptions.requestInit; } async close() {} },
+    SSEClientTransport: class { async close() {} },
+    StdioClientTransport: class { async close() {} }
+  });
+  const manager = new McpManager({ configStore, timeoutMs: 3000, load });
+  t.after(async () => { await manager.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  await manager.import({ mcpServers: { remote: { url: 'http://127.0.0.1:9/mcp' } } }, { allowDeclaredRead: true });
+  const server = manager.describe().servers[0];
+  assert.equal(server.status, 'connected');
+  assert.equal(server.tools.length, MCP_LIMITS.tools);
+  assert.equal(server.tools[0].name, 'read_0');
+  assert.equal(options.listMaxPages, MCP_LIMITS.tools);
+  assert.deepEqual(requestInit, { headers: {} });
+});
+
+test('saved Fetch configs that point at another machine are rewritten to this process', () => {
+  const saved = { type: 'stdio', command: '/Users/sampan/.nvm/versions/node/v22.14.0/bin/node', args: ['/Users/sampan/Documents/GitHub/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true };
+  const manager = new McpManager({ configStore: { get: () => ({ fetch: saved }) }, executableLookup: () => null });
+  assert.equal(manager.configs.fetch.command, process.execPath);
+  assert.ok(fs.existsSync(manager.configs.fetch.args[0]));
+  assert.ok(manager.configs.fetch.args[0].endsWith(`${path.sep}src${path.sep}mcp-fetch-server.js`));
+  assert.equal(JSON.stringify(manager.configs.fetch).includes('/Users/sampan'), false);
+  assert.equal(JSON.stringify(manager.configs.fetch).includes('.nvm'), false);
+  const legacy = new McpManager({ configStore: { get: () => ({ fetch: { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'], enabled: false, allowDeclaredRead: true } }) }, executableLookup: () => null });
+  assert.equal(legacy.configs.fetch.command, process.execPath);
+  assert.ok(!legacy.configs.fetch.args.includes('mcp-server-fetch'));
 });

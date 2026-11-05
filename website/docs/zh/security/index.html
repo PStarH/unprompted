@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh" data-root="../../" data-copy="复制" data-copied="已复制" data-no-results="没有匹配" data-search-start="输入关键词搜索文档。" data-close="关闭">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安全 · Unprompted 文档</title>
+  <meta name="description" content="如何私下报告漏洞，以及这个本机原型的边界。">
+  <link rel="canonical" href="https://pstarh.github.io/unprompted/docs/zh/security/">
+  <link rel="alternate" hreflang="en" href="https://pstarh.github.io/unprompted/docs/security/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pstarh.github.io/unprompted/docs/zh/security/">
+  <link rel="alternate" hreflang="x-default" href="https://pstarh.github.io/unprompted/docs/security/">
+  <meta property="og:title" content="安全 · Unprompted 文档">
+  <meta property="og:description" content="如何私下报告漏洞，以及这个本机原型的边界。">
+  <meta property="og:url" content="https://pstarh.github.io/unprompted/docs/zh/security/">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="../../sitemap.xml">
+  <link rel="stylesheet" href="../../assets/site.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"安全","description":"如何私下报告漏洞，以及这个本机原型的边界。","inLanguage":"zh-CN","url":"https://pstarh.github.io/unprompted/docs/zh/security/","isPartOf":{"@type":"WebSite","name":"Unprompted","url":"https://pstarh.github.io/unprompted/docs/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"文档","item":"https://pstarh.github.io/unprompted/docs/zh/"},{"@type":"ListItem","position":2,"name":"参考"},{"@type":"ListItem","position":3,"name":"安全","item":"https://pstarh.github.io/unprompted/docs/zh/security/"}]}</script>
+  <script>document.documentElement.classList.add('js')</script>
+  <script src="../../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="header">
+    <button class="menu-button" type="button" data-menu aria-expanded="false" aria-label="打开菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <a class="brand" href="../../zh/"><img src="../../assets/logo.svg" alt="" width="27" height="27"><span>unprompted</span><span class="brand-docs">文档</span></a>
+    <button class="search-button" type="button" data-search><span>搜索文档</span><kbd>⌘K</kbd></button>
+    <div class="header-tools">
+      <button class="icon-button search-icon" type="button" data-search aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></button>
+      <nav class="lang" aria-label="语言"><a href="../../security/" hreflang="en">EN</a><a href="../../zh/security/" hreflang="zh-CN" aria-current="true">中文</a></nav>
+      <a class="quiet" href="https://github.com/PStarH/unprompted" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+  <details class="nav-fallback"><summary>文档目录</summary><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/" aria-current="page">安全</a></li></ul></section></details>
+  <div class="shell">
+    <aside class="sidebar"><section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/" aria-current="page">安全</a></li></ul></section></aside>
+    <main id="main" class="content">
+      <nav class="crumbs" aria-label="当前位置"><a href="../../zh/">文档</a><span class="crumb-sep" aria-hidden="true">/</span><span>参考</span><span class="crumb-sep" aria-hidden="true">/</span><span aria-current="page">安全</span></nav>
+      <p class="page-kicker">参考</p><h1 class="page-title">安全</h1>
+      <details class="mobile-toc"><summary>本页目录</summary><ol><li><a class="" href="#报告漏洞">报告漏洞</a></li><li><a class="" href="#边界">边界</a></li></ol></details>
+      <article class="prose"><p>Unprompted 是 1.0 之前的原型。修复进入 <code>main</code>。没有单独维护的发行分支，没有奖金，也不承诺响应时间。</p>
+<p>日常权限见<a href="../../zh/permissions/">权限与隐私</a>。这一页说明怎么报告漏洞，以及什么不能写进公开议题。</p>
+<h2 id="报告漏洞">报告漏洞<a class="heading-link" href="#报告漏洞" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<p>使用 <a href="https://github.com/PStarH/unprompted/security/advisories/new" rel="noreferrer">GitHub 私下漏洞报告</a>。如果那个页面不可用，通过<a href="https://github.com/PStarH" rel="noreferrer">维护者</a>个人资料上列出的私下方式联系。</p>
+<p>不要在公开议题里写利用细节、凭据或私人内容。如果找不到私下渠道，可以开一条很短的议题，只请求一个渠道，不要写技术细节。</p>
+<p>请写上受影响的提交、影响、用虚构数据复现的步骤，以及相关的模式或设置。如果涉及真实的 Google 访问、发送开关，或关闭影子模式，请说明。</p>
+<p>不要附上 OAuth 凭据、API 密钥、邮件、文档链接或状态文件。</p>
+<p>仓库里的政策是 <a href="https://github.com/PStarH/unprompted/blob/main/SECURITY.md" rel="noreferrer">SECURITY.md</a>。</p>
+<h2 id="边界">边界<a class="heading-link" href="#边界" aria-label="本节链接"><span aria-hidden="true">#</span></a></h2>
+<ul><li>服务绑定本机，没有登录。不要用公网主机、反向代理或隧道把它暴露出去。</li><li>正常模式在你授予写入之前是只读的。显式设置 <code>UNPROMPTED_SHADOW_MODE=true</code> 时，影子模式会挡住外部写入。</li><li><code>npm run demo</code> 使用自己的状态，并且只模拟发送。</li><li>模型的回复不能批准动作、放宽权限，或代替证据。远程模型可以收到你所连接来源里的任务内容。</li><li>本地状态保存同步来的内容和证据。它不加密。</li><li>本地文件夹和 Apple 备忘录只在你选定的范围内。Apple 备忘录需要 macOS 的自动化权限。撤销访问会使该来源的证据失效。这不会把工作标成完成。</li></ul>
+<p>这些页面里的错误，或普通的产品缺陷，可以发公开议题。用页底的<strong>反馈本页问题</strong>。不要把秘密写进去。</p></article>
+      <div class="page-meta"><button type="button" data-copy-page>复制本页</button><script type="application/json" id="page-markdown">"# 安全\n\n> 如何私下报告漏洞，以及这个本机原型的边界。\n\nUnprompted 是 1.0 之前的原型。修复进入 `main`。没有单独维护的发行分支，没有奖金，也不承诺响应时间。\n\n日常权限见[权限与隐私](https://pstarh.github.io/unprompted/docs/zh/permissions/)。这一页说明怎么报告漏洞，以及什么不能写进公开议题。\n\n## 报告漏洞\n\n使用 [GitHub 私下漏洞报告](https://github.com/PStarH/unprompted/security/advisories/new)。如果那个页面不可用，通过[维护者](https://github.com/PStarH)个人资料上列出的私下方式联系。\n\n不要在公开议题里写利用细节、凭据或私人内容。如果找不到私下渠道，可以开一条很短的议题，只请求一个渠道，不要写技术细节。\n\n请写上受影响的提交、影响、用虚构数据复现的步骤，以及相关的模式或设置。如果涉及真实的 Google 访问、发送开关，或关闭影子模式，请说明。\n\n不要附上 OAuth 凭据、API 密钥、邮件、文档链接或状态文件。\n\n仓库里的政策是 [SECURITY.md](https://github.com/PStarH/unprompted/blob/main/SECURITY.md)。\n\n## 边界\n\n- 服务绑定本机，没有登录。不要用公网主机、反向代理或隧道把它暴露出去。\n- 正常模式在你授予写入之前是只读的。显式设置 `UNPROMPTED_SHADOW_MODE=true` 时，影子模式会挡住外部写入。\n- `npm run demo` 使用自己的状态，并且只模拟发送。\n- 模型的回复不能批准动作、放宽权限，或代替证据。远程模型可以收到你所连接来源里的任务内容。\n- 本地状态保存同步来的内容和证据。它不加密。\n- 本地文件夹和 Apple 备忘录只在你选定的范围内。Apple 备忘录需要 macOS 的自动化权限。撤销访问会使该来源的证据失效。这不会把工作标成完成。\n\n这些页面里的错误，或普通的产品缺陷，可以发公开议题。用页底的**反馈本页问题**。不要把秘密写进去。\n"</script><a href="https://github.com/PStarH/unprompted/issues/new?title=%E6%96%87%E6%A1%A3%3A%20%E5%AE%89%E5%85%A8&amp;body=%E9%A1%B5%E9%9D%A2%3A%20https%3A%2F%2Fpstarh.github.io%2Funprompted%2Fdocs%2Fzh%2Fsecurity%2F%0A%0A%E9%97%AE%E9%A2%98%3A%0A%0A" rel="noreferrer">反馈本页问题</a><span>版本 0.3.0 · 对应当前 main 分支</span></div>
+      <nav class="pager" aria-label="上一篇"><a href="../../zh/changelog/"><span>上一篇</span><strong>更新记录</strong></a></nav>
+    </main>
+    <nav class="toc" aria-label="本页目录"><h2>本页目录</h2><ol><li><a class="" href="#报告漏洞">报告漏洞</a></li><li><a class="" href="#边界">边界</a></li></ol></nav>
+  </div>
+  <footer class="page-footer"><a href="../../../">官网</a><a href="../../zh/">文档</a></footer>
+  <div class="scrim"></div>
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="打开菜单">
+    <div class="drawer-head"><strong>文档</strong><button class="icon-button" type="button" data-menu-close aria-label="关闭">×</button></div>
+    <section class="nav-section"><h2>开始使用</h2><ul><li><a href="../../zh/">概览</a></li><li><a href="../../zh/quickstart/">安装与首次运行</a></li><li><a href="../../zh/models/">模型</a></li><li><a href="../../zh/connectors/">连接器</a></li><li><a href="../../zh/google/">Google Workspace</a></li></ul></section><section class="nav-section"><h2>使用指南</h2><ul><li><a href="../../zh/workspace/">工作区</a></li><li><a href="../../zh/shortcuts/">键盘快捷键</a></li><li><a href="../../zh/workflows/">工作如何推进</a></li><li><a href="../../zh/follow-up/">自动跟进</a></li><li><a href="../../zh/permissions/">权限与隐私</a></li></ul></section><section class="nav-section"><h2>帮助</h2><ul><li><a href="../../zh/troubleshooting/">故障排查</a></li><li><a href="../../zh/faq/">常见问题</a></li><li><a href="../../zh/contributing/">参与贡献</a></li></ul></section><section class="nav-section"><h2>参考</h2><ul><li><a href="../../zh/configuration/">配置</a></li><li><a href="../../zh/api/">本地 API</a></li><li><a href="../../zh/architecture/">架构</a></li><li><a href="../../zh/development/">开发与测试</a></li><li><a href="../../zh/glossary/">术语</a></li><li><a href="../../zh/changelog/">更新记录</a></li><li><a href="../../zh/security/" aria-current="page">安全</a></li></ul></section>
+  </div>
+  <div class="search-dialog" role="dialog" aria-modal="true" aria-label="搜索">
+    <div class="search-head"><strong>搜索</strong><button class="icon-button" type="button" data-search-close aria-label="关闭">×</button></div>
+    <input type="search" placeholder="搜索文档" aria-label="搜索">
+    <p class="search-status">输入关键词搜索文档。</p>
+    <ul class="search-list"></ul>
+  </div>
+</body>
+</html>

@@ -49,8 +49,7 @@ for GitHub, Outlook, Slack and Notion authorization, permissions and extension p
 ## Choose your first source
 
 The home page offers local folders, Apple Notes on macOS, Google, GitHub,
-Microsoft Outlook, Slack and Notion. One source is enough to start. GitHub and
-Outlook use official device OAuth and a registered public Client ID. Slack and
+Microsoft Outlook, Slack and Notion. One source is enough to start. GitHub uses device OAuth with a registered public Client ID. Outlook uses browser authorization with PKCE and a dynamically selected local port. Slack and
 Notion open the provider’s own consent page and return to
 `http://localhost:53682/oauth/slack` or `http://localhost:53682/oauth/notion`.
 The distribution or self-hosted operator supplies the registered application

@@ -3,7 +3,7 @@
 const originalFetch = globalThis.fetch;
 const endpoint = process.env.UNPROMPTED_TEST_GOOGLE_ENDPOINT;
 const allowed = new Set(['oauth2.googleapis.com', 'openidconnect.googleapis.com', 'gmail.googleapis.com', 'www.googleapis.com',
-  'github.com', 'api.github.com', 'login.microsoftonline.com', 'graph.microsoft.com']);
+  'github.com', 'api.github.com', 'login.microsoftonline.com', 'graph.microsoft.com', 'api.todoist.com']);
 globalThis.fetch = (input, options) => {
   const url = new URL(input);
   if (endpoint && allowed.has(url.hostname)) return originalFetch(`${endpoint}/google/${url.hostname}${url.pathname}${url.search}`, options);

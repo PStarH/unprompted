@@ -201,6 +201,7 @@ test('a sanitized Gmail message and Drive export become one evidence-backed disc
   const drive = scriptedFetch([
     ['oauth2.googleapis.com/token', tokenResponse],
     ['drive/v3/changes?', jsonResponse(driveChanges)],
+    ['drive/v3/files/sheet-shadow-1/export', textResponse('Unrelated,Value\nMetric,1')],
     ['drive/v3/files/doc-shadow-1/export', textResponse(driveExport)],
     ['drive/v3/files?', jsonResponse({ files: [] })]
   ]);
@@ -209,7 +210,7 @@ test('a sanitized Gmail message and Drive export become one evidence-backed disc
     fetchImpl: drive.fetchImpl
   });
   const docs = await driveConnector.pull({ cursor: { drive: { pageToken: 'p-shadow-1' } } });
-  assert.equal(docs.events.length, 1);
+  assert.equal(docs.events.length, 2);
   assert.equal(docs.events[0].source, 'google');
   assert.equal(docs.events[0].payload.externalId, 'doc-shadow-1');
   engine.ingest(docs.events[0]);
@@ -491,6 +492,7 @@ async function startServer(extraEnv = {}, { seed = null } = {}) {
       PORT: String(port),
       UNPROMPTED_STATE_FILE: stateFile,
       UNPROMPTED_CONFIG_DIR: path.join(dir, 'config'),
+      UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(dir, 'no-google-client.json'),
       UNPROMPTED_FORCE_SIMULATION: 'true',
       ...extraEnv
     },

@@ -41,7 +41,7 @@ export class GitHubConnector extends Connector {
       url: `https://github.com/${repository}/issues/${issue.number}`, author: String(issue.user?.login || 'GitHub'),
       providerIssueId: String(issue.id) };
     return toNormalizedEvents(this.id, 'github', [{ type: 'issue.updated',
-      providerEventId: `issue:${this.account.id}:${issue.id}:${signature(payload)}${restoredAfter ? `:available:${signature(restoredAfter)}` : ''}`, at: payload.updatedAt, payload }])[0];
+      providerEventId: `issue:${this.account.id}:${issue.id}`, providerRevision: `${signature(payload)}${restoredAfter ? `:available:${signature(restoredAfter)}` : ''}`, at: payload.updatedAt, payload }])[0];
   }
   async listHistoricalEvents({ limit = 20 } = {}) {
     if (!this.live) return { events: [], networkCalls: 0, unavailable: true };
@@ -103,11 +103,30 @@ export class GitHubConnector extends Connector {
       const extra = pagingIssues
         ? { events: [], errors: [], hasMore: false, reviews: cursor?.reviews || { tracked: {} }, repository: cursor?.repository || null }
         : await this.#pullWork(cursor, controller.signal);
-      const allErrors = [...errors, ...extra.errors];
-      return { events: [...events, ...extra.events], errors: allErrors, partial: allErrors.length > 0,
-        hasMore: pagingIssues || extra.hasMore === true,
-        cursor: { ...issueCursor, reviews: extra.reviews, repository: extra.repository } };
+      const mentions = pagingIssues ? { events: [], errors: [], cursor: cursor?.mentions || null, hasMore: false } : await this.#pullMentions(cursor?.mentions, controller.signal);
+      const allErrors = [...errors, ...extra.errors, ...mentions.errors];
+      return { events: [...events, ...extra.events, ...mentions.events], errors: allErrors, partial: allErrors.length > 0,
+        hasMore: pagingIssues || extra.hasMore === true || mentions.hasMore,
+        cursor: { ...issueCursor, reviews: extra.reviews, repository: extra.repository, mentions: mentions.cursor } };
     } finally { clearTimeout(timer); }
+  }
+  async #pullMentions(cursor, signal) {
+    const window = cursor?.window || new Date(this.now()).toISOString(), page = cursor?.page || 1;
+    try {
+      const query = new URLSearchParams({ filter: 'mentioned', state: 'all', sort: 'updated', direction: 'desc', per_page: '100', page: String(page), ...(cursor?.since ? { since: cursor.since } : {}) });
+      const issues = await this.#request(`${API}/issues?${query}`, signal);
+      if (!Array.isArray(issues)) throw new ConnectorError('GitHub returned an invalid mention listing.', { connectorId: this.id });
+      const records = issues.filter(item => !item.pull_request && !(item.assignees || []).some(user => String(user.id) === String(this.account.id))).map(item => {
+        const issue = this.#event(item).payload;
+        return { type: 'email.received', providerEventId: `mention:${this.account.id}:${issue.repository}:${issue.number}`, providerRevision: signature(issue), at: issue.updatedAt,
+          meta: { principalRole: 'DIRECT_ACTOR', roleEvidence: { basis: 'provider_mention' } },
+          payload: { id: `github:${this.account.id}:mention:${issue.repository}:${issue.number}`, threadId: `github:${this.account.id}:issue:${issue.repository}:${issue.number}`,
+            from: issue.author, to: this.account.login, subject: issue.title, body: issue.body || issue.title, receivedAt: issue.updatedAt, updatedAt: issue.updatedAt,
+            connectorId: this.id, accountId: String(this.account.id), sourceUrl: issue.url } };
+      });
+      const hasMore = issues.length === 100;
+      return { events: toNormalizedEvents(this.id, 'github', records), errors: [], hasMore, cursor: hasMore ? { since: cursor?.since || null, page: page + 1, window } : { since: window, page: 1 } };
+    } catch (error) { return { events: [], errors: [{ scope: 'mentions', message: error.message, retryable: error.retryable === true }], cursor: cursor || null, hasMore: false }; }
   }
   async #pullWork(cursor, signal) {
     const reviews = await this.#pullReviews(cursor, signal);
@@ -115,7 +134,7 @@ export class GitHubConnector extends Connector {
     return { events: [...reviews.events, ...repository.events], errors: [...reviews.errors, ...repository.errors], hasMore: repository.hasMore === true, reviews: reviews.cursor, repository: repository.cursor };
   }
   async #pullReviews(cursor, signal) {
-    const tracked = { ...(cursor?.reviews?.tracked || {}) }, events = [], errors = [], seen = new Set();
+    const tracked = Object.fromEntries(Object.entries(cursor?.reviews?.tracked || {}).map(([id, item]) => [REPOSITORY.test(item.repository) && Number.isSafeInteger(item.number) ? `github:${this.account.id}:pr:${item.repository}:${item.number}` : id, item])), events = [], errors = [], seen = new Set();
     for (const [work, q] of [['review_requested', 'is:pr is:open review-requested:@me'], ['changes_requested', 'is:pr is:open author:@me review:changes_requested']]) {
       try {
         const data = await this.#request(`${API}/search/issues?${new URLSearchParams({ q, sort: 'updated', order: 'desc', per_page: '20' })}`, signal);
@@ -163,10 +182,10 @@ export class GitHubConnector extends Connector {
     if (!repository || !Number.isSafeInteger(item.number) || !item.id || typeof item.title !== 'string' || !Number.isFinite(parsed)) return null;
     const updatedAt = new Date(parsed).toISOString();
     const state = withdrawn || item.state === 'closed' || item.merged ? 'closed' : 'open';
-    const payload = { id: `github:${this.account.id}:pr:${item.id}`, title: item.title.slice(0, 1000), body: String(item.body || '').slice(0, 8000),
+    const payload = { id: `github:${this.account.id}:pr:${repository}:${item.number}`, title: item.title.slice(0, 1000), body: String(item.body || '').slice(0, 8000),
       bodyTruncated: String(item.body || '').length > 8000, repository, number: item.number, state, active: state === 'open', work, accountId: String(this.account.id),
       author: String(item.user?.login || 'GitHub'), updatedAt, url: githubUrl(item.html_url, `/pull/${item.number}`) || `https://github.com/${repository}/pull/${item.number}` };
-    return toNormalizedEvents(this.id, 'github', [{ type: 'pull_request.updated', providerEventId: `pr:${this.account.id}:${item.id}:${signature(payload)}`, at: updatedAt, payload }])[0];
+    return toNormalizedEvents(this.id, 'github', [{ type: 'pull_request.updated', providerEventId: `pr:${this.account.id}:${repository}:${item.number}`, providerRevision: signature(payload), at: updatedAt, payload }])[0];
   }
   async #pullRepositoryWork(cursor, signal) {
     const since = cursor?.repository?.since || new Date(this.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
@@ -234,7 +253,7 @@ export class GitHubConnector extends Connector {
       repository, runId: run.id, marker: run.name.slice(0, 80), state: 'open', active: true, work: 'workflow', status: String(run.status || ''), conclusion: typeof run.conclusion === 'string' ? run.conclusion : null,
       accountId: String(this.account.id), author: String(run.triggering_actor?.login || run.actor?.login || 'GitHub'), updatedAt,
       url: githubUrl(run.html_url, '/actions/runs/') || `https://github.com/${repository}/actions/runs/${run.id}` };
-    return toNormalizedEvents(this.id, 'github', [{ type: 'workflow.updated', providerEventId: `workflow:${this.account.id}:${run.id}:${signature(payload)}`, at: updatedAt, payload }])[0];
+    return toNormalizedEvents(this.id, 'github', [{ type: 'workflow.updated', providerEventId: `workflow:${this.account.id}:${run.id}`, providerRevision: signature(payload), at: updatedAt, payload }])[0];
   }
   #repoName(value) { return REPOSITORY.test(value) ? value : null; }
 }

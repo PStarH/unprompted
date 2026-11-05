@@ -16,7 +16,8 @@ export async function startFixtureServer({ demo = false, desktop = false, ruleDe
   const child = spawn(process.env.UNPROMPTED_FIXTURE_NODE || process.execPath, [...nodeArgs, path.join(root, 'server.js')], {
     cwd: root, env: { ...env, PORT: String(port), UNPROMPTED_FORCE_SIMULATION: String(ruleDemo), ...(ruleDemo ? { UNPROMPTED_SHADOW_MODE: desktop ? 'true' : 'false' } : {}),
       UNPROMPTED_DEMO_MODE: String(demo && !desktop), UNPROMPTED_DESKTOP_APP: desktop ? '1' : '0',
-      UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'), UNPROMPTED_STATE_FILE: path.join(directory, 'state.json'), ...serverEnv },
+      UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'), UNPROMPTED_STATE_FILE: path.join(directory, 'state.json'),
+      UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(directory, 'no-google-client.json'), ...serverEnv },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let log = '';

@@ -527,17 +527,22 @@ export class TaskServices {
   }
 
   /** Apply once with exact task/patch/version consent, then reread and reassess. */
-  async applyDocumentPatch(taskId, { patchId, authorization = null } = {}) {
+  async applyDocumentPatch(taskId, { patchId, authorization = null, autonomyGrantId = null } = {}) {
     const patch = this.store.state.documentPatches?.[patchId];
     const task = requireTask(this.store.state, taskId);
     const durable = this.engine?.durableRuntime;
     const durableFence = durable?.capture(taskId);
+    if (autonomyGrantId) {
+      this.policy.authorize({ actionClass: 'execute_external', taskId,
+        approval: { permission: 'temporary_yolo', taskId, grantId: autonomyGrantId } });
+      authorization = { kind: 'temporary_yolo', confirmed: true, taskId, patchId, baseDocumentVersion: patch?.baseDocument.version };
+    }
     if (task.control?.paused) throw new Error('This task is paused. Resume it before applying a document patch.');
     if (!patch || patch.taskId !== taskId) throw new Error('Unknown document patch for this task.');
     if (patch.status === 'applied') return { patch, task, result: patch.result };
     const shadowReviewed = patch.status === 'shadow_read_only' && patch.result?.applied === false;
     if (patch.status !== 'prepared' && !shadowReviewed) throw new Error(`Document patch is ${patch.status}; prepare a new patch before applying.`);
-    if (!this.#authorizationMatches(authorization, patch, 'explicit') && !this.#authorizationMatches(authorization, patch, 'shadow_read_only')) {
+    if (!(autonomyGrantId && this.#authorizationMatches(authorization, patch, 'temporary_yolo')) && !this.#authorizationMatches(authorization, patch, 'explicit') && !this.#authorizationMatches(authorization, patch, 'shadow_read_only')) {
       throw new Error('Applying a document patch requires explicit consent bound to this task, patch ID, and base document version.');
     }
     if (shadowReviewed && authorization.kind === 'shadow_read_only') return { patch, task, result: patch.result };
@@ -545,9 +550,10 @@ export class TaskServices {
     this.store.mutate(state => {
       const current = state.documentPatches[patchId];
       current.authorizedAt = consentAt;
-      current.authorization = { kind: authorization.kind, taskId, patchId, baseDocumentVersion: patch.baseDocument.version };
-      insertHistory(state, authorization.kind === 'explicit' ? 'patch_authorized' : 'patch_shadow_review',
-        authorization.kind === 'explicit'
+      current.authorization = { kind: authorization.kind, taskId, patchId, baseDocumentVersion: patch.baseDocument.version,
+        ...(autonomyGrantId ? { grantId: autonomyGrantId } : {}) };
+      insertHistory(state, authorization.kind === 'shadow_read_only' ? 'patch_shadow_review' : 'patch_authorized',
+        autonomyGrantId ? 'Temporary YOLO authorized this source-backed document patch.' : authorization.kind === 'explicit'
           ? 'User explicitly authorized this exact source-backed document patch and base version.'
           : 'User requested a read-only shadow review of this exact document patch.', taskId, consentAt);
     });
@@ -623,7 +629,7 @@ export class TaskServices {
     };
     const beforeWrite = () => {
       if (durable && !durable.isCurrent(taskId, durableFence)) throw Object.assign(new Error('The task context or privacy generation changed before the document write.'), { stale: true });
-      const reason = this.#patchStaleReason(taskId, patchId, { expectedStatus: 'applying', attemptId: writeAttemptId });
+      const reason = this.#patchStaleReason(taskId, patchId, { expectedStatus: 'applying', attemptId: writeAttemptId, authorizationKind: authorization.kind });
       const currentPatch = this.store.state.documentPatches?.[patchId];
       const writeProvider = currentPatch?.provider === 'google' ? this.documentProvider : null;
       const providerCheck = writeProvider?.validate?.({ forWrite: true });

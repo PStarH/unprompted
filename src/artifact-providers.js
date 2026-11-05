@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import { providerJSON } from './connectors/http.js';
 import { gmailMessageId } from './connectors/google.js';
+import { reminderListId } from './connectors/apple-reminders.js';
 
 export const ARTIFACT_ACTIONS = Object.freeze({
   google: { family: 'email.draft', kind: 'gmail-draft', label: 'Gmail drafts' },
   microsoft: { family: 'email.draft', kind: 'outlook-draft', label: 'Outlook drafts' },
   notion: { family: 'notion.page.create', kind: 'notion-page', label: 'Notion page' },
-  apple_notes: { family: 'notes.note.create', kind: 'apple-note', label: 'Apple Notes' }
+  apple_notes: { family: 'notes.note.create', kind: 'apple-note', label: 'Apple Notes' },
+  apple_reminders: { family: 'reminders.reminder.create', kind: 'apple-reminder', label: 'Apple Reminders' }
 });
 
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -50,6 +52,7 @@ export class ArtifactProvider {
       && scopes.includes('https://www.googleapis.com/auth/gmail.compose');
     if (connector.id === 'microsoft') return this.targetId === 'drafts' && scopes.some(scope => /(?:^|\/)Mail\.ReadWrite$/i.test(scope));
     if (connector.id === 'notion') return Boolean(canonicalId(this.targetId));
+    if (connector.id === 'apple_reminders') return connector.folders?.some(folder => reminderListId(folder) === this.targetId);
     return connector.folders?.some(folder => folder.folderId === this.targetId);
   }
   async request(path, { method = 'GET', body = null, signal, beforeDispatch = null } = {}) {
@@ -100,6 +103,11 @@ export class ArtifactProvider {
         children: [...splitText(body, 1800).map(content => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: richText(content) } })),
           { object: 'block', type: 'paragraph', paragraph: { rich_text: richText(markerFor(idempotencyKey)) } }]
       } });
+    } else if (this.connector.id === 'apple_reminders') {
+      const folder = this.connector.folders.find(item => reminderListId(item) === this.targetId);
+      signal?.throwIfAborted();
+      beforeDispatch();
+      result = await this.connector.bridge.createReminder(folder, { title, body, marker: markerFor(idempotencyKey) }, { signal });
     } else {
       const folder = this.connector.folders.find(item => item.folderId === this.targetId);
       signal?.throwIfAborted();
@@ -108,6 +116,24 @@ export class ArtifactProvider {
     }
     if (typeof result?.id !== 'string' || !result.id || result.id.length > 4096) throw new Error('The provider did not return an artifact identity; reconcile the outcome.');
     return { id: result.id, provider: this.kind, idempotencyKey, status: 'accepted', targetId: this.targetId };
+  }
+  /**
+   * Remove an artifact this app created, then read it back to confirm. Callers
+   * must first confirm with lookup() that the object is unchanged, so a draft
+   * or page the user edited is never removed.
+   */
+  async remove(receiptId, { signal } = {}) {
+    if (typeof receiptId !== 'string' || !receiptId || receiptId.length > 4096) throw Object.assign(new Error('Unknown artifact identity.'), { code: 'INVALID_ARTIFACT', status: 400 });
+    const path = this.connector.id === 'google' ? `/gmail/v1/users/me/drafts/${encodeURIComponent(receiptId)}`
+      : this.connector.id === 'microsoft' ? `/v1.0/me/messages/${encodeURIComponent(receiptId)}`
+      : this.connector.id === 'notion' ? `/v1/pages/${encodeURIComponent(receiptId)}` : null;
+    if (!path) throw Object.assign(new Error('This target cannot remove artifacts automatically.'), { code: 'UNDO_UNSUPPORTED', status: 409 });
+    if (this.connector.id === 'notion') await this.request(path, { method: 'PATCH', body: { archived: true }, signal });
+    else await this.request(path, { method: 'DELETE', signal });
+    try {
+      const current = await this.request(path, { signal });
+      return { verified: this.connector.id === 'notion' && (current?.archived === true || current?.in_trash === true) };
+    } catch (error) { return { verified: error.status === 404 }; }
   }
   async lookup(key, { receiptId = null, payload = null, signal } = {}) {
     if (!this.available() || !receiptId || !payload) return { status: 'unknown' };
@@ -139,6 +165,11 @@ export class ArtifactProvider {
         valid = canonicalId(page.id) === canonicalId(receiptId) && !page.archived && !page.in_trash
           && canonicalId(page.parent?.page_id) === canonicalId(this.targetId) && title === payload.title
           && blocks.has_more === false && lines.pop() === markerFor(key) && lines.every(line => typeof line === 'string') && lines.join('') === payload.body;
+      } else if (this.connector.id === 'apple_reminders') {
+        const folder = this.connector.folders.find(item => reminderListId(item) === this.targetId);
+        const result = await this.connector.bridge.readReminders([folder], { signal });
+        const item = result.records?.find(item => item.id === receiptId && item.folderId === folder.folderId && item.accountId === folder.accountId);
+        valid = Boolean(item && item.title === payload.title && item.state === 'open' && item.body === `${payload.body}\n${markerFor(key)}`);
       } else {
         const folder = this.connector.folders.find(item => item.folderId === this.targetId);
         const result = await this.connector.bridge.readNotes([folder], {}, { signal });

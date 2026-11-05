@@ -43,10 +43,17 @@ test('Slack code flow uses PKCE on localhost, rejects a mismatched state, and ke
   assert.equal(redirect.pathname, '/oauth/slack');
   const mismatched = await fetch(`${redirect.origin}/oauth/slack?code=nope&state=${'a'.repeat(64)}`);
   assert.equal(mismatched.status, 400);
+  const mismatchPage = await mismatched.text();
+  assert.match(mismatchPage, /This authorization did not match an open connection attempt/);
+  assert.doesNotMatch(mismatchPage, /Connection complete/);
   assert.equal(setup.getConnection('slack').accessToken, undefined);
   const approved = await fetch(`${redirect.origin}/oauth/slack?code=good-code&state=${authorize.searchParams.get('state')}`);
   assert.equal(approved.status, 200);
-  assert.doesNotMatch(await approved.text(), /good-code|slackSecretValue1|xoxp-/);
+  const successPage = await approved.text();
+  assert.match(successPage, /Connection complete/);
+  assert.match(successPage, /Your account is connected/);
+  assert.doesNotMatch(successPage, /good-code|slackSecretValue1|xoxp-/);
+  assert.match(approved.headers.get('content-security-policy'), /default-src 'none'/);
   const exchange = calls.find(call => call.url.endsWith('/oauth.v2.access'));
   assert.match(exchange.body, /code=good-code/);
   assert.match(exchange.body, /code_verifier=/);
@@ -84,7 +91,10 @@ test('Notion code flow sends the client secret only to Notion and a second liste
   await assert.rejects(blocked.start('notion', { clientId: notionId, clientSecret: notionSecret }), /already in use/);
   const approved = await fetch(`${redirect.origin}/oauth/notion?code=notion-code&state=${authorize.searchParams.get('state')}`);
   assert.equal(approved.status, 200);
-  assert.doesNotMatch(await approved.text(), /notion-code|secret_notionvalue|ntn_user_token_value/);
+  const savedPage = await approved.text();
+  assert.match(savedPage, /Almost there/);
+  assert.match(savedPage, /finish setting up the connection/);
+  assert.doesNotMatch(savedPage, /Connection complete|notion-code|secret_notionvalue|ntn_user_token_value/);
   assert.equal(setup.getConnection('notion').account.label, 'Ada · Notes');
   assert.equal(oauth.describe('notion').phase, 'activation_failed');
 });
@@ -118,4 +128,11 @@ test('Slack refresh does not send the client secret and GitHub refresh stays a p
   const github = new SavedConnectionAuth(setup, 'github', { fetchImpl: async (url, options) => { githubBody = options.body; return json({ access_token: 'new-github', expires_in: 3600 }); } });
   assert.equal(await github.accessToken(), 'new-github');
   assert.doesNotMatch(githubBody, /client_secret/);
+});
+
+test('Slack additional action scopes are included in the actual user consent URL', async t => {
+  const setup = fixture(t), oauth = new CodeOAuth(setup, { port: 0 }); t.after(() => oauth.close());
+  const started = await oauth.start('slack', { clientId: slackId, scopes: ['chat:write', 'reactions:write'] });
+  const requested = new URL(started.authorizeUrl).searchParams.get('user_scope').split(',');
+  assert.ok(requested.includes('chat:write')); assert.ok(requested.includes('reactions:write')); assert.ok(requested.includes('im:history'));
 });

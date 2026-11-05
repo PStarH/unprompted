@@ -2,6 +2,8 @@
 const messages = {
   "待你处理": "To review",
   "记录": "Record",
+  "日志": "Log",
+  "全部记录": "All records",
   "来源变化与跟进": "Source changes and follow-through",
   "查看任务": "View task",
   "按状态查看": "View by state",
@@ -17,6 +19,10 @@ const messages = {
   "关闭": "Close",
   "动态": "Activity",
   "记忆": "Memory",
+  "记忆空间": "Memory Space",
+  "记忆探索": "Memory Explorer",
+  "规则与经验": "Rules & experience",
+  "独立管理判断规则，以及从完成的工作中积累的经验。": "Rules and experience accumulated from completed work.",
   "设置": "Settings",
   "外观": "Appearance",
   "外观自定义": "Customize appearance",
@@ -169,6 +175,7 @@ const messages = {
   "最近成功观察 {time}": "Last observed {time}",
   "尚未完成一次观察": "No completed observation yet",
   "观察只读取授权范围；断开后停止。": "Observation reads only the authorized scope and stops when disconnected.",
+  "观察只读取内容；行动需要单独允许，且受平台授权范围限制。工作上下文可能交给你选择的模型理解。": "Observation only reads. Actions need a separate permission and stay within the platform grant. Work context may be sent to the model you choose.",
   "邮件与文档": "Mail and documents",
   "已分配的 issue": "Assigned issues",
   "收件箱邮件": "Inbox email",
@@ -205,7 +212,7 @@ const messages = {
   "今天": "Today",
   "更早": "Earlier",
   "搜索记忆": "Search memories",
-  "你明确保存的偏好与经验，范围由你控制。": "Preferences and experience you chose to save, within a scope you control.",
+  "搜索想找的记忆，了解它的来源与上下文。": "Find a memory. Understand where it came from and what it connects to.",
   "来源变化与 Agent 的跟进，按时间留在这里。": "Source changes and agent follow-through, kept in time order.",
   "搜索动态": "Search activity",
   "来源变化": "Source changes",
@@ -454,6 +461,7 @@ const messages = {
   "推理内核": "Reasoning harness",
   "Key 只保存在本机。测试使用虚构内容；连接后，任务上下文会发送给所选模型。": "Your key is stored locally. The check uses invented content; after connecting, task context is sent to your selected model.",
   "验证并连接模型": "Verify and connect model",
+  "支持 OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，也可使用本地模型。": "Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, or a local model.",
   "移除本机模型连接": "Remove local model connection",
   "使用自己的 API Key · 支持兼容接口和本地模型": "Your API key · compatible APIs and local models",
   "次模型请求": "model requests",
@@ -774,15 +782,6 @@ const messages = {
   "恢复跟进": "Restore follow-up",
   "已恢复跟进，已重新核对当前证据。没有发送回复。": "Follow-up restored and current evidence checked. Nothing was sent.",
   "撤销": "Undo",
-  "稍后再看": "Later",
-  "30 分钟后再看": "Set aside for 30 minutes",
-  "只暂收起这台设备上的提醒，Agent 仍会照看。": "Hides the reminder on this device. I'll keep looking after the task.",
-  "已暂收起，30 分钟后再显示。": "Set aside for 30 minutes on this device.",
-  "现在查看": "Show now",
-  "稍后处理": "Set aside for later",
-  "已备好，按你的安排稍后再看。": "Ready when you are. Set aside for later.",
-  "暂收起的任务仍在照看，相关内容变化时会重新出现。": "I'm still looking after these tasks. Changed evidence brings them back sooner.",
-  " 到时再看": " · back at that time",
   "自上次离开以来": "Since your last visit",
   "新增任务": "New follow-ups",
   "准备就绪": "Ready for your decision",
@@ -1019,9 +1018,34 @@ const messages = {
   ,"添加备忘录文件夹": "Add Notes folders"
   ,"已读取 {emails} 封邮件 · {documents} 份文档": "{emails} emails · {documents} documents read"
   ,"先连一个来源。读取默认开启，发送和修改要单独允许。": "Start with one source. Reading is on by default. Sending and editing stay off until you allow them."
+  ,"先连一个来源就够了。读取默认开启，发送和修改要单独允许。": "One source is enough. Reading stays on. Sending and editing stay off until you allow them."
+  ,"其他来源": "Other sources"
+  ,"取消": "Cancel"
+  ,"清除这个来源的本机副本？": "Clear this source’s local copy?"
+  ,"将删除这个来源在本机的收件、快照和 {count} 件事项。不能撤销。": "This deletes the source’s local mail, snapshots, and {count} tasks. It cannot be undone."
+  ,"将删除这个来源在本机的收件、快照和衍生内容。不能撤销。": "This deletes the source’s local mail, snapshots, and derived records. It cannot be undone."
+  ,"确认清除": "Clear local copy"
+  ,"移除本机模型连接？": "Remove the model connection?"
+  ,"移除后要重新填写接口和 Key。来源和工作记录还在。": "Enter the endpoint and key again. Sources and work records stay."
+  ,"确认移除": "Remove"
+  ,"处理这件": "Handle this"
+  ,"处理这 {count} 件": "Handle these {count}"
+  ,"打开下一件需要你的事": "Open the next thing that needs you"
   ,"连接、授权范围和最近观察都在这里。发送和修改要单独开启。": "Connections, access, and the latest observation live here. Sending and editing are turned on separately."
+  ,"模型、自动跟进、外观和工作台视图都在这里。": "The model, automatic follow-up, appearance, and workspace view live here."
+  ,"打开这条记录，查看事件时间与关联任务。": "Open this record to see when it happened and the related task."
   ,"切换工作台的五种视图，不是侧栏页面": "Switch the five workspace layouts, not the sidebar pages"
+  ,"切换任务详情": "Switch task details"
   ,"本地工作区": "Local workspace"
+  ,"与1个任务共享等待": "Shared wait with 1 task"
+  ,"与{n}个任务共享等待": "Shared wait with {n} tasks"
+  ,"影响 {n} 件事": "{n} tasks"
+  ,"展开": "Expand"
+  ,"这台 Mac 可以直接连接本地文件夹和备忘录，都不需要账号。": "This Mac can connect local folders and Notes directly, with no account."
+  ,"这台电脑可以直接连接本地文件夹，不需要账号。": "This computer can connect local folders directly, with no account."
+  ,"回执 {id} · {kind} · {time}": "Receipt {id} · {kind} · {time}"
+  ,"模拟发送": "simulated delivery"
+  ,"真实提供方": "live provider"
 };
 const legacyMessages = {
   "The prepared reply changed. Review the updated reply before sending.": "准备好的回复已经更新，请看过新内容后再发送。",

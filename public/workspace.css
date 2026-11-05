@@ -340,12 +340,7 @@ button svg { flex-shrink: 0; }
 .ws-memory-deleted > p { flex: 1; overflow-wrap: anywhere; }
 #memoryDeleted { margin-top: 26px; font-size: 12px; color: var(--muted); }
 #memoryDeleted summary { cursor: pointer; }
-.task-dialog { background: var(--canvas); border: 1px solid var(--line); color: var(--ink); border-radius: 13px; width: min(850px, calc(100vw - 40px)); padding: 20px; max-height: calc(100dvh - 50px); box-shadow: 0 24px 100px #12191225; }
-.task-dialog .dialog-heading { padding-bottom: 14px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
 .dialog-heading h2 { font-size: 14px; }
-.task-dialog .ws-inspector { border: 0; padding: 16px 0 0; background: transparent; }
-.task-dialog .ws-task-controls [data-open-task] { display: none; }
-.task-dialog .ws-inspector-heading h2 { display: none; }
 .task-action { padding: 14px 0; border-top: 1px solid var(--line); background: transparent; }
 .task-action h4 { font-size: 13px; margin: 0 0 6px; }
 .task-action > p, .task-action .draft-recipient { font-size: 11px; color: var(--muted); }
@@ -353,7 +348,7 @@ button svg { flex-shrink: 0; }
 .ws-inspector .draft-excerpt { -webkit-line-clamp: 2; }
 .draft-details { background: transparent; color: var(--muted); }
 .draft-body { color: var(--ink); font-size: 12px; background: var(--canvas); border-color: var(--line); }
-.action-error, .snooze-note, .snoozed-summary { background: var(--amber-light); color: var(--amber); border-color: var(--line); }
+.action-error { background: var(--amber-light); color: var(--amber); border-color: var(--line); }
 .action-error p { color: var(--amber); }
 .auto-explain { color: var(--muted); font-size: 11px; }
 .task-card { background: var(--surface); border-color: var(--line); box-shadow: none; }
@@ -479,8 +474,6 @@ button svg { flex-shrink: 0; }
   .ws-scope > svg { display: none; }
   .ws-composer .primary-button { min-height: 40px; padding: 6px 10px; font-size: 11px; }
   .ws-composer .primary-button svg { display: none; }
-  .ws-detail-links { flex-wrap: wrap; gap: 8px 18px; }
-  .ws-detail-links .text-button { min-height: 40px; }
   .ws-lanes .ws-row-main { grid-template-columns: minmax(0, 1fr) 90px; gap: 0 6px; }
   .ws-lanes .ws-row-main > .ws-path { margin-left: 26px; }
   .ws-lanes .ws-row-main > .ws-row-meta { max-width: none; }
@@ -501,7 +494,6 @@ button svg { flex-shrink: 0; }
   .ws-memory-actions { width: 100%; justify-content: flex-end; }
   .ws-memory-actions button { min-height: 44px; }
   .ws-memory-content textarea { font-size: 16px; }
-  .task-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 20px); padding: 16px; margin: auto; border-radius: 11px; }
   .ws-context-dialog { width: calc(100vw - 24px); max-height: 84dvh; border-radius: 12px; }
   .ws-context-heading { padding: 18px 16px 14px; }
   .ws-context-heading .icon-button { min-height: 42px; min-width: 42px; }
@@ -509,9 +501,6 @@ button svg { flex-shrink: 0; }
   .ws-memory-trigger, .ws-source-trigger, .ws-linked-memory { min-height: 40px; font-size: 11px; }
   #viewSources .source-connection-list { grid-template-columns: 1fr; }
   #viewSources .source-connection-card:nth-child(n) { padding: 20px 0; border-right: 0; }
-  .task-dialog .dialog-heading { position: sticky; top: -16px; padding-top: 6px; background: var(--canvas); z-index: 5; }
-  .task-dialog .dialog-heading h2 { font-size: 13px; }
-  .task-dialog .dialog-heading button { min-width: 44px; min-height: 44px; }
   .task-action .action-row > button { min-height: 44px; }
   .main-footer { margin-top: 30px; }
   .main-footer > span:last-child { font-size: 9px; }

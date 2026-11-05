@@ -147,7 +147,7 @@ export class ExperienceService {
       if (['explicit_rejection', 'undo'].includes(kind)) {
         this.database.bump('context_version');
         const effect = step ? parse(step.expected_effect_json) : parse(execution.effect_signature_json);
-        const family = step?.action_family || execution.action_family || step.step_kind;
+        const family = step?.action_family || execution?.action_family || step?.step_kind;
         const context = this.contextKey(taskId);
         this.db.prepare('INSERT OR IGNORE INTO action_suppressions VALUES(?,?,?,?,?,?,?)').run(randomUUID(), taskId, context, family, effectDigest(effect), id, at);
         if (step && ['proposed', 'approved', 'skipped'].includes(step.status)) this.db.prepare("UPDATE plan_steps SET status='rejected',updated_at=? WHERE id=?").run(at, step.id);

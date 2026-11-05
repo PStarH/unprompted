@@ -5,7 +5,7 @@ description: What Unprompted does, where each guide goes, and how to report a ga
 
 Unprompted is a local-first prototype. It watches sources you authorize, notices work that was not assigned as a prompt, checks the evidence, and prepares the next step. You review the result. External actions stay behind an approval or a separate permission.
 
-This documentation is a preview and may describe changes not yet available in the published application. It is for someone running the app, and for someone changing the code or calling the local API.
+This site matches the current `main` branch, version 0.3.0. It is for someone running the app, and for someone changing the code or calling the local API.
 
 ## What it does
 
