@@ -557,6 +557,66 @@ test('a context retry happens once and does not chain', async t => {
   assert.equal(context.connection.writes.length, 0);
 });
 
+test('an automatic draft retry stays non-explicit', async t => {
+  const context = await fixture(t, 'google');
+  const approvals = [];
+  const authorize = context.engine.policy.authorize.bind(context.engine.policy);
+  context.engine.policy.authorize = input => {
+    if (input.actionClass === 'execute_external') approvals.push(input.approval?.permission);
+    return authorize(input);
+  };
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  await started;
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].explicit, false);
+  await context.runtime.artifacts.createGrant({ connectorId: 'google', targetId: 'drafts', project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2, JSON.stringify(requests));
+  assert.equal(requests[0].status, 'blocked');
+  assert.equal(requests[1].explicit, false);
+  assert.equal(requests[1].status, 'verified');
+  assert.deepEqual([...new Set(approvals)], ['pre_authorized']);
+  assert.equal(context.connection.writes.length, 1);
+});
+
+test('a changed review token blocks a non-mail retry', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  const approved = draftReviewToken(task);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: approved });
+  await started;
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].reviewToken, approved);
+  context.store.mutate(state => { state.tasks[context.taskId].draft.body = `${state.tasks[context.taskId].draft.body}\nUnreviewed edit`; });
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'blocked');
+  assert.equal(requests[0].reviewToken, approved);
+  assert.match(requests[0].error, /Review it before trying again/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
 test('a permission refresh retries a draft that was cancelled before dispatch', async t => {
   const context = await fixture(t, 'google');
   context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));

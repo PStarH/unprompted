@@ -116,6 +116,7 @@ export class ArtifactActions {
       connectorId: grant.connectorId, family: grant.family, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch,
       contextVersion: Number(this.database.get('context_version')), payload: { ...payload, idempotencyKey: key },
       ...(grant.family === 'email.draft' ? { draftToken: draftReviewToken(task) } : {}),
+      ...(explicit ? { reviewToken } : {}),
       ...(contextRetry ? { contextRetry: true } : {}),
       explicit, status: 'queued', createdAt: iso(this.database.now()) };
     this.engine.store.mutate(state => {
@@ -192,22 +193,22 @@ export class ArtifactActions {
         const grant = this.grants().find(item => item.id === request.grantId && item.status === 'active');
         const current = this.runtime.tasks.get(task.id);
         const email = grant?.family === 'email.draft';
-        const draftStillApproved = !email || request.draftToken === draftReviewToken(current);
-        const retryable = Boolean(grant && current && !request.contextRetry && draftStillApproved
+        const storedReview = email ? request.draftToken : request.reviewToken;
+        // Activation stays activation. A fresh draftReviewToken(current) would
+        // approve a reply or task the user has not reviewed.
+        const reviewStillCurrent = (!email && !request.explicit) || storedReview === draftReviewToken(current);
+        const retryable = Boolean(grant && current && !request.contextRetry && reviewStillCurrent
           && !current.artifactRequests?.some(item => item.id !== request.id && item.grantId === grant.id && item.inputVersion === current.inputVersion && !['blocked', 'undone'].includes(item.status)));
-        this.record(task.id, request.id, { status: 'blocked', error: !draftStillApproved
-          ? 'The prepared reply changed. Review it before trying again.'
+        this.record(task.id, request.id, { status: 'blocked', error: !reviewStillCurrent
+          ? (email ? 'The prepared reply changed. Review it before trying again.' : 'The reviewed task changed. Review it before trying again.')
           : retryable
             ? 'The destination authorization changed before dispatch. A new attempt was queued.'
             : 'Authorization or task context changed. Review the task before trying again.' });
         if (retryable) {
           try {
-            // Mail retries only the reply whose review token still matches.
-            // Recomputing the token here would approve whatever the draft says now.
-            this.request(task.id, email ? { grantId: grant.id } : { grantId: grant.id, title: request.payload.title, body: request.payload.body },
-              email
-                ? { actor: 'user', retryInterrupted: true, contextRetry: true, reviewToken: request.draftToken }
-                : { actor: request.explicit ? 'user' : 'activation', retryInterrupted: true, contextRetry: true, ...(request.explicit ? { reviewToken: draftReviewToken(current) } : {}) });
+            this.request(task.id, email ? { grantId: grant.id } : { grantId: grant.id, title: request.payload.title, body: request.payload.body }, {
+              actor: request.explicit ? 'user' : 'activation', retryInterrupted: true, contextRetry: true,
+              ...(request.explicit ? { reviewToken: storedReview } : {}) });
           } catch { /* the blocked attempt stays visible for review */ }
         }
         return;
