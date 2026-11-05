@@ -7,9 +7,39 @@ const DEFAULT_PRESETS = [
   {
     id: 'fetch', name: 'Fetch', auth: 'none', tagZh: '无需账号', tagEn: 'No account',
     titleZh: '网页内容提取', titleEn: 'Web content reader',
-    descriptionZh: '抓取任意网页并自动转为大模型易读的 Markdown，开箱即用。',
-    descriptionEn: 'Fetches web pages and converts them to clean Markdown for LLMs.',
-    defaultEnabled: true, connection: { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'] }, fields: []
+    descriptionZh: '使用本应用自带的 Node 读取公开网页文本。不使用固定的本机路径，也不需要 uvx。只读。',
+    descriptionEn: 'Reads public web pages with this app’s Node. The command is resolved on this computer, with no uvx and no fixed path. Read only.',
+    defaultEnabled: true, connection: null, fields: []
+  },
+  {
+    id: 'git', name: 'Git', auth: 'none', runtime: { command: 'uvx', available: true, hintZh: '未找到 uvx。安装 uv 后即可连接，不需要 API Key。', hintEn: 'uvx was not found. Install uv, then retry. No API key or OAuth app is required.' },
+    tagZh: '无需账号', tagEn: 'No account', titleZh: '本地 Git 仓库', titleEn: 'Local Git repositories',
+    descriptionZh: '只读查看你选择的仓库。需要 uvx，不需要令牌。修改默认关闭。',
+    descriptionEn: 'Read repositories you choose. Needs uvx. No token. Modify stays off.',
+    connection: { type: 'stdio', command: 'uvx', args: ['mcp-server-git'] },
+    fields: [{ key: 'repositories', labelZh: '仓库绝对路径', labelEn: 'Repository paths', placeholder: '/path/to/repo', type: 'paths', flag: '--repository', required: true }]
+  },
+  {
+    id: 'filesystem', name: 'Filesystem', auth: 'none', runtime: { command: 'npx', available: true, hintZh: '未找到 npx。安装 Node.js 后即可连接，不需要 API Key。', hintEn: 'npx was not found. Install Node.js, then retry. No API key is required.' },
+    tagZh: '无需账号', tagEn: 'No account', titleZh: '本地文件夹', titleEn: 'Local directories',
+    descriptionZh: '只读查看你选择的目录。需要 npx，不需要令牌。修改默认关闭。',
+    descriptionEn: 'Read directories you choose. Needs npx. No token. Modify stays off.',
+    connection: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem'] },
+    fields: [{ key: 'directories', labelZh: '目录绝对路径', labelEn: 'Directory paths', placeholder: '/path/to/notes', type: 'paths', required: true }]
+  },
+  {
+    id: 'time', name: 'Time', auth: 'none', runtime: { command: 'uvx', available: true, hintZh: '未找到 uvx。安装 uv 后即可连接，不需要 API Key。', hintEn: 'uvx was not found. Install uv, then retry. No API key or OAuth app is required.' },
+    tagZh: '无需账号', tagEn: 'No account', titleZh: '当前时间', titleEn: 'Current time',
+    descriptionZh: '提供这台电脑的当前时间。需要 uvx，无需其他配置。只读。',
+    descriptionEn: 'Provides the current time on this computer. Needs uvx and nothing else. Read only.',
+    connection: { type: 'stdio', command: 'uvx', args: ['mcp-server-time'] }, fields: []
+  },
+  {
+    id: 'deepwiki', name: 'DeepWiki', auth: 'none', tagZh: '无需账号', tagEn: 'No account',
+    titleZh: '公开仓库文档', titleEn: 'Public repository docs',
+    descriptionZh: '连接 DeepWiki 公开服务，查阅公开仓库文档。不需要登录或密钥。只读。',
+    descriptionEn: 'Connects to public DeepWiki for public repository documentation. No sign-in and no key. Read only.',
+    connection: { type: 'http', url: 'https://mcp.deepwiki.com/mcp' }, fields: []
   },
   {
     id: 'notion', name: 'Notion', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
@@ -86,6 +116,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           const label = preset.signedIn ? t('重新登录', 'Sign in again') : t('登录并连接', 'Sign in and connect');
           actions = `${configured ? `<span class="mcp-status" data-status="${esc(configured.status)}">${configured.enabled ? status(configured.status) : t('已停用', 'Disabled')}</span>` : ''}<button type="button" class="secondary-button" data-mcp-oauth="${esc(preset.id)}" ${busy || signingIn.has(preset.id) ? 'disabled' : ''}>${label}</button>`;
         }
+      } else if (preset.runtime && preset.runtime.available === false && !configured) {
+        actions = `<p class="setup-note">${esc(t(preset.runtime.hintZh, preset.runtime.hintEn))}</p>`;
       } else if (configured) {
         actions = `<span class="mcp-status" data-status="${esc(configured.status)}">${configured.enabled ? status(configured.status) : t('已停用', 'Disabled')}</span><button type="button" class="text-button" data-mcp-preset-open="${esc(preset.id)}">${t('修改', 'Configure')}</button>`;
       } else if (preset.id === 'fetch') {
@@ -100,6 +132,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
             <span class="mcp-preset-tag">${esc(t(preset.tagZh || '内置推荐', preset.tagEn || 'Preset'))}</span>
             <div><strong>${esc(preset.name)}</strong> · <small>${esc(t(preset.titleZh, preset.titleEn))}</small></div>
             <p>${esc(t(preset.descriptionZh, preset.descriptionEn))}</p>
+            ${presetAuth(preset) === 'none' ? `<p class="connection-permissions"><span>${t('读取 开', 'Read on')}</span><span>${configured?.tools?.some(tool => tool.writeTool && tool.allowed) ? t('修改 开', 'Modify on') : t('修改 关', 'Modify off')}</span></p>` : ''}
             ${oauthError ? `<p class="mcp-error" role="status">${esc(localError(oauthError))}</p>` : ''}
           </div>
           <div class="mcp-preset-card-footer">${actions}</div>
@@ -226,7 +259,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
             return `
               <div class="mcp-preset-form-item" data-preset-item="${esc(preset.id)}">
                 <label class="mcp-preset-checkbox-label">
-                  <input type="checkbox" name="preset_${esc(preset.id)}" data-preset-toggle="${esc(preset.id)}" ${isChecked ? 'checked' : ''}>
+                  <input type="checkbox" name="preset_${esc(preset.id)}" data-preset-toggle="${esc(preset.id)}" ${preset.runtime && preset.runtime.available === false ? 'disabled' : ''} ${isChecked && !(preset.runtime && preset.runtime.available === false) ? 'checked' : ''}>
                   <div>
                     <strong>${esc(preset.name)}</strong> · <span>${esc(t(preset.titleZh, preset.titleEn))}</span>
                     <small class="muted">${esc(t(preset.descriptionZh, preset.descriptionEn))}</small>
@@ -234,10 +267,17 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
                 </label>
                 ${preset.fields && preset.fields.length ? `
                   <div class="mcp-preset-fields" data-preset-fields="${esc(preset.id)}" ${isChecked ? '' : 'hidden'}>
-                    ${preset.fields.map(f => `
+                    ${preset.runtime && preset.runtime.available === false ? `<p class="setup-note">${esc(t(preset.runtime.hintZh, preset.runtime.hintEn))}</p>` : ''}
+                    ${preset.fields.map(f => f.type === 'paths' ? `
                       <label>
                         <span>${esc(t(f.labelZh || f.label, f.labelEn || f.label))}</span>
-                        <input name="field_${esc(preset.id)}_${esc(f.key)}" type="${esc(f.type || 'text')}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">
+                        <textarea name="field_${esc(preset.id)}_${esc(f.key)}" rows="3" placeholder="${esc(f.placeholder || '')}" autocomplete="off"></textarea>
+                        ${f.helpZh || f.helpEn ? `<small class="muted">${esc(t(f.helpZh, f.helpEn))}</small>` : ''}
+                      </label>
+                    ` : `
+                      <label>
+                        <span>${esc(t(f.labelZh || f.label, f.labelEn || f.label))}</span>
+                        <input name="field_${esc(preset.id)}_${esc(f.key)}" type="${esc(f.type === 'password' ? 'password' : 'text')}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">
                       </label>
                     `).join('')}
                   </div>
@@ -283,6 +323,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       'MCP request failed. Check the server configuration and reconnect.': 'MCP 请求失败，请检查服务配置后重连。',
       'MCP authentication failed. Check the authorization header or server credentials.': '认证失败，请检查访问令牌或服务凭据。',
       'MCP executable not found. Check the command and installation.': '找不到本机命令，请检查安装和命令路径。',
+      'uvx was not found. Install uv, then retry. No API key or OAuth app is required.': '未找到 uvx。安装 uv 后重试即可，不需要 API Key 或 OAuth 应用。',
+      'npx was not found. Install Node.js, then retry. No API key is required.': '未找到 npx。安装 Node.js 后重试即可，不需要 API Key。',
       'MCP connection timed out. Check the server and reconnect.': '连接超时，请检查服务后重连。',
       'MCP SDK unavailable. Run npm ci --include=optional and restart.': 'MCP 依赖未安装，请运行 npm ci --include=optional 后重启。',
       'Invalid MCP JSON.': '配置不是有效的 JSON。',
@@ -385,7 +427,11 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       busy = true;
       try {
         const preset = (context().mcp?.presets || DEFAULT_PRESETS).find(item => item.id === 'fetch');
-        const recipe = presetRecipe(preset) || { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'] };
+        const recipe = presetRecipe(preset);
+        if (!recipe?.command && !recipe?.url) {
+          notify(t('Fetch 由本应用的运行时提供。请刷新连接页后再试。', 'Fetch is provided by this app. Refresh Connections and try again.'), true);
+          busy = false; render(); return;
+        }
         const config = { mcpServers: { fetch: recipe.type === 'http' ? { url: recipe.url } : { command: recipe.command, args: recipe.args } } };
         await post('/api/mcp/import', { config, allowDeclaredRead: true });
         await refresh();
@@ -471,8 +517,23 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           continue;
         }
         const env = {};
+        const args = [...(recipe.args || [])];
         for (const f of (preset.fields || [])) {
           const val = String(form.get(`field_${preset.id}_${f.key}`) || '').trim();
+          if (f.type === 'paths') {
+            const paths = val.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean);
+            if (!paths.length) {
+              document.getElementById('mcpFormError').textContent = t(`请填写 ${preset.name} 的绝对路径。`, `Enter absolute paths for ${preset.name}.`);
+              return;
+            }
+            if (paths.some(item => !item.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(item))) {
+              document.getElementById('mcpFormError').textContent = t('请使用绝对路径，每行一个。', 'Use absolute paths, one per line.');
+              return;
+            }
+            if (f.flag) for (const item of paths) args.push(f.flag, item);
+            else args.push(...paths);
+            continue;
+          }
           if (!val) {
             const existing = servers.find(s => s.id === preset.id);
             if (!existing) {
@@ -486,7 +547,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
         }
         mcpServers[preset.id] = {
           command: recipe.command,
-          args: recipe.args,
+          args,
           ...(Object.keys(env).length ? { env } : {})
         };
       }

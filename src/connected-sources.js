@@ -7,6 +7,9 @@ import { NotionConnector } from './connectors/notion.js';
 import { SavedConnectionAuth } from './device-oauth.js';
 import { LocalFilesConnector } from './connectors/local-files.js';
 import { AppleNotesConnector } from './connectors/apple-notes.js';
+import { AppleCalendarConnector } from './connectors/apple-calendar.js';
+import { AppleMailConnector } from './connectors/apple-mail.js';
+import { AppleContactsConnector } from './connectors/apple-contacts.js';
 import { NativeSourceBridge } from './native-sources.js';
 
 export function connectedSources(setup, { fetchImpl = globalThis.fetch, nativeBridge = new NativeSourceBridge(), baseUrl = '' } = {}) {
@@ -25,10 +28,17 @@ export function connectedSources(setup, { fetchImpl = globalThis.fetch, nativeBr
   const local = setup.getNativeSource?.('local_files');
   const notes = setup.getNativeSource?.('apple_notes');
   const reminders = setup.getNativeSource?.('apple_reminders');
+  const calendar = setup.getNativeSource?.('apple_calendar');
+  const mail = setup.getNativeSource?.('apple_mail');
+  const contacts = setup.getNativeSource?.('apple_contacts');
+  const native = (saved, Constructor) => saved?.scopeId && saved.folders?.length && nativeBridge.platform === 'darwin' ? [new Constructor({ ...saved, bridge: nativeBridge, baseUrl })] : [];
   return [...cloud,
-    ...(reminders?.scopeId && reminders.folders.length && nativeBridge.platform === 'darwin' ? [new AppleRemindersConnector({ ...reminders, bridge: nativeBridge, baseUrl })] : []),
+    ...native(reminders, AppleRemindersConnector),
+    ...native(calendar, AppleCalendarConnector),
+    ...native(mail, AppleMailConnector),
+    ...native(contacts, AppleContactsConnector),
     ...(local?.scopeId && local.roots.length ? [new LocalFilesConnector({ ...local, baseUrl })] : []),
-    ...(notes?.scopeId && notes.folders.length && nativeBridge.platform === 'darwin' ? [new AppleNotesConnector({ ...notes, bridge: nativeBridge, baseUrl })] : [])];
+    ...native(notes, AppleNotesConnector)];
 }
 
 export function sourceCounts(state, id) {
@@ -42,6 +52,6 @@ export function sourceCounts(state, id) {
 export function sourceAccountBindings(setup) {
   return Object.fromEntries([
     ...['github', 'microsoft', 'slack', 'notion', 'todoist'].map(id => [id, setup.getConnection(id).account?.id || null]),
-    ...['local_files', 'apple_notes', 'apple_reminders'].map(id => [id, setup.getNativeSource(id).scopeId || null])
+    ...['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts'].map(id => [id, setup.getNativeSource(id).scopeId || null])
   ]);
 }

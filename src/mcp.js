@@ -4,9 +4,19 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readRegularFile } from './local-files.js';
-import { MCP_PRESETS, publicPresetConnection } from './mcp-presets.js';
+import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfig } from './mcp-presets.js';
 
 export { MCP_PRESETS };
+
+export function findExecutable(command, pathValue = stdioEnvironment().PATH) {
+  if (typeof command !== 'string' || !/^[A-Za-z0-9._-]{1,40}$/.test(command)) return null;
+  for (const dir of String(pathValue || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, command);
+    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch { /* Try the next directory. */ }
+  }
+  return null;
+}
 
 export function stdioEnvironment(defaults = {}, overrides = {}) {
   const runtime = path.dirname(process.execPath), home = os.homedir();
@@ -147,17 +157,21 @@ function errorMessage(error) {
 }
 
 export class McpManager {
-  constructor({ configStore, timeoutMs = MCP_LIMITS.timeoutMs, load = loadSdk, onChange = () => {} } = {}) {
+  constructor({ configStore, timeoutMs = MCP_LIMITS.timeoutMs, load = loadSdk, onChange = () => {}, executableLookup = findExecutable } = {}) {
     this.configStore = configStore; this.configs = configStore.get(); this.timeoutMs = timeoutMs;
     const bundledFetch = MCP_PRESETS.find(preset => preset.id === 'fetch').config;
     const savedFetch = this.configs.fetch;
-    if (savedFetch?.type === 'stdio' && (savedFetch.command === 'uvx' && JSON.stringify(savedFetch.args) === '["mcp-server-fetch"]' || savedFetch.args?.length === 1 && /[/\\]src[/\\]mcp-fetch-server\.js$/.test(savedFetch.args[0]))) this.configs.fetch = { ...savedFetch, ...bundledFetch };
+    // Fetch always uses this process's Node and the bundled script. A saved config
+    // that still points at another machine (for example a developer's nvm path)
+    // or the old uvx package is rewritten here.
+    const savedFetchScript = savedFetch?.args?.length === 1 && /[/\\]mcp-fetch-server\.js$/.test(savedFetch.args[0]);
+    if (savedFetch?.type === 'stdio' && (savedFetch.command === 'uvx' && JSON.stringify(savedFetch.args) === '["mcp-server-fetch"]' || savedFetchScript)) this.configs.fetch = { ...savedFetch, ...bundledFetch };
     for (const id of ['brave-search', 'firecrawl']) {
       const saved = this.configs[id], preset = MCP_PRESETS.find(item => item.id === id).config;
       const legacyArgs = id === 'brave-search' ? ['-y', '@modelcontextprotocol/server-brave-search'] : ['-y', 'firecrawl-mcp'];
       if (saved?.type === 'stdio' && (saved.command === 'npx' && JSON.stringify(saved.args) === JSON.stringify(legacyArgs) || saved.args?.length === 2 && /[/\\]src[/\\]mcp-key-server\.js$/.test(saved.args[0]) && saved.args[1] === id)) this.configs[id] = { ...saved, ...preset };
     }
-    this.load = load; this.onChange = onChange; this.connections = new Map(); this.busy = false; this.closed = false; this.inFlight = 0;
+    this.load = load; this.onChange = onChange; this.executableLookup = executableLookup; this.connections = new Map(); this.busy = false; this.closed = false; this.inFlight = 0;
     this.lockContext = new AsyncLocalStorage(); this.oauthBroker = null;
   }
   attachOAuth(broker) { this.oauthBroker = broker; }
@@ -186,10 +200,12 @@ export class McpManager {
       descriptionZh: preset.descriptionZh, descriptionEn: preset.descriptionEn,
       defaultEnabled: preset.defaultEnabled, requiresAuth: preset.requiresAuth,
       connection: publicPresetConnection(preset),
+      ...(preset.runtime ? { runtime: { command: preset.runtime, available: this.#runtimeAvailable(preset.runtime), ...RUNTIME_HINTS[preset.runtime] } } : {}),
       fields: preset.fields, configured: Object.hasOwn(this.configs, preset.id),
       enabled: this.configs[preset.id]?.enabled ?? false, ...this.oauthStatus(preset.id)
     })), limits: MCP_LIMITS };
   }
+  #runtimeAvailable(command) { try { return Boolean(this.executableLookup(command)); } catch { return false; } }
   isWrite(tool) { return tool.annotations?.readOnlyHint !== true || tool.annotations?.destructiveHint === true; }
   allowed(config, tool) {
     if (!config.enabled) return false;
@@ -208,6 +224,8 @@ export class McpManager {
   }
   async import(value, options) {
     const incoming = parseMcpImport(value, options);
+    try { for (const [id, config] of Object.entries(incoming)) validatePresetConfig(id, config); }
+    catch (error) { throw fail(error.message); }
     return this.exclusive(async () => {
       const merged = { ...this.configs };
       for (const [id, config] of Object.entries(incoming)) {
@@ -300,6 +318,13 @@ export class McpManager {
     if (existing?.status === 'connected' || existing?.status === 'connecting') return;
     const config = this.configs[id], entry = { status: 'connecting', tools: [], resources: [], client: null, transport: null, controller: new AbortController() };
     this.connections.set(id, entry); this.onChange();
+    if (config.type === 'stdio') {
+      const base = path.basename(config.command);
+      const hint = RUNTIME_HINTS[base];
+      if (hint && !this.#runtimeAvailable(base)) {
+        entry.status = 'failed'; entry.tools = []; entry.resources = []; entry.lastError = hint.hintEn; this.onChange(); return;
+      }
+    }
     let timer;
     try {
       const sdk = await this.load();

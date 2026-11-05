@@ -114,7 +114,7 @@ const isSettled = task => task.status === 'completed' || task.status === 'cancel
  * assessment, approval and retry all treat them as absent.
  */
 const documentAvailable = document => Boolean(document) && document.available !== false;
-const nativeObservation = (event, doc) => ['local_files', 'apple_notes', 'apple_reminders', 'todoist'].includes(event.source) && event.connectorId === event.source
+const nativeObservation = (event, doc) => ['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_contacts', 'todoist'].includes(event.source) && event.connectorId === event.source
   && String(doc.id).startsWith(`${event.source}:`) && Number.isSafeInteger(doc.sourceObservationRevision) && doc.sourceObservationRevision > 0;
 
 /** Delivery progress follows requirements and blockers, independently of source revision churn. */
@@ -1671,7 +1671,7 @@ export class WorkEngine {
     }
     if (ambiguous) freshnessBlockers.push({ id: 'ambiguous_document', detail: `Ambiguous document match: ${contenders.join(', ')}.` });
     if (!document) freshnessBlockers.push({ id: 'no_document', detail: 'No document with an identity link to this request has been observed.' });
-    if (['local_files', 'apple_notes'].includes(document?.source)) {
+    if (['local_files', 'apple_notes', 'apple_calendar', 'apple_contacts'].includes(document?.source)) {
       const detail = 'This document is only available on this computer. A shareable document is required before preparing an external delivery.';
       freshnessBlockers.push({ id: 'local_document_not_shared', detail });
       unknowns.push(unknownItem({ id: 'local_document_not_shared', question: 'How will the recipient access this document?', reason: detail,

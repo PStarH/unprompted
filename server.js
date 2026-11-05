@@ -16,7 +16,7 @@ import { PermissionDeniedError } from './src/permissions.js';
 import { normaliseDateLocale } from './src/requests.js';
 import { GoogleAuth } from './src/connectors/google.js';
 import { GoogleDocsWriteProvider } from './src/document-delivery.js';
-import { LocalSetupStore, GoogleOAuthSetup, googleWorkspacePath } from './src/setup.js';
+import { LocalSetupStore, GoogleOAuthSetup, googleWorkspacePath, NATIVE_SOURCE_IDS } from './src/setup.js';
 import { MonitoringService } from './src/monitoring.js';
 import { HttpRequestError, readJsonBody, SseHub } from './src/http-transport.js';
 import { ModelSetupError, normalizeModelSettings, validateModelSettings } from './src/model-setup.js';
@@ -28,6 +28,7 @@ import { connectedSources, sourceCounts, sourceAccountBindings } from './src/con
 import { NativeSourceBridge, NativeAccessError } from './src/native-sources.js';
 import { canonicalLocalRoot, mergeLocalRoots, readScopedText } from './src/connectors/local-files.js';
 import { nativeSnapshot } from './src/connectors/local-snapshot.js';
+import { removedMailEvents } from './src/connectors/apple-mail.js';
 import { bindConnectionAccount } from './src/external-work.js';
 import { readRegularFile } from './src/local-files.js';
 import { McpManager, McpConfigStore } from './src/mcp.js';
@@ -279,7 +280,7 @@ const publicSetupStatus = () => {
       counts: sourceCounts(store.state, provider.id) }];
   }));
   status.platform = nativeBridge.platform === 'darwin' ? 'macos' : nativeBridge.platform === 'win32' ? 'windows' : nativeBridge.platform === 'linux' ? 'linux' : 'other';
-  status.localSources = Object.fromEntries(['local_files', 'apple_notes', 'apple_reminders'].map(id => {
+  status.localSources = Object.fromEntries(NATIVE_SOURCE_IDS.map(id => {
     const saved = localSetup.getNativeSource(id), entries = id === 'local_files' ? saved.roots : saved.folders;
     const recorded = store.state.connectorStatus?.[id];
     return [id, { id, available: id === 'local_files' || nativeBridge.platform === 'darwin', nativePicker: nativeBridge.platform === 'darwin',
@@ -399,9 +400,17 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     await monitoring.whenIdle(); await engine.whenSettled();
     if (shutdownPromise) throw new Error('The application is shutting down.');
     // Remove revoked local evidence before rebuilding the active sources.
-    for (const id of ['local_files', 'apple_notes', 'apple_reminders']) {
+    for (const id of NATIVE_SOURCE_IDS) {
       const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
       if (!cursor) continue;
+      if (id === 'apple_mail') {
+        const allowed = new Set(saved.scopeId ? saved.folders.map(item => item.folderId) : []);
+        const removed = removedMailEvents({ scopeId: store.state.connectionAccounts?.[id], cursor, allowed, now: () => Date.now() });
+        if (!removed.events.length) continue;
+        for (const event of removed.events) engine.ingest(event);
+        store.mutate(state => { state.cursors[id] = removed.cursor; });
+        continue;
+      }
       const allowed = new Set((id === 'local_files' ? saved.roots : saved.folders).map(item => item.id || item.folderId));
       const unavailable = Object.entries(cursor.documents || {}).filter(([, doc]) => !saved.scopeId || !allowed.has(doc.rootId || doc.folderId)).map(([documentId]) => ({ id: documentId, reason: 'scope_removed' }));
       if (!unavailable.length) continue;
@@ -591,7 +600,7 @@ async function handleHttpRequest(req, res) {
       if (workspaceChanging) return json(res, 409, { error: 'The workspace connection is being updated.' });
       const id = decodeURIComponent(localDocumentRoute[1]), doc = store.state.documents[id];
       const source = doc?.source;
-      if (!['local_files', 'apple_notes', 'apple_reminders'].includes(source) || doc.available === false) return json(res, 404, { error: 'This local document is no longer available.' });
+      if (!NATIVE_SOURCE_IDS.includes(source) || source === 'apple_mail' || doc.available === false) return json(res, 404, { error: 'This local document is no longer available.' });
       const grant = localSetup.getNativeSource(source);
       const reminderId = source === 'apple_reminders' ? id.split(':document:')[1] : null;
       const known = source === 'apple_reminders' ? store.state.cursors?.[source]?.items?.[reminderId] : store.state.cursors?.[source]?.documents?.[id];
@@ -602,6 +611,10 @@ async function handleHttpRequest(req, res) {
           const selected = grant.roots.find(item => item.id === known.rootId);
           if (!selected || canonicalLocalRoot(selected.path) !== selected.path) throw new Error('Unavailable');
           content = readScopedText(selected.path, known.relative);
+        } else if (source === 'apple_calendar' || source === 'apple_contacts') {
+          const selected = grant.folders.find(item => item.folderId === known.folderId && item.accountId === known.accountId);
+          if (!selected || typeof doc.content !== 'string') throw new Error('Unavailable');
+          content = doc.content;
         } else if (source === 'apple_reminders') {
           const selected = grant.folders.find(item => item.folderId === known.folderId && item.accountId === known.accountId);
           if (!selected) throw new Error('Unavailable');
@@ -875,12 +888,12 @@ async function handleHttpRequest(req, res) {
         return json(res, 200, { mcp: result, setup: publicSetupStatus() });
       }
 
-      const nativeRoute = url.pathname.match(/^\/api\/setup\/local-sources\/(local_files|apple_notes|apple_reminders)\/(select|forget|remove-scope)$/);
+      const nativeRoute = url.pathname.match(/^\/api\/setup\/local-sources\/(local_files|apple_notes|apple_reminders|apple_calendar|apple_mail|apple_contacts)\/(select|forget|remove-scope)$/);
       if (nativeRoute) {
         const [, id, operation] = nativeRoute;
         if (demoMode) return json(res, 409, { error: 'Open your persistent workspace to connect local sources.', code: 'DISPOSABLE_DEMO' });
         if (nativeSelectionBusy || modelSetupBusy) return json(res, 409, { error: 'A source selection or model update is already open.', code: 'SOURCE_BUSY' });
-        if (['apple_notes', 'apple_reminders'].includes(id) && nativeBridge.platform !== 'darwin') return json(res, 400, { error: 'Apple Notes requires macOS.', code: 'UNSUPPORTED' });
+        if (id !== 'local_files' && nativeBridge.platform !== 'darwin') return json(res, 400, { error: 'Calendar, Mail, Contacts, Notes, and Reminders require macOS.', code: 'UNSUPPORTED' });
         const controller = new AbortController();
         const abandon = () => { if (!res.writableFinished) controller.abort(); };
         res.once('close', abandon); nativeSelectionBusy = true;
@@ -906,11 +919,12 @@ async function handleHttpRequest(req, res) {
               catch { return json(res, 400, { error: 'Select up to 10 accessible folders using their absolute paths.', code: 'FOLDER_UNAVAILABLE' }); }
               selection = { ...saved, scopeId: saved.scopeId || randomUUID(), roots };
             } else {
-              const picked = await (id === 'apple_reminders' ? nativeBridge.chooseReminders.bind(nativeBridge) : nativeBridge.chooseNotes.bind(nativeBridge))({ locale: body?.locale, signal: controller.signal });
+              const chooser = { apple_reminders: 'chooseReminders', apple_calendar: 'chooseCalendar', apple_mail: 'chooseMail', apple_contacts: 'chooseContacts', apple_notes: 'chooseNotes' }[id];
+              const picked = await nativeBridge[chooser]({ locale: body?.locale, signal: controller.signal });
               if (!Array.isArray(picked.folders) || !picked.folders.length) throw new NativeAccessError('NO_FOLDERS');
               const folders = [...saved.folders];
-              for (const folder of picked.folders) if (!folders.some(item => item.folderId === folder.folderId && item.accountId === folder.accountId)) folders.push(folder);
-              if (folders.length > 20) return json(res, 400, { error: 'Select up to 20 Notes folders.' });
+              for (const folder of picked.folders) if (!folders.some(item => item.folderId === folder.folderId && item.accountId === folder.accountId)) folders.push({ accountId: folder.accountId, folderId: folder.folderId, label: folder.label, accountLabel: folder.accountLabel, ...(folder.accountEmail ? { accountEmail: folder.accountEmail } : {}) });
+              if (folders.length > 20) return json(res, 400, { error: 'Select up to 20 calendars, mailboxes, contact groups, lists, or Notes folders.' });
               selection = { ...saved, scopeId: saved.scopeId || randomUUID(), folders };
             }
             if (controller.signal.aborted) return;

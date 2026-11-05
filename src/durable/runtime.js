@@ -1199,7 +1199,7 @@ export class DurableRuntime {
    * Simulation mail is authorized by the runtime mode, never by event text. */
   #authorizedSources() {
     const sources = new Set();
-    for (const id of ['google', 'microsoft', 'github', 'slack', 'notion', 'local_files', 'apple_notes', 'apple_reminders', 'todoist', 'simulated']) {
+    for (const id of ['google', 'microsoft', 'github', 'slack', 'notion', 'local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts', 'todoist', 'simulated']) {
       const connector = this.connectorFor(id);
       if (!connector?.live || this.privacy.permissionRevoked(connector.id || id)) continue;
       sources.add(id);

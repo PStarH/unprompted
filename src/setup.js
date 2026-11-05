@@ -7,6 +7,7 @@ import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { connectionProvider, validClientSecret, validPublicClientId } from './connection-catalog.js';
 import { readRegularFile } from './local-files.js';
 
+export const NATIVE_SOURCE_IDS = Object.freeze(['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts']);
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 const MIN_INTERVAL_MS = 15_000;
 const MAX_INTERVAL_MS = 24 * 60 * 60_000;
@@ -72,12 +73,15 @@ function normalise(state) {
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.connections[id] = { ...saved };
   }
   if (state.nativeSources && typeof state.nativeSources === 'object') {
-    for (const id of ['local_files', 'apple_notes', 'apple_reminders']) {
+    for (const id of NATIVE_SOURCE_IDS) {
       const saved = state.nativeSources[id];
       if (saved && typeof saved === 'object' && !Array.isArray(saved)) result.nativeSources[id] = {
         scopeId: typeof saved.scopeId === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(saved.scopeId) ? saved.scopeId : null,
         roots: Array.isArray(saved.roots) ? saved.roots.slice(0, 10).filter(item => item && typeof item.id === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(item.id) && typeof item.path === 'string' && path.isAbsolute(item.path)).map(item => ({ id: item.id, path: item.path, label: String(item.label || path.basename(item.path)).slice(0, 250) })) : [],
-        folders: Array.isArray(saved.folders) ? saved.folders.slice(0, 20).filter(item => item && typeof item.accountId === 'string' && item.accountId.length <= 4096 && typeof item.folderId === 'string' && item.folderId.length <= 4096).map(item => ({ accountId: item.accountId, folderId: item.folderId, label: String(item.label || 'Notes').slice(0, 250), accountLabel: String(item.accountLabel || 'Notes').slice(0, 250) })) : []
+        folders: Array.isArray(saved.folders) ? saved.folders.slice(0, 20).filter(item => item && typeof item.accountId === 'string' && item.accountId.length <= 4096 && typeof item.folderId === 'string' && item.folderId.length <= 4096).map(item => {
+          const accountEmail = typeof item.accountEmail === 'string' && /^[^\s@]+@[^\s@]+$/.test(item.accountEmail) && item.accountEmail.length <= 320 ? item.accountEmail : '';
+          return { accountId: item.accountId, folderId: item.folderId, label: String(item.label || 'Selected').slice(0, 250), accountLabel: String(item.accountLabel || 'Selected').slice(0, 250), ...(accountEmail ? { accountEmail } : {}) };
+        }) : []
       };
     }
   }
@@ -153,7 +157,7 @@ export class LocalSetupStore {
   getConnection(id) { connectionProvider(id); return { ...(this.get().connections[id] || {}) }; }
 
   getNativeSource(id) {
-    if (!['local_files', 'apple_notes', 'apple_reminders'].includes(id)) throw new Error('Unknown native source.');
+    if (!NATIVE_SOURCE_IDS.includes(id)) throw new Error('Unknown native source.');
     return clone(this.get().nativeSources[id] || { scopeId: null, roots: [], folders: [] });
   }
   saveNativeSource(id, selection) {

@@ -47,7 +47,9 @@ test('MCP sign-in route rejects an unknown preset and a caller-supplied server U
   fixture = await startFixtureServer({ ruleDemo: false, directory });
   const post = (pathname, data) => fetch(fixture.base + pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data) });
   const catalog = await (await fetch(fixture.base + '/api/mcp')).json();
-  assert.deepEqual(catalog.presets.map(item => item.id), ['fetch', 'notion', 'linear', 'atlassian', 'todoist', 'brave-search', 'firecrawl']);
+  assert.deepEqual(catalog.presets.map(item => item.id), ['fetch', 'git', 'filesystem', 'time', 'deepwiki', 'notion', 'linear', 'atlassian', 'todoist', 'brave-search', 'firecrawl']);
+  assert.equal(catalog.presets.find(item => item.id === 'deepwiki').connection.url, 'https://mcp.deepwiki.com/mcp');
+  assert.equal(catalog.presets.find(item => item.id === 'deepwiki').auth, 'none');
   assert.equal(catalog.presets.find(item => item.id === 'atlassian').connection.url, 'https://mcp.atlassian.com/v1/mcp/authv2');
   const unknown = await post('/api/mcp/oauth/nope', {});
   assert.equal(unknown.status, 404);

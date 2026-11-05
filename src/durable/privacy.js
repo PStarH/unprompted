@@ -151,7 +151,10 @@ export class ForgetService {
           state.documents = state.documents || {};
           for (const documentId of documentIds) delete state.documents[documentId];
           for (const [documentId, document] of Object.entries(state.documents)) if (fromConnector(document)) delete state.documents[documentId];
-          for (const cursor of Object.values(state.cursors || {})) for (const documentId of Object.keys(cursor?.documents || {})) if (documentIds.has(documentId) || fromConnector(cursor.documents[documentId])) delete cursor.documents[documentId];
+          for (const cursor of Object.values(state.cursors || {})) {
+            for (const documentId of Object.keys(cursor?.documents || {})) if (documentIds.has(documentId) || fromConnector(cursor.documents[documentId])) delete cursor.documents[documentId];
+            for (const messageId of Object.keys(cursor?.messages || {})) if (messageIds.has(messageId) || fromConnector(cursor.messages[messageId])) delete cursor.messages[messageId];
+          }
           state.tasks = state.tasks || {};
           for (const taskId of touchedTasks) {
             const row = this.db.prepare('SELECT data_json,status FROM tasks WHERE id=?').get(taskId);

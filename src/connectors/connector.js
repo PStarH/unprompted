@@ -4,7 +4,7 @@ import { normalizeEvent, validateEventPayload } from './events.js';
 /** Native provider identifiers and filesystem metadata stay in private cursors. */
 export function publicSourceCursors(cursors = {}) {
   return Object.fromEntries(Object.entries(cursors).map(([id, cursor]) => [id,
-    ['local_files', 'apple_notes'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || {}).length, counts: cursor.counts || {} }
+    ['local_files', 'apple_notes', 'apple_calendar', 'apple_mail', 'apple_contacts'].includes(id) && cursor ? { documentsObserved: Object.keys(cursor.documents || cursor.messages || {}).length, counts: cursor.counts || {} }
       : cursor ? { checkpointStored: true, ...(cursor.recovering === true ? { recovering: true } : {}) } : null]));
 }
 

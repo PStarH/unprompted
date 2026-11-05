@@ -849,6 +849,9 @@ function sourceMark(id) {
     local_files: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
     apple_notes: '<path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8Z"/><path d="M15 3v4a2 2 0 0 0 2 2h4"/>',
     apple_reminders: '<path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+    apple_calendar: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+    apple_mail: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+    apple_contacts: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
     microsoft: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
     todoist: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.2 2.2 4.8-5.2"/>'
   };
@@ -856,7 +859,7 @@ function sourceMark(id) {
 }
 
 function connectionState(id) {
-  if (['local_files', 'apple_notes', 'apple_reminders'].includes(id)) {
+  if (['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts'].includes(id)) {
     const source = setupState?.localSources?.[id] || {};
     return source.connected ? source.healthy === false || source.lastError ? 'attention' : 'connected' : 'available';
   }
@@ -867,7 +870,7 @@ function connectionState(id) {
 }
 
 function connectionMatches(id) {
-  const names = { google: 'Google Workspace Gmail Docs', github: 'GitHub issues pull requests commits Actions PR 评审 提交', microsoft: 'Microsoft Outlook mail', slack: 'Slack direct messages', notion: 'Notion pages', local_files: nativeCopy('本地文件夹', 'Local folders'), apple_notes: nativeCopy('备忘录', 'Apple Notes') };
+  const names = { google: 'Google Workspace Gmail Docs', github: 'GitHub issues pull requests commits Actions PR 评审 提交', microsoft: 'Microsoft Outlook mail', slack: 'Slack direct messages', notion: 'Notion pages', local_files: nativeCopy('本地文件夹', 'Local folders'), apple_notes: nativeCopy('备忘录', 'Apple Notes'), apple_reminders: nativeCopy('提醒事项', 'Apple Reminders'), apple_calendar: nativeCopy('日历', 'Apple Calendar'), apple_mail: nativeCopy('邮件', 'Apple Mail'), apple_contacts: nativeCopy('通讯录', 'Apple Contacts') };
   const source = setupState?.localSources?.[id] || setupState?.connections?.[id] || {};
   const scopes = Array.isArray(source.scopes) ? source.scopes : [];
   const searchable = [names[id], source.account?.label, id === 'google' ? setupState?.google?.accountEmail : '',
@@ -877,20 +880,27 @@ function connectionMatches(id) {
     (!connectionQuery.trim() || searchable.includes(connectionQuery.trim().toLocaleLowerCase()));
 }
 
+const nativeCatalog = {
+  local_files: { title: ['本地文件夹', 'Local folders'], blurb: ['只读所选文件夹中的 Markdown 和文本文件。修改关闭。', 'Read Markdown and text in selected folders only. Modify off.'], choose: ['选择文件夹', 'Choose folders'], add: ['添加文件夹', 'Add folder'], idle: ['所选文件夹里的 Markdown 和文本', 'Markdown and text in selected folders'] },
+  apple_notes: { title: ['备忘录', 'Apple Notes'], blurb: ['仅所选文件夹的文本；首次连接由 macOS 授权。修改需另行允许。', 'Text in selected folders. macOS requests access on first connection. Modify needs a separate permission.'], choose: ['选择备忘录文件夹', 'Choose Notes folders'], add: ['添加备忘录文件夹', 'Add Notes folders'], idle: ['所选文件夹里的文本', 'Text in selected folders'] },
+  apple_reminders: { title: ['提醒事项', 'Apple Reminders'], blurb: ['读取所选列表；创建、修改或删除需要另行允许。', 'Read selected lists; changes require separate permission.'], choose: ['选择提醒事项列表', 'Choose Reminders lists'], add: ['选择提醒事项列表', 'Choose Reminders lists'], idle: ['所选列表', 'Selected lists'] },
+  apple_calendar: { title: ['日历', 'Apple Calendar'], blurb: ['只读所选日历里即将到来和最近的日程及其变化。修改关闭。首次访问时 macOS 会请求自动化权限。', 'Read upcoming and recent events, and their changes, in calendars you select. Modify off. macOS asks for Automation access the first time.'], choose: ['选择日历', 'Choose calendars'], add: ['添加日历', 'Add calendars'], idle: ['所选日历', 'Selected calendars'] },
+  apple_mail: { title: ['邮件', 'Apple Mail'], blurb: ['只读所选邮箱在有限时间窗口内的邮件。不发送、不删除、不修改。macOS 会请求自动化权限。', 'Read messages in selected mailboxes inside a bounded window. Sending, deleting, and editing stay off. macOS asks for Automation access.'], choose: ['选择邮箱', 'Choose mailboxes'], add: ['添加邮箱', 'Add mailboxes'], idle: ['所选邮箱', 'Selected mailboxes'] },
+  apple_contacts: { title: ['通讯录', 'Apple Contacts'], blurb: ['只读所选联系人群组，用来核对人物和邮箱。不修改通讯录。macOS 会请求自动化权限。', 'Read selected contact groups to resolve people and addresses. The address book is not modified. macOS asks for Automation access.'], choose: ['选择联系人群组', 'Choose contact groups'], add: ['添加联系人群组', 'Add contact groups'], idle: ['所选群组', 'Selected groups'] }
+};
 function renderNativeCard(id) {
-  const source = setupState.localSources?.[id] || {}, notes = id === 'apple_notes';
-  const title = id === 'apple_reminders' ? nativeCopy('提醒事项', 'Apple Reminders') : notes ? nativeCopy('备忘录', 'Apple Notes') : nativeCopy('本地文件夹', 'Local folders');
+  const source = setupState.localSources?.[id] || {}, catalog = nativeCatalog[id] || nativeCatalog.local_files;
+  const title = nativeCopy(...catalog.title);
   const state = connectionState(id);
-  const folderVerb = id === 'apple_reminders' ? nativeCopy('选择提醒事项列表', 'Choose Reminders lists') : notes
-    ? nativeCopy(source.connected ? '添加备忘录文件夹' : '选择备忘录文件夹', source.connected ? 'Add Notes folders' : 'Choose Notes folders')
-    : nativeCopy(source.connected ? '添加文件夹' : '选择文件夹', source.connected ? 'Add folder' : 'Choose folders');
+  const folderVerb = nativeCopy(...(source.connected ? catalog.add : catalog.choose));
   const select = `<button class="secondary-button" data-native-operation="select" data-native-source="${id}" ${source.available === false ? 'disabled' : ''}>${folderVerb}</button>`;
   const fallback = id === 'local_files' && source.nativePicker === false ? `<form data-native-path-form><label class="setup-field">${nativeCopy('文件夹绝对路径', 'Absolute folder path')}<input name="path" required autocomplete="off" placeholder="/path/to/work"></label><button class="secondary-button" type="submit">${nativeCopy('连接', 'Connect')}</button></form>` : select;
   const badge = source.available === false ? nativeCopy('需要 macOS', 'Requires macOS') : source.connected ? source.readOnly === false ? copy('已连接 · 按授权行动') : copy('已连接 · 只读') : copy('尚未连接');
   const scopes = source.connected ? `<ul class="native-scope-list">${(source.scopes || []).map(item => `<li><span>${escapeHtml(item.account ? item.account + ' / ' : '')}${escapeHtml(item.label)}</span><button class="text-button" data-native-operation="remove-scope" data-native-source="${id}" data-scope-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(nativeCopy('移除', 'Remove') + ' ' + item.label)}">×</button></li>`).join('')}</ul>` : '';
-  const counts = source.connected ? `<p class="connection-card-counts">${source.counts?.documents || 0} ${nativeCopy('份文档', 'documents')} · ${source.counts?.tasks || 0} ${nativeCopy('项待办', 'to-dos')}${source.lastSyncAt ? ' · ' + time(source.lastSyncAt) : ''}</p>` : '';
+  const counts = source.connected ? `<p class="connection-card-counts">${id === 'apple_mail' ? `${source.counts?.messages || 0} ${nativeCopy('封邮件', 'messages')}` : id === 'apple_calendar' ? `${source.counts?.documents || 0} ${nativeCopy('个日程', 'events')}` : id === 'apple_contacts' ? `${source.counts?.documents || 0} ${nativeCopy('位联系人', 'contacts')}` : `${source.counts?.documents || 0} ${nativeCopy('份文档', 'documents')} · ${source.counts?.tasks || 0} ${nativeCopy('项待办', 'to-dos')}`}${source.lastSyncAt ? ' · ' + time(source.lastSyncAt) : ''}</p>` : '';
   const detail = source.connected ? `<div class="source-connection-detail">${scopes}${counts}<div class="actions">${fallback}${source.connected ? `<button class="text-button" data-native-operation="forget" data-native-source="${id}">${copy('断开连接')}</button><button type="button" class="text-button danger-button" data-native-purge="true" data-native-source="${id}">${copy('断开并清除本机副本')}</button>` : ''}</div></div>` : '';
-  return { id, state, html: ui`<article class="source-connection-card" data-connection-card="${id}" data-state="${state}"><div class="source-connection-heading"><span class="source-mark-slot" aria-hidden="true">${sourceMark(id)}</span><div class="source-connection-copy"><h3>${title}</h3><p>${id === 'apple_reminders' ? nativeCopy('读取所选列表；创建、修改或删除需要另行允许。', 'Read selected lists; changes require separate permission.') : notes ? nativeCopy('仅所选文件夹的文本；首次连接由 macOS 授权。', 'Text in selected folders. macOS requests access on first connection.') : nativeCopy('只读所选文件夹中的 Markdown 和文本文件。', 'Read Markdown and text in selected folders only.')}</p></div><span class="state-badge ${source.healthy === false ? 'offline' : source.connected ? 'done' : 'waiting'}">${badge}</span>${source.connected ? '' : `<div class="source-connection-actions">${fallback}</div>`}</div>${detail}${source.lastError ? `<p class="setup-error" role="status">${escapeHtml(source.lastError)}</p>` : ''}</article>` };
+  const accessLine = source.connected ? `<div class="connection-permissions"><span>${nativeCopy('读取 开', 'Read on')}</span><span>${source.readOnly === false ? nativeCopy('修改 开', 'Modify on') : nativeCopy('修改 关', 'Modify off')}</span></div>` : '';
+  return { id, state, html: ui`<article class="source-connection-card" data-connection-card="${id}" data-state="${state}"><div class="source-connection-heading"><span class="source-mark-slot" aria-hidden="true">${sourceMark(id)}</span><div class="source-connection-copy"><h3>${title}</h3><p>${nativeCopy(...catalog.blurb)}</p></div><span class="state-badge ${source.healthy === false ? 'offline' : source.connected ? 'done' : 'waiting'}">${badge}</span>${source.connected ? '' : `<div class="source-connection-actions">${fallback}</div>`}</div>${detail}${accessLine}${source.lastError ? `<p class="setup-error" role="status">${escapeHtml(source.lastError)}</p>` : ''}</article>` };
 }
 
 function renderCloudCard(id, { home = false } = {}) {
@@ -993,7 +1003,7 @@ function renderConnectors({ home = false } = {}) {
   if (!runtime || !setupState) return `<p class="empty-trace">${copy('正在读取本地连接设置。')}</p>`;
   if (runtime.demo?.disposable || runtime.demo?.ruleBased) return home ? '' : renderDemoSources();
   const order = visibleConnectionIds(setupState?.localSources);
-  const cards = order.map(id => ['local_files', 'apple_notes', 'apple_reminders'].includes(id) ? renderNativeCard(id) : renderCloudCard(id, { home }))
+  const cards = order.map(id => ['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts'].includes(id) ? renderNativeCard(id) : renderCloudCard(id, { home }))
     .filter(card => home || connectionMatches(card.id));
   const allIds = order;
   const connectedCount = allIds.filter(id => connectionState(id) === 'connected').length;
@@ -1022,18 +1032,12 @@ function renderConnectors({ home = false } = {}) {
     const matches = cards.filter(card => card.state === state);
     if (!matches.length) return '';
     return `<section class="connection-summary-group"><h3>${label}<span>${matches.length}</span></h3>${matches.map(card => {
-      const local = ['local_files', 'apple_notes', 'apple_reminders'].includes(card.id);
+      const local = ['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts'].includes(card.id);
       const source = local ? setupState.localSources?.[card.id] || {} : setupState.connections?.[card.id] || {};
-      const name = card.id === 'local_files' ? nativeCopy('本地文件夹', 'Local folders')
-        : card.id === 'apple_notes' ? nativeCopy('备忘录', 'Apple Notes')
-          : card.id === 'apple_reminders' ? nativeCopy('提醒事项', 'Apple Reminders')
-            : providerNames[card.id];
+      const name = nativeCatalog[card.id] ? nativeCopy(...nativeCatalog[card.id].title) : providerNames[card.id];
       const account = card.id === 'google' ? setupState.google?.accountEmail : source.account?.label;
       const scope = local ? (source.scopes || []).map(item => item.label).join(' · ') : account;
-      const idle = card.id === 'apple_notes' ? nativeCopy('所选文件夹里的文本', 'Text in selected folders')
-        : card.id === 'apple_reminders' ? nativeCopy('所选列表', 'Selected lists')
-          : card.id === 'local_files' ? nativeCopy('所选文件夹里的 Markdown 和文本', 'Markdown and text in selected folders')
-            : copy(cloudAccess[card.id] || '邮件与文档');
+      const idle = nativeCatalog[card.id] ? nativeCopy(...nativeCatalog[card.id].idle) : copy(cloudAccess[card.id] || '邮件与文档');
       const detail = scope || idle;
       // Read and modify stay separate. The group label already says when nothing is connected.
       const writes = card.id === 'google' ? Boolean(setupState.google?.allowExternalWrites) : source.readOnly === false;

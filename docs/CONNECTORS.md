@@ -13,6 +13,9 @@ failed read and disconnect one account while keeping the others connected.
 | Local folders | Native folder picker on macOS; absolute path on other systems | Markdown and UTF-8 text inside selected folders; explicit text to-dos | Read-only |
 | Apple Notes | macOS only. Automation consent, then choose Notes folders. Offered on a Mac; hidden elsewhere unless already connected | Plain text in selected folders; locked notes and attachments excluded | New notes in explicitly authorized folders; real-account acceptance pending |
 | Apple Reminders | macOS Automation consent, then choose lists | Explicit reminders, completion and due dates in selected lists | Create, edit, complete and delete reminders in separately authorized selected lists |
+| Apple Calendar | macOS only. Automation consent, then choose calendars. Hidden off a Mac unless already connected | Upcoming and recent events in the selected calendars, and later changes. A bounded window (14 days back, 60 days ahead, at most 500 events) | Read only. Modify off. No create, edit, or delete |
+| Apple Mail | macOS only. Automation consent, then choose mailboxes across accounts | Messages in the selected mailboxes from the last 7 days, at most 40 per mailbox and 200 overall, with bounded body text | Read only. Sending, deleting, and editing stay off |
+| Apple Contacts | macOS only. Automation consent, then choose groups (or All Contacts) | Selected people, for evidence and name/email/phone lookup. At most 400 people observed and 20 lookup matches | Read only. The address book is not modified |
 | Todoist native | Personal API token; no developer app | Active tasks with paginated snapshots; removed tasks stop being followed | Read-only |
 | Google Workspace | Desktop OAuth with PKCE | Gmail; Docs, Sheets (first sheet as CSV), Slides; optional primary Calendar | Draft creation after separate authorization; Gmail sending and Docs editing require independent approval |
 | GitHub | Official device OAuth | Assigned issues, issue mentions (title/body), pull requests awaiting the user's review or response, commits from the last three days, and Actions runs from that window | Authorized platform API actions within installation and user permissions |
@@ -69,7 +72,7 @@ the remaining cursor for the next check.
 Install the optional client with `npm ci --include=optional`, then restart the
 app. Open **Connections → MCP**.
 
-**Fetch** needs no account and is on by default. It runs with the bundled Node runtime, so it does not require Python, `uvx`, or an npm download. It reads bounded public text pages, blocks private/local network destinations, and returns plain text; it does not render JavaScript. **Notion**, **Linear**,
+**Fetch** needs no account and is on by default. It runs with the bundled Node runtime, resolved from the current process rather than a path saved on a developer’s machine, so it does not require Python, `uvx`, or an npm download. It reads bounded public text pages, blocks private/local network destinations, and returns plain text; it does not render JavaScript. **Git** (`uvx mcp-server-git`) reads only the repository paths you enter. **Filesystem** (`npx -y @modelcontextprotocol/server-filesystem`) reads only the directories you enter. **Time** (`uvx mcp-server-time`) reports the current time in the computer’s time zone. **DeepWiki** connects to `https://mcp.deepwiki.com/mcp` with no sign-in. None of these ask for an API key or an OAuth app. If `uvx` or `npx` is not installed, the preset stays in a clear unavailable state and tells you what to install instead of failing closed. Read is on and modify is off until you explicitly allow an action tool. **Notion**, **Linear**,
 **Jira and Confluence** (Atlassian), and **Todoist** use the vendor sign-in
 page: choose **Sign in and connect**. You do not paste a client secret or an
 API token. **Brave Search** and **Firecrawl** still need an API key. Their bounded read tools also run with bundled Node: Brave web search and Firecrawl single-page Markdown scraping need no `npx` or package installation. You can
@@ -157,6 +160,20 @@ Unprompted does not send the recipient a loopback link.
 The Notes bridge uses Apple's public scripting interface, not the private Notes
 database. Automated tests use injected Notes responses; a real Notes account and
 the signed distribution's permission prompt still need manual acceptance.
+
+Calendar, Mail, and Contacts use the same JavaScript for Automation bridge.
+Each is offered only on macOS, and an existing connection stays visible on
+other systems so it can be disconnected. None needs an API key, an OAuth
+client, or Full Disk Access. The first read asks macOS for Automation
+permission for Calendar, Mail, or Contacts. The prompt names the app that is
+running Unprompted (Terminal for `npm start`, or the Unprompted app). Allow it
+in System Settings → Privacy & Security → Automation. If macOS denies access,
+the connection shows that message and previously read evidence is marked
+unavailable until you allow access and retry. These three connectors do not
+create, edit, send, or delete. Calendar covers events that overlap the last 14
+days and the next 60 days. Mail covers the last 7 days in the mailboxes you
+select, across every account Mail.app shows. Contacts lookup searches the
+groups you select and does not turn an address-book note into a task.
 
 ## Provision applications once for a distribution
 

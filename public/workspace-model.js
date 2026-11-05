@@ -36,11 +36,11 @@ export function taskSources(task, state) {
   const sources = [];
   const push = source => { if (source && !sources.some(item => item.id === source.id)) sources.push(source); };
   const message = state?.inbox?.find(item => item.id === (task.sourceEmailId || task.request?.source?.id));
-  if (message) push({ id: message.id, label: message.subject || task.subject, provider: message.connectorId === 'microsoft' ? 'Outlook' : message.source === 'simulated' || state.mode === 'simulation' ? 'Simulation' : 'Gmail', url: message.url || null });
+  if (message) push({ id: message.id, label: message.subject || task.subject, provider: message.connectorId === 'microsoft' ? 'Outlook' : message.connectorId === 'apple_mail' ? 'Apple Mail' : message.source === 'simulated' || state.mode === 'simulation' ? 'Simulation' : 'Gmail', url: message.url || null });
   if (task.externalSource) push({ id: task.externalSource.externalId || task.id, label: task.subject, provider: ['external_issue', 'external_review', 'external_change', 'external_check'].includes(task.kind) ? 'GitHub' : task.sourceConnectorId === 'apple_notes' ? 'Apple Notes' : task.sourceConnectorId === 'apple_reminders' ? 'Apple Reminders' : task.sourceConnectorId === 'todoist' ? 'Todoist' : 'Local files', url: task.externalSource.url });
   const directDocument = state?.documents?.find(item => item.id === task.documentId || task.request?.source?.kind === 'document' && item.id === task.request.source.id);
   if (directDocument) push({ id: directDocument.id, label: directDocument.title, provider: directDocument.source || task.sourceConnectorId || 'Document', url: directDocument.url });
-  for (const document of task.evidence?.documents || []) push({ id: document.documentId, label: document.title, provider: document.source === 'google' ? 'Drive' : document.source === 'apple_notes' ? 'Apple Notes' : document.source === 'local_files' ? 'Local files' : document.source === 'simulated' ? 'Simulation' : document.source || 'Document', url: document.url });
+  for (const document of task.evidence?.documents || []) push({ id: document.documentId, label: document.title, provider: document.source === 'google' ? 'Drive' : document.source === 'apple_notes' ? 'Apple Notes' : document.source === 'apple_calendar' ? 'Apple Calendar' : document.source === 'apple_contacts' ? 'Apple Contacts' : document.source === 'local_files' ? 'Local files' : document.source === 'simulated' ? 'Simulation' : document.source || 'Document', url: document.url });
   return sources;
 }
 
