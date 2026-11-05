@@ -9,13 +9,15 @@ import { PassThrough } from 'node:stream';
 import { AppleCalendarConnector } from '../src/connectors/apple-calendar.js';
 import { AppleMailConnector } from '../src/connectors/apple-mail.js';
 import { AppleContactsConnector } from '../src/connectors/apple-contacts.js';
+import { mailScopeRemoval } from '../src/connectors/apple-mail.js';
 import { NativeAccessError, NativeSourceBridge, nativeAccessMessage } from '../src/native-sources.js';
 import { connectedSources } from '../src/connected-sources.js';
 import { LocalSetupStore } from '../src/setup.js';
 import { JsonStore } from '../src/store.js';
 import { WorkEngine } from '../src/engine.js';
-import { MCP_PRESETS, buildPresetServerConfig } from '../src/mcp-presets.js';
+import { GIT_READ_TOOLS, MCP_PRESETS, buildPresetServerConfig, expandImportedServers, scopePaths, validatePresetConfig } from '../src/mcp-presets.js';
 import { McpConfigStore, McpManager } from '../src/mcp.js';
+import { taskSourceTools } from '../src/task-tools.js';
 import { visibleConnectionIds } from '../public/source-offers.js';
 
 const scopeId = 'selected-scope';
@@ -80,6 +82,11 @@ test('Calendar, Mail, and Contacts scripts stay inside the selection and report 
 
   const denied = loadScript({});
   assert.equal(JSON.parse(denied.run(['read-calendar'])).code, 'AUTOMATION_DENIED');
+  const wordingOnly = vm.createContext({ ObjC: { import() {} }, Application: () => { throw new Error('Not authorized to send Apple events'); } });
+  wordingOnly.Application.currentApplication = () => ({});
+  vm.runInContext(fs.readFileSync(new URL('../src/native-source-script.jxa.js', import.meta.url), 'utf8'), wordingOnly);
+  wordingOnly.inputJSON = () => ({});
+  assert.equal(JSON.parse(wordingOnly.run(['read-calendar'])).code, 'NATIVE_ACCESS_FAILED');
   assert.equal(JSON.parse(denied.run(['read-mail'])).code, 'AUTOMATION_DENIED');
   assert.equal(JSON.parse(denied.run(['read-contacts'])).code, 'AUTOMATION_DENIED');
   const cancelled = loadScript({ Calendar: { calendars: () => [calendar] } }, {}, () => false);
@@ -195,12 +202,28 @@ test('zero-config MCP presets need no keys and explain a missing uvx or npx', as
     const preset = MCP_PRESETS.find(item => item.id === id);
     assert.equal(preset.auth, 'none'); assert.equal(preset.requiresAuth, false); assert.equal(preset.fields.some(field => field.type === 'password'), false);
   }
-  assert.deepEqual(buildPresetServerConfig('git', { repositories: '/tmp/repo\n/tmp/other' }).args, ['mcp-server-git', '--repository', '/tmp/repo', '--repository', '/tmp/other']);
-  assert.deepEqual(buildPresetServerConfig('filesystem', { directories: '/tmp/notes' }).args.slice(0, 3), ['-y', '@modelcontextprotocol/server-filesystem', '/tmp/notes']);
+  const repoA = fs.mkdtempSync(path.join(directory(t), 'repo-a-'));
+  const repoB = fs.mkdtempSync(path.join(directory(t), 'repo-b-'));
+  const notes = fs.mkdtempSync(path.join(directory(t), 'notes-'));
+  assert.deepEqual(buildPresetServerConfig('git', { repositories: repoA }).args, ['mcp-server-git', '--repository', fs.realpathSync(repoA)]);
+  assert.deepEqual(buildPresetServerConfig('git', { repositories: repoA }).readTools, [...GIT_READ_TOOLS]);
+  assert.throws(() => buildPresetServerConfig('git', { repositories: `${repoA}\n${repoB}` }), /own server/);
+  const expanded = expandImportedServers({ git: { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', repoA, '--repository', repoB], enabled: true } });
+  assert.deepEqual(expanded.git.args, ['mcp-server-git', '--repository', fs.realpathSync(repoA)]);
+  assert.deepEqual(expanded['git-2'].args, ['mcp-server-git', '--repository', fs.realpathSync(repoB)]);
+  assert.deepEqual(expanded.git.readTools, [...GIT_READ_TOOLS]);
+  assert.ok(!expanded.git.args.includes(repoB) && expanded.git.args.filter(arg => arg === '--repository').length === 1);
+  assert.deepEqual(buildPresetServerConfig('filesystem', { directories: `${notes}\n${repoA}` }).args.slice(2), [fs.realpathSync(notes), fs.realpathSync(repoA)]);
+  assert.throws(() => scopePaths(`${notes},${repoA}`), /directory/);
   assert.throws(() => buildPresetServerConfig('git', { repositories: 'repo' }), /absolute/);
-  assert.throws(() => buildPresetServerConfig('filesystem', { directories: path.parse('/tmp').root }), /root/);
+  assert.throws(() => scopePaths(os.homedir()), /home directory/);
+  assert.throws(() => buildPresetServerConfig('filesystem', { directories: path.parse(notes).root }), /root/);
+  const filePath = path.join(notes, 'note.txt'); fs.writeFileSync(filePath, 'text');
+  assert.throws(() => scopePaths(filePath), /directory/);
+  assert.doesNotThrow(() => validatePresetConfig('my-git', { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', 'relative'] }));
   assert.equal(buildPresetServerConfig('deepwiki').url, 'https://mcp.deepwiki.com/mcp');
   assert.equal(MCP_PRESETS.find(preset => preset.id === 'time').config.args[0], 'mcp-server-time');
+  assert.match(MCP_PRESETS.find(preset => preset.id === 'time').config.args.join(' '), /--local-timezone/);
   const manager = new McpManager({ configStore: new McpConfigStore(directory(t)), executableLookup: command => command === 'npx' ? '/usr/bin/npx' : null });
   t.after(() => manager.close());
   const presets = manager.describe().presets;
@@ -208,12 +231,72 @@ test('zero-config MCP presets need no keys and explain a missing uvx or npx', as
   assert.match(presets.find(preset => preset.id === 'git').runtime.hintZh, /uvx/);
   assert.equal(presets.find(preset => preset.id === 'filesystem').runtime.available, true);
   assert.equal(presets.find(preset => preset.id === 'deepwiki').connection.url, 'https://mcp.deepwiki.com/mcp');
+  assert.equal(manager.isWrite({ name: 'git_status' }), false);
+  assert.equal(manager.isWrite({ name: 'git_diff_unstaged' }), false);
+  assert.equal(manager.isWrite({ name: 'git_commit' }), true);
+  assert.equal(manager.isWrite({ name: 'git_add' }), true);
   const migrated = new McpManager({ configStore: { get: () => ({ fetch: { type: 'stdio', command: '/Users/sampan/.nvm/versions/node/v22.14.0/bin/node', args: ['/Users/sampan/Documents/GitHub/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true } }) }, executableLookup: () => null });
   assert.equal(migrated.configs.fetch.command, process.execPath);
+  assert.ok(fs.existsSync(migrated.configs.fetch.args[0]));
   assert.ok(migrated.configs.fetch.args[0].endsWith(`${path.sep}mcp-fetch-server.js`));
-  assert.ok(!migrated.configs.fetch.args[0].includes('sampan'));
-  await manager.import({ mcpServers: { git: { ...buildPresetServerConfig('git', { repositories: '/tmp/repo' }), enabled: true } } }, { allowDeclaredRead: true });
-  const server = manager.describe().servers.find(item => item.id === 'git');
-  assert.equal(server.status, 'failed'); assert.match(server.lastError, /uvx was not found/);
+  assert.ok(!migrated.configs.fetch.command.includes('sampan'));
+  assert.ok(!migrated.configs.fetch.args[0].includes('/Users/sampan'));
+  await manager.import({ mcpServers: { git: { type: 'stdio', command: 'uvx', args: ['mcp-server-git', '--repository', repoA, '--repository', repoB], enabled: true } } }, { allowDeclaredRead: true });
+  assert.equal(manager.configs.git.args.filter(arg => arg === '--repository').length, 1);
+  assert.equal(manager.configs['git-2'].args.at(-1), fs.realpathSync(repoB));
+  assert.equal(manager.allowed(manager.configs.git, { name: 'git_log' }), true);
+  assert.equal(manager.allowed(manager.configs.git, { name: 'git_commit' }), false);
+  assert.equal(manager.allowed(manager.configs.git, { name: 'git_reset' }), false);
+  const servers = manager.describe().servers;
+  assert.equal(servers.find(item => item.id === 'git').status, 'failed');
+  assert.match(servers.find(item => item.id === 'git').lastError, /uvx was not found/);
+  assert.equal(servers.find(item => item.id === 'git-2').status, 'failed');
   await assert.rejects(manager.import({ mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', 'relative'] } } }), /absolute/);
+  const page = fs.readFileSync(new URL('../public/mcp.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(page, /DEFAULT_PRESETS|mcp-server-git/);
+});
+
+test('a native read timeout keeps the previous cursor and does not retract evidence', async () => {
+  const previous = { documents: { 'apple_calendar:selected-scope:evt': { title: 'Budget review', unavailable: null } } };
+  for (const [Connector, method, cursor, code] of [
+    [AppleCalendarConnector, 'readCalendar', previous, 'TIMEOUT'],
+    [AppleMailConnector, 'readMail', { messages: { 'apple_mail:selected-scope:m': { providerId: '<m>', version: 'v', receivedAt: '2026-11-04T00:00:00.000Z', folderId: 'inbox' } } }, 'TOO_LARGE'],
+    [AppleContactsConnector, 'readContacts', { documents: { 'apple_contacts:selected-scope:p': { title: 'Ada', unavailable: null } } }, 'NATIVE_ACCESS_FAILED']
+  ]) {
+    const folders = Connector === AppleMailConnector ? [mailFolder] : Connector === AppleContactsConnector ? [contactFolder] : [calendarFolder];
+    const bridge = { platform: 'darwin', [method]: async () => { throw new NativeAccessError(code); } };
+    const result = await new Connector({ scopeId, folders, bridge, now }).pull({ cursor });
+    assert.equal(result.cursor, cursor);
+    assert.equal(result.partial, true);
+    assert.equal(result.events.length, 0);
+    assert.doesNotMatch(JSON.stringify(result), /permission_or_access_lost/);
+  }
+});
+
+test('Mail ranks each message from one date read and scope removal uses the saved grant', () => {
+  let reads = 0;
+  const messages = [0, 1, 2].map(index => ({
+    id: () => `id-${index}`, messageId: () => `<${index}@example.com>`, sender: () => 'Ada <ada@example.com>', subject: () => `S${index}`, content: () => 'Body',
+    dateReceived: () => { reads += 1; return new Date(Date.UTC(2026, 10, index + 1)); }, dateSent: () => new Date(Date.UTC(2026, 10, index + 1)),
+    toRecipients: () => [], ccRecipients: () => []
+  }));
+  const mailbox = { id: () => 'inbox', name: () => 'Inbox', mailboxes: () => [], messages: { whose: () => () => messages } };
+  const script = loadScript({ Mail: { accounts: () => [{ id: () => 'icloud', name: () => 'iCloud', emailAddresses: () => ['me@example.com'], mailboxes: () => [mailbox] }] } }, { folders: [{ accountId: 'icloud', folderId: 'inbox' }], window: { since: '2026-10-01T00:00:00.000Z' } });
+  const read = JSON.parse(script.run(['read-mail']));
+  assert.equal(reads, 3);
+  assert.deepEqual(read.records.map(item => item.subject), ['S2', 'S1', 'S0']);
+  const cursor = { messages: { kept: { providerId: 'kept', folderId: 'inbox', version: 'v' }, dropped: { providerId: 'dropped', folderId: 'archive', version: 'v' } } };
+  const kept = mailScopeRemoval({ scopeId, folders: [{ folderId: 'inbox' }] }, cursor);
+  assert.equal(kept.events.length, 1); assert.equal(kept.events[0].payload.id, 'dropped');
+  assert.equal(kept.cursor.messages.kept.providerId, 'kept');
+  const cleared = mailScopeRemoval({ scopeId: null, folders: [{ folderId: 'inbox' }] }, cursor);
+  assert.equal(cleared.events.length, 2);
+});
+
+test('lookup_contact calls the selected Contacts groups and is absent until Contacts is connected', async () => {
+  const connector = { live: true, lookup: async query => ({ query, items: [{ name: 'Ada Lovelace', emails: ['ada@example.com'] }], complete: true }) };
+  const runtime = { connectorFor: id => id === 'apple_contacts' ? connector : null, privacy: { permissionRevoked: () => false }, tasks: { get: () => ({ id: 'task-1' }), hasPendingSemantic: () => false }, canRun: () => true, closed: false, suspended: false, activationFor: () => ({ activate: true }) };
+  const tool = taskSourceTools(runtime, { taskId: 'task-1', isCurrent: () => true }).find(item => item.name === 'lookup_contact');
+  assert.match((await tool.execute('lookup', { query: 'Ada' })).content[0].text, /ada@example.com/);
+  assert.equal(taskSourceTools({ ...runtime, connectorFor: () => null }, { taskId: 'task-1', isCurrent: () => true }).some(item => item.name === 'lookup_contact'), false);
 });

@@ -6,8 +6,7 @@ function inputJSON() {
   return JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)) || '{}');
 }
 function automationDenied(error) {
-  var text = String(error || '');
-  return error && (error.errorNumber === -1743 || error.number === -1743 || text.indexOf('-1743') >= 0 || text.indexOf('Not authorized') >= 0 || text.indexOf('not authorized') >= 0 || text.indexOf('不允许') >= 0);
+  return !!(error && (error.errorNumber === -1743 || error.number === -1743));
 }
 function isoDate(value) {
   if (!value) return null;
@@ -192,11 +191,16 @@ function run(argv) {
         try {
           var matched = mailTarget.target.messages.whose({ dateReceived: { _greaterThanEquals: mailSince } })();
           if (matched.length > 5000) { mailComplete = false; matched = matched.slice(0, 5000); }
-          matched.sort(function (left, right) { return right.dateReceived() - left.dateReceived(); });
-          if (matched.length > 40) { mailComplete = false; matched = matched.slice(0, 40); }
-          for (var mii = 0; mii < matched.length; mii++) {
+          var dated = [];
+          for (var di = 0; di < matched.length; di++) {
+            var received = matched[di].dateReceived();
+            dated.push({ message: matched[di], received: received, at: received && received.getTime ? received.getTime() : 0 });
+          }
+          dated.sort(function (left, right) { return right.at - left.at; });
+          if (dated.length > 40) { mailComplete = false; dated = dated.slice(0, 40); }
+          for (var mii = 0; mii < dated.length; mii++) {
             if (++mailCount > 200) { mailComplete = false; mailErrors.push({ code: 'MESSAGE_LIMIT' }); break; }
-            var mailMessage = matched[mii], receivedAt = isoDate(mailMessage.dateReceived()), sender = clip(mailMessage.sender(), 500);
+            var mailMessage = dated[mii].message, receivedAt = isoDate(dated[mii].received), sender = clip(mailMessage.sender(), 500);
             if (!receivedAt || !sender) { mailComplete = false; continue; }
             var messageId = clip(mailMessage.messageId() || mailMessage.id(), 4096);
             mailRecords.push({ id: messageId, threadId: messageId, from: sender, to: recipientAddresses(mailMessage.toRecipients), cc: recipientAddresses(mailMessage.ccRecipients), subject: clip(mailMessage.subject() || '(no subject)', 500), body: clip(mailMessage.content(), 24000) || '(no message body)', receivedAt: receivedAt, updatedAt: isoDate(mailMessage.dateSent()) || receivedAt, accountId: mailScope.accountId, folderId: mailScope.folderId, accountEmail: mailTarget.accountEmail || '', mailbox: mailTarget.label });

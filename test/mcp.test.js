@@ -373,3 +373,16 @@ test('an oversized MCP tool page stays connected and keeps the prefix that fits'
   assert.equal(options.listMaxPages, MCP_LIMITS.tools);
   assert.deepEqual(requestInit, { headers: {} });
 });
+
+test('saved Fetch configs that point at another machine are rewritten to this process', () => {
+  const saved = { type: 'stdio', command: '/Users/sampan/.nvm/versions/node/v22.14.0/bin/node', args: ['/Users/sampan/Documents/GitHub/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true };
+  const manager = new McpManager({ configStore: { get: () => ({ fetch: saved }) }, executableLookup: () => null });
+  assert.equal(manager.configs.fetch.command, process.execPath);
+  assert.ok(fs.existsSync(manager.configs.fetch.args[0]));
+  assert.ok(manager.configs.fetch.args[0].endsWith(`${path.sep}src${path.sep}mcp-fetch-server.js`));
+  assert.equal(JSON.stringify(manager.configs.fetch).includes('/Users/sampan'), false);
+  assert.equal(JSON.stringify(manager.configs.fetch).includes('.nvm'), false);
+  const legacy = new McpManager({ configStore: { get: () => ({ fetch: { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'], enabled: false, allowDeclaredRead: true } }) }, executableLookup: () => null });
+  assert.equal(legacy.configs.fetch.command, process.execPath);
+  assert.ok(!legacy.configs.fetch.args.includes('mcp-server-fetch'));
+});

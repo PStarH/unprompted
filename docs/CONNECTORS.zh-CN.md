@@ -43,7 +43,7 @@ Outlook 的增量检查点过期时，应用会重新分页读取收件箱，不
 运行 `npm ci --include=optional` 安装客户端依赖，重启应用，然后打开
 **连接 → MCP**。
 
-**Fetch** 不需要账号，并且默认开启。它使用当前进程的 Node 和随应用附带的脚本，不会把某台开发机的绝对路径写进配置，也不再需要 `uvx` 或 Python。它读取有大小上限的公开网页文本，不执行网页 JavaScript，不访问本地／私网地址。**Git**（`uvx mcp-server-git`）只读取你填写的仓库路径。**Filesystem**（`npx -y @modelcontextprotocol/server-filesystem`）只读取你填写的目录。**Time**（`uvx mcp-server-time`）提供这台电脑当前时区的时间。**DeepWiki** 连接 `https://mcp.deepwiki.com/mcp`，不需要登录。这些预设都不需要 API Key 或 OAuth 应用。如果本机没有 `uvx` 或 `npx`，预设会停在清楚的不可用状态并说明要安装什么，而不是直接失败。默认读取开启、修改关闭，除非你另行允许某个操作工具。**Notion**、**Linear**、**Jira 与 Confluence**（Atlassian）和 **Todoist** 使用服务商登录页：选择**登录并连接**。不需要粘贴 Client Secret 或 API Token。**Brave Search** 和 **Firecrawl** 仍然需要 API Key。也可以填写 HTTPS 地址，或粘贴 `mcpServers` 配置。
+**Fetch** 不需要账号，并且默认开启。它使用当前进程的 Node 和随应用附带的脚本。如果保存的配置仍指向另一台电脑的 Node 或 `mcp-fetch-server.js`，启动时会改写。它不再需要 `uvx` 或 Python。它读取有大小上限的公开网页文本，不执行网页 JavaScript，不访问本地／私网地址。**Git**（`uvx mcp-server-git`）的 `--repository` 只能指定一个仓库，所以你填写的每个目录都会单独连接（`git`、`git-2`……）。`git_status`、`git_log`、`git_diff`、`git_show`、`git_branch` 可以读取。`git_add`、`git_commit`、`git_reset`、`git_checkout` 和 `git_create_branch` 保持关闭。**Filesystem**（`npx -y @modelcontextprotocol/server-filesystem`）只读取你填写的目录。能创建或修改文件的工具默认关闭，需要在**工具与权限**里逐项允许。**Time**（`uvx mcp-server-time`）提供这台电脑当前时区的时间。**DeepWiki** 连接 `https://mcp.deepwiki.com/mcp`，不需要登录。这些预设都不需要 API Key 或 OAuth 应用。路径必须是已存在的目录，每行一个，不能是文件系统根目录或你的主目录。预设校验只针对预设自己的服务名；自定义名称即使运行同一条命令也不会按预设检查。如果本机没有 `uvx` 或 `npx`，预设会停在清楚的不可用状态并说明要安装什么，而不是直接失败。连接页上的预设、命令和字段都来自本应用。**Notion**、**Linear**、**Jira 与 Confluence**（Atlassian）和 **Todoist** 使用服务商登录页：选择**登录并连接**。不需要粘贴 Client Secret 或 API Token。**Brave Search** 和 **Firecrawl** 仍然需要 API Key。也可以填写 HTTPS 地址，或粘贴 `mcpServers` 配置。
 
 - 远程 Streamable HTTP：`url`，可选 `headers`。远程地址使用 HTTPS，本机允许 HTTP。
 - 本机 stdio：`command`、`args` 数组，可选 `env` 与绝对路径 `cwd`。
@@ -97,7 +97,10 @@ Unprompted 只观察你选定的文件夹。支持 `.md`、`.markdown` 和 `.txt
 已经读到的证据会标为不可用，允许后重试即可恢复。这三个连接器不会创建、编辑、
 发送或删除。日历观察与过去 14 天到未来 60 天有重叠的日程。邮件观察所选邮箱
 （Mail 里的各个账号）最近 7 天的邮件。通讯录查找只在所选群组内按姓名、邮箱或
-电话匹配，不会把通讯录备注当成待办。
+电话匹配，不会把通讯录备注当成待办。任务里的「查找联系人」会调用这次查找。
+超时、响应过大，或除 macOS 自动化拒绝（错误号 `-1743`）以外的读取失败，都会保留
+已有证据并记为部分读取。只有自动化拒绝才会把这些证据标为不可用。仅有
+“not authorized”字样而没有该错误号时，按读取失败处理，不会撤回证据。
 
 选中的本地内容与云端内容一样，可能会发送给你配置的模型。引用本地文件的链接
 只在当前电脑可用；Agent 不会把本机地址作为对外文档链接发送。断开或移除范围后，

@@ -3,92 +3,9 @@ import { getLocale } from './i18n.js';
 const t = (zh, en) => getLocale() === 'en' ? en : zh;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
-const DEFAULT_PRESETS = [
-  {
-    id: 'fetch', name: 'Fetch', auth: 'none', tagZh: '无需账号', tagEn: 'No account',
-    titleZh: '网页内容提取', titleEn: 'Web content reader',
-    descriptionZh: '使用本应用自带的 Node 读取公开网页文本。不使用固定的本机路径，也不需要 uvx。只读。',
-    descriptionEn: 'Reads public web pages with this app’s Node. The command is resolved on this computer, with no uvx and no fixed path. Read only.',
-    defaultEnabled: true, connection: null, fields: []
-  },
-  {
-    id: 'git', name: 'Git', auth: 'none', runtime: { command: 'uvx', available: true, hintZh: '未找到 uvx。安装 uv 后即可连接，不需要 API Key。', hintEn: 'uvx was not found. Install uv, then retry. No API key or OAuth app is required.' },
-    tagZh: '无需账号', tagEn: 'No account', titleZh: '本地 Git 仓库', titleEn: 'Local Git repositories',
-    descriptionZh: '只读查看你选择的仓库。需要 uvx，不需要令牌。修改默认关闭。',
-    descriptionEn: 'Read repositories you choose. Needs uvx. No token. Modify stays off.',
-    connection: { type: 'stdio', command: 'uvx', args: ['mcp-server-git'] },
-    fields: [{ key: 'repositories', labelZh: '仓库绝对路径', labelEn: 'Repository paths', placeholder: '/path/to/repo', type: 'paths', flag: '--repository', required: true }]
-  },
-  {
-    id: 'filesystem', name: 'Filesystem', auth: 'none', runtime: { command: 'npx', available: true, hintZh: '未找到 npx。安装 Node.js 后即可连接，不需要 API Key。', hintEn: 'npx was not found. Install Node.js, then retry. No API key is required.' },
-    tagZh: '无需账号', tagEn: 'No account', titleZh: '本地文件夹', titleEn: 'Local directories',
-    descriptionZh: '只读查看你选择的目录。需要 npx，不需要令牌。修改默认关闭。',
-    descriptionEn: 'Read directories you choose. Needs npx. No token. Modify stays off.',
-    connection: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem'] },
-    fields: [{ key: 'directories', labelZh: '目录绝对路径', labelEn: 'Directory paths', placeholder: '/path/to/notes', type: 'paths', required: true }]
-  },
-  {
-    id: 'time', name: 'Time', auth: 'none', runtime: { command: 'uvx', available: true, hintZh: '未找到 uvx。安装 uv 后即可连接，不需要 API Key。', hintEn: 'uvx was not found. Install uv, then retry. No API key or OAuth app is required.' },
-    tagZh: '无需账号', tagEn: 'No account', titleZh: '当前时间', titleEn: 'Current time',
-    descriptionZh: '提供这台电脑的当前时间。需要 uvx，无需其他配置。只读。',
-    descriptionEn: 'Provides the current time on this computer. Needs uvx and nothing else. Read only.',
-    connection: { type: 'stdio', command: 'uvx', args: ['mcp-server-time'] }, fields: []
-  },
-  {
-    id: 'deepwiki', name: 'DeepWiki', auth: 'none', tagZh: '无需账号', tagEn: 'No account',
-    titleZh: '公开仓库文档', titleEn: 'Public repository docs',
-    descriptionZh: '连接 DeepWiki 公开服务，查阅公开仓库文档。不需要登录或密钥。只读。',
-    descriptionEn: 'Connects to public DeepWiki for public repository documentation. No sign-in and no key. Read only.',
-    connection: { type: 'http', url: 'https://mcp.deepwiki.com/mcp' }, fields: []
-  },
-  {
-    id: 'notion', name: 'Notion', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Notion 页面', titleEn: 'Notion pages',
-    descriptionZh: '在 Notion 官方页面登录，查阅你有权访问的页面。不需要集成密钥，也不会自动创建任务。',
-    descriptionEn: 'Sign in on Notion to look up pages you can access. No integration secret, and this does not create tasks.',
-    connection: { type: 'http', url: 'https://mcp.notion.com/mcp' }, fields: []
-  },
-  {
-    id: 'linear', name: 'Linear', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Linear 议题', titleEn: 'Linear issues',
-    descriptionZh: '在 Linear 官方页面登录，查阅议题、项目和阻碍。不需要 API Key，也不会自动创建任务。',
-    descriptionEn: 'Sign in on Linear to look up issues, projects, and blockers. No API key, and this does not create tasks.',
-    connection: { type: 'http', url: 'https://mcp.linear.app/mcp' }, fields: []
-  },
-  {
-    id: 'atlassian', name: 'Jira and Confluence', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Jira 与 Confluence', titleEn: 'Jira and Confluence',
-    descriptionZh: '在 Atlassian 官方页面登录，查询 Jira 和 Confluence。不需要 API Token。组织管理员可能仍要允许此应用。',
-    descriptionEn: 'Sign in on Atlassian to look up Jira and Confluence. No API token. An organization admin may still need to allow the app.',
-    connection: { type: 'http', url: 'https://mcp.atlassian.com/v1/mcp/authv2' }, fields: []
-  },
-  {
-    id: 'todoist', name: 'Todoist', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Todoist 任务', titleEn: 'Todoist tasks',
-    descriptionZh: '在 Todoist 官方页面登录，查阅任务和项目。不需要 API Token，也不会自动创建任务。',
-    descriptionEn: 'Sign in on Todoist to look up tasks and projects. No API token, and this does not create tasks.',
-    connection: { type: 'http', url: 'https://ai.todoist.net/mcp' }, fields: []
-  },
-  {
-    id: 'brave-search', name: 'Brave Search', auth: 'key', tagZh: '需要密钥', tagEn: 'API key',
-    titleZh: 'Brave 网页搜索', titleEn: 'Brave Search',
-    descriptionZh: '实时网络与新闻搜索，为调查提供最新外部证据。此服务只提供 API Key。',
-    descriptionEn: 'Real-time web and news search for current external evidence. This service only offers an API key.',
-    connection: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-brave-search'] },
-    fields: [{ key: 'BRAVE_API_KEY', labelZh: 'Brave Search API Key', labelEn: 'Brave Search API Key', placeholder: 'BSA...', type: 'password', required: true }]
-  },
-  {
-    id: 'firecrawl', name: 'Firecrawl', auth: 'key', tagZh: '需要密钥', tagEn: 'API key',
-    titleZh: 'Firecrawl 深度爬虫', titleEn: 'Firecrawl Web Scraper',
-    descriptionZh: '深度网页抓取与站点抽取。此服务只提供 API Key。',
-    descriptionEn: 'Deep web scraping and crawling. This service only offers an API key.',
-    connection: { type: 'stdio', command: 'npx', args: ['-y', 'firecrawl-mcp'] },
-    fields: [{ key: 'FIRECRAWL_API_KEY', labelZh: 'Firecrawl API Key', labelEn: 'Firecrawl API Key', placeholder: 'fc-...', type: 'password', required: true }]
-  }
-];
-
 const presetAuth = preset => preset.auth || (preset.fields?.length ? 'key' : 'none');
 const presetRecipe = preset => preset.connection || (preset.command ? { type: 'stdio', command: preset.command, args: preset.args || [] } : null);
+const serverPresets = setup => Array.isArray(setup?.mcp?.presets) ? setup.mcp.presets : [];
 
 export function createMcpPanel({ update, post, context, refresh, notify }) {
   let busy = false, error = '', mode = 'url', targetPresetId = '';
@@ -101,7 +18,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     const setup = context();
     panel.hidden = setup.demo === true;
     const servers = setup.mcp?.servers || [];
-    const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const presets = serverPresets(setup);
     const status = value => ({ connected: t('已连接', 'Connected'), connecting: t('连接中', 'Connecting'), failed: t('连接失败', 'Connection failed'), disconnected: t('已断开', 'Disconnected') })[value] || value;
 
     const card = preset => {
@@ -149,7 +66,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           const items = presets.filter(preset => presetAuth(preset) === auth);
           if (!items.length) return '';
           return `<h3 class="mcp-preset-group-title">${title}</h3>${note ? `<p class="muted mcp-preset-group-note">${note}</p>` : ''}${items.map(card).join('')}`;
-        }).join('')}
+        }).join('')}${presets.length ? '' : `<p class="muted">${t('内置推荐由本应用提供。刷新连接页后再选择。', 'Built-in presets come from this app. Refresh Connections, then choose one.')}</p>`}
       </div>
     `;
 
@@ -224,7 +141,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
   function renderForm() {
     const setup = context();
     const servers = setup.mcp?.servers || [];
-    const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const presets = serverPresets(setup);
 
     const tabsHtml = `
       <div class="mcp-tabs" role="group" aria-label="${t('配置方式', 'Setup method')}">
@@ -426,7 +343,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       if (busy) return;
       busy = true;
       try {
-        const preset = (context().mcp?.presets || DEFAULT_PRESETS).find(item => item.id === 'fetch');
+        const preset = serverPresets(context()).find(item => item.id === 'fetch');
         const recipe = presetRecipe(preset);
         if (!recipe?.command && !recipe?.url) {
           notify(t('Fetch 由本应用的运行时提供。请刷新连接页后再试。', 'Fetch is provided by this app. Refresh Connections and try again.'), true);
@@ -499,7 +416,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     if (busy) return;
     const form = new FormData(event.target);
     const setup = context();
-    const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const presets = serverPresets(setup);
     const servers = setup.mcp?.servers || [];
     let config;
 
@@ -521,7 +438,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
         for (const f of (preset.fields || [])) {
           const val = String(form.get(`field_${preset.id}_${f.key}`) || '').trim();
           if (f.type === 'paths') {
-            const paths = val.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean);
+            const paths = val.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
             if (!paths.length) {
               document.getElementById('mcpFormError').textContent = t(`请填写 ${preset.name} 的绝对路径。`, `Enter absolute paths for ${preset.name}.`);
               return;

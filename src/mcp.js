@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readRegularFile } from './local-files.js';
-import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfig } from './mcp-presets.js';
+import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfig, expandImportedServers, isGitReadTool } from './mcp-presets.js';
 
 export { MCP_PRESETS };
 
@@ -171,6 +171,26 @@ export class McpManager {
       const legacyArgs = id === 'brave-search' ? ['-y', '@modelcontextprotocol/server-brave-search'] : ['-y', 'firecrawl-mcp'];
       if (saved?.type === 'stdio' && (saved.command === 'npx' && JSON.stringify(saved.args) === JSON.stringify(legacyArgs) || saved.args?.length === 2 && /[/\\]src[/\\]mcp-key-server\.js$/.test(saved.args[0]) && saved.args[1] === id)) this.configs[id] = { ...saved, ...preset };
     }
+    this.presetErrors = {};
+    let configs = this.configs;
+    try { configs = expandImportedServers(this.configs); }
+    catch (error) {
+      this.presetErrors.git = error.message;
+      configs = this.configs.git ? { ...this.configs, git: { ...this.configs.git, enabled: false } } : this.configs;
+    }
+    let changed = configs !== this.configs;
+    const checked = { ...configs };
+    for (const [id, config] of Object.entries(checked)) {
+      try { validatePresetConfig(id, config); }
+      catch (error) {
+        this.presetErrors[id] = error.message;
+        if (config.enabled !== false) { checked[id] = { ...config, enabled: false }; changed = true; }
+      }
+    }
+    this.configs = changed ? checked : configs;
+    if (changed && typeof this.configStore.write === 'function') {
+      try { this.configStore.write(this.configs); } catch { /* The in-memory correction still blocks connect. */ }
+    }
     this.load = load; this.onChange = onChange; this.executableLookup = executableLookup; this.connections = new Map(); this.busy = false; this.closed = false; this.inFlight = 0;
     this.lockContext = new AsyncLocalStorage(); this.oauthBroker = null;
   }
@@ -188,7 +208,7 @@ export class McpManager {
       const connection = this.connections.get(id);
       return { id, type: config.type, enabled: config.enabled, endpoint: config.url ? new URL(config.url).origin : 'stdio',
         ...this.oauthStatus(id),
-        status: connection?.status || 'disconnected', lastError: connection?.lastError || null,
+        status: connection?.status || 'disconnected', lastError: connection?.lastError || this.presetErrors[id] || null,
         allowDeclaredRead: config.allowDeclaredRead,
         tools: (connection?.tools || []).filter(tool => this.redact(String(tool.name)) === tool.name).map(tool => ({ name: tool.name, description: this.redact(String(tool.description || '')).slice(0, 500), inputSchema: this.redactMetadata(tool.inputSchema),
           declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: this.isWrite(tool), allowed: this.allowed(config, tool) })),
@@ -206,7 +226,10 @@ export class McpManager {
     })), limits: MCP_LIMITS };
   }
   #runtimeAvailable(command) { try { return Boolean(this.executableLookup(command)); } catch { return false; } }
-  isWrite(tool) { return tool.annotations?.readOnlyHint !== true || tool.annotations?.destructiveHint === true; }
+  isWrite(tool) {
+    if (isGitReadTool(tool?.name) && tool?.annotations?.destructiveHint !== true) return false;
+    return tool?.annotations?.readOnlyHint !== true || tool?.annotations?.destructiveHint === true;
+  }
   allowed(config, tool) {
     if (!config.enabled) return false;
     if (this.isWrite(tool)) return (config.writeTools || []).includes(tool.name);
@@ -223,9 +246,11 @@ export class McpManager {
     try { return await this.lockContext.run(this, fn); } finally { this.busy = false; this.onChange(); }
   }
   async import(value, options) {
-    const incoming = parseMcpImport(value, options);
-    try { for (const [id, config] of Object.entries(incoming)) validatePresetConfig(id, config); }
-    catch (error) { throw fail(error.message); }
+    let incoming = parseMcpImport(value, options);
+    try {
+      incoming = expandImportedServers(incoming);
+      for (const [id, config] of Object.entries(incoming)) validatePresetConfig(id, config);
+    } catch (error) { throw fail(error.message); }
     return this.exclusive(async () => {
       const merged = { ...this.configs };
       for (const [id, config] of Object.entries(incoming)) {
@@ -318,6 +343,10 @@ export class McpManager {
     if (existing?.status === 'connected' || existing?.status === 'connecting') return;
     const config = this.configs[id], entry = { status: 'connecting', tools: [], resources: [], client: null, transport: null, controller: new AbortController() };
     this.connections.set(id, entry); this.onChange();
+    try { validatePresetConfig(id, config); }
+    catch (error) {
+      entry.status = 'failed'; entry.tools = []; entry.resources = []; entry.lastError = error.message; this.onChange(); return;
+    }
     if (config.type === 'stdio') {
       const base = path.basename(config.command);
       const hint = RUNTIME_HINTS[base];

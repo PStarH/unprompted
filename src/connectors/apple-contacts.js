@@ -52,6 +52,7 @@ export class AppleContactsConnector extends Connector {
   #accept(item, folder) {
     if (!folder || item.accountId !== folder.accountId || !text(item.id, 4096) || !item.id || !text(item.name, 250) || !item.name || !text(item.organization || '', 250) || !list(item.emails || [], 12) || !list(item.phones || [], 12) || !text(item.note || '', CONTACTS_LIMITS.maxNote) || !Number.isFinite(Date.parse(item.updatedAt))) throw new ConnectorError('Contacts returned a person outside the selected groups or with incomplete metadata.', { connectorId: this.id });
   }
+  /** Live lookup for entity resolution. Task tools call this as lookup_contact; observation still uses pull(). */
   async lookup(query, { signal } = {}) {
     if (!this.live) throw new ConnectorError('Contacts is not connected.', { connectorId: this.id, status: 403 });
     if (typeof query !== 'string' || !query.trim() || query.trim().length > 200) throw new ConnectorError('Enter a name, email, or phone number to look up.', { connectorId: this.id, status: 400 });
@@ -76,9 +77,10 @@ export class AppleContactsConnector extends Connector {
     try { result = await this.bridge.readContacts(this.folders, { signal }); }
     catch (error) {
       const message = error instanceof NativeAccessError ? error.message : 'Contacts could not be read. Check Automation access and try again.';
-      const failure = [{ scope: 'contacts', message, retryable: true }];
-      if (!Object.keys(cursor?.documents || {}).length) return { events: [], cursor, partial: true, errors: failure };
-      return contactSnapshot({ scopeId: this.scopeId, records: [], cursor, complete: true, now: this.now, baseUrl: this.baseUrl, lossReason: 'permission_or_access_lost', errors: failure });
+      const errors = [{ scope: 'contacts', message, retryable: true }];
+      if (!(error instanceof NativeAccessError) || error.code !== 'AUTOMATION_DENIED') return { events: [], cursor, partial: true, errors };
+      if (!Object.keys(cursor?.documents || {}).length) return { events: [], cursor, partial: true, errors };
+      return contactSnapshot({ scopeId: this.scopeId, records: [], cursor, complete: true, now: this.now, baseUrl: this.baseUrl, lossReason: 'permission_or_access_lost', errors });
     }
     if (!Array.isArray(result.records) || !Array.isArray(result.errors) || typeof result.complete !== 'boolean') throw new ConnectorError('Contacts did not return a valid read result.', { connectorId: this.id });
     const allowed = new Map(this.folders.map(folder => [folder.folderId, folder]));

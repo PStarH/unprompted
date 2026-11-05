@@ -72,7 +72,7 @@ the remaining cursor for the next check.
 Install the optional client with `npm ci --include=optional`, then restart the
 app. Open **Connections → MCP**.
 
-**Fetch** needs no account and is on by default. It runs with the bundled Node runtime, resolved from the current process rather than a path saved on a developer’s machine, so it does not require Python, `uvx`, or an npm download. It reads bounded public text pages, blocks private/local network destinations, and returns plain text; it does not render JavaScript. **Git** (`uvx mcp-server-git`) reads only the repository paths you enter. **Filesystem** (`npx -y @modelcontextprotocol/server-filesystem`) reads only the directories you enter. **Time** (`uvx mcp-server-time`) reports the current time in the computer’s time zone. **DeepWiki** connects to `https://mcp.deepwiki.com/mcp` with no sign-in. None of these ask for an API key or an OAuth app. If `uvx` or `npx` is not installed, the preset stays in a clear unavailable state and tells you what to install instead of failing closed. Read is on and modify is off until you explicitly allow an action tool. **Notion**, **Linear**,
+**Fetch** needs no account and is on by default. It runs with the bundled Node runtime, resolved from the current process rather than a path saved on a developer’s machine, so it does not require Python, `uvx`, or an npm download. A saved Fetch config that still points at another computer’s Node or `mcp-fetch-server.js` is rewritten on startup. It reads bounded public text pages, blocks private/local network destinations, and returns plain text; it does not render JavaScript. **Git** (`uvx mcp-server-git`) accepts one `--repository`. Each directory you enter becomes its own server (`git`, `git-2`, …). Read tools (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`) are allowed. `git_add`, `git_commit`, `git_reset`, `git_checkout` and `git_create_branch` stay off. **Filesystem** (`npx -y @modelcontextprotocol/server-filesystem`) reads only the directories you enter. Its tools that can create or change files stay off until you enable each one under **Tools and access**. **Time** (`uvx mcp-server-time`) reports the current time in the computer’s time zone. **DeepWiki** connects to `https://mcp.deepwiki.com/mcp` with no sign-in. None of these ask for an API key or an OAuth app. Paths must be existing directories, one per line, and cannot be the filesystem root or your home directory. Preset checks apply to the preset’s own server name. A custom name that happens to run the same command is not checked. If `uvx` or `npx` is not installed, the preset stays in a clear unavailable state and tells you what to install instead of failing closed. The Connections page takes these presets from the app, including the command and fields. **Notion**, **Linear**,
 **Jira and Confluence** (Atlassian), and **Todoist** use the vendor sign-in
 page: choose **Sign in and connect**. You do not paste a client secret or an
 API token. **Brave Search** and **Firecrawl** still need an API key. Their bounded read tools also run with bundled Node: Brave web search and Firecrawl single-page Markdown scraping need no `npx` or package installation. You can
@@ -173,7 +173,12 @@ unavailable until you allow access and retry. These three connectors do not
 create, edit, send, or delete. Calendar covers events that overlap the last 14
 days and the next 60 days. Mail covers the last 7 days in the mailboxes you
 select, across every account Mail.app shows. Contacts lookup searches the
-groups you select and does not turn an address-book note into a task.
+groups you select and does not turn an address-book note into a task. During a
+task, **Look up a contact** calls that search. A timeout, an oversized response,
+or any read failure other than a macOS Automation denial (`-1743`) keeps the
+previous evidence and reports a partial read. Only an Automation denial marks
+that evidence unavailable. Wording such as “not authorized” without that error
+number is a failed read, not a permission retraction.
 
 ## Provision applications once for a distribution
 

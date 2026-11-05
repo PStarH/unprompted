@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,14 +21,25 @@ export const RUNTIME_HINTS = Object.freeze({
   }
 });
 
+/** mcp-server-git does not declare readOnlyHint. These names are the read grant; add, commit, reset, checkout and create_branch stay off. */
+export const GIT_READ_TOOLS = Object.freeze(['git_status', 'git_log', 'git_diff', 'git_diff_unstaged', 'git_diff_staged', 'git_show', 'git_branch']);
+export function isGitReadTool(name) {
+  return typeof name === 'string' && (GIT_READ_TOOLS.includes(name) || /^git_diff(?:_|$)/.test(name));
+}
+
 export function scopePaths(value) {
   const text = Array.isArray(value) ? value.join('\n') : String(value ?? '');
-  const items = text.split(/\r?\n|,/).map(item => item.trim()).filter(Boolean);
+  const items = text.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
   if (!items.length || items.length > 10) throw new Error('Choose 1 to 10 absolute paths.');
+  let home;
+  try { home = fs.realpathSync(os.homedir()); } catch { home = path.resolve(os.homedir()); }
   return items.map(item => {
     if (!path.isAbsolute(item) || item.includes('\0') || item.length > 4096) throw new Error('Each scope path must be absolute.');
-    const resolved = path.resolve(item);
-    if (resolved === path.parse(resolved).root) throw new Error('Choose a specific directory, not the filesystem root.');
+    let resolved;
+    try { resolved = fs.realpathSync(item); }
+    catch { throw new Error('Each scope path must be an existing directory.'); }
+    if (!fs.statSync(resolved).isDirectory()) throw new Error('Each scope path must be a directory.');
+    if (resolved === path.parse(resolved).root || resolved === home) throw new Error('Choose a specific directory, not the filesystem root or your home directory.');
     return resolved;
   });
 }
@@ -61,13 +74,14 @@ export const MCP_PRESETS = Object.freeze([
     tagEn: 'No account',
     titleZh: '本地 Git 仓库',
     titleEn: 'Local Git repositories',
-    descriptionZh: '只读查看你选择的仓库。需要本机的 uvx，不需要令牌。修改默认关闭。',
-    descriptionEn: 'Read repositories you choose. Needs uvx on this computer. No token. Modify stays off.',
+    descriptionZh: '每个仓库单独启动一个只读服务，因为 Git MCP 的 --repository 只能指定一个路径。需要 uvx，不需要令牌。提交、重置等修改工具默认关闭。',
+    descriptionEn: 'Each repository gets its own read-only server, because Git MCP accepts one --repository. Needs uvx. No token. Commit, reset and other modify tools stay off.',
     defaultEnabled: false,
     requiresAuth: false,
+    readTools: GIT_READ_TOOLS,
     config: { type: 'stdio', command: 'uvx', args: ['mcp-server-git'] },
     fields: [{ key: 'repositories', labelZh: '仓库绝对路径', labelEn: 'Repository paths', placeholder: '/path/to/repo', type: 'paths', flag: '--repository', required: true,
-      helpZh: '每行一个绝对路径。只读取这些仓库。', helpEn: 'One absolute path per line. Only these repositories are read.' }]
+      helpZh: '每行一个已存在的目录。每个仓库会单独连接。', helpEn: 'One existing directory per line. Each repository is connected separately.' }]
   },
   {
     id: 'filesystem',
@@ -79,8 +93,8 @@ export const MCP_PRESETS = Object.freeze([
     tagEn: 'No account',
     titleZh: '本地文件夹',
     titleEn: 'Local directories',
-    descriptionZh: '只读查看你选择的目录。需要本机的 npx，不需要令牌。修改默认关闭。',
-    descriptionEn: 'Read directories you choose. Needs npx on this computer. No token. Modify stays off.',
+    descriptionZh: '查看你选择的目录。需要本机的 npx，不需要令牌。可修改目录的工具默认关闭，需要逐项允许。',
+    descriptionEn: 'Read directories you choose. Needs npx on this computer. No token. Tools that can modify those directories stay off until you enable them.',
     defaultEnabled: false,
     requiresAuth: false,
     config: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem'] },
@@ -264,6 +278,7 @@ export function buildPresetServerConfig(id, envInput = {}) {
     if (field.type === 'paths') {
       if (field.required && (typeof val !== 'string' || !val.trim()) && !Array.isArray(val)) throw new Error(`Missing required field for ${preset.name}: ${field.labelEn || field.key}`);
       const paths = scopePaths(val);
+      if (field.flag && paths.length > 1) throw new Error('Each Git repository is connected as its own server.');
       if (field.flag) for (const item of paths) extraArgs.push(field.flag, item);
       else extraArgs.push(...paths);
       continue;
@@ -279,27 +294,74 @@ export function buildPresetServerConfig(id, envInput = {}) {
     type: preset.config.type || 'stdio',
     command: preset.config.command,
     args: [...preset.config.args, ...extraArgs],
+    ...(preset.readTools ? { readTools: [...preset.readTools] } : {}),
     ...(Object.keys(env).length ? { env } : {})
   };
 }
 
-/** Preset ids keep their built-in command. User-chosen paths must be absolute. */
+function gitRepositoryArgs(config) {
+  if (!config || config.type !== 'stdio' || config.command !== 'uvx' || !Array.isArray(config.args) || config.args[0] !== 'mcp-server-git') return null;
+  const repos = [];
+  for (let index = 1; index < config.args.length; index += 1) {
+    if (config.args[index] !== '--repository' || typeof config.args[index + 1] !== 'string') return null;
+    repos.push(config.args[index + 1]);
+    index += 1;
+  }
+  return repos;
+}
+
+function gitReadToolsMatch(tools) {
+  return Array.isArray(tools) && GIT_READ_TOOLS.every(name => tools.includes(name));
+}
+
+/**
+ * mcp-server-git keeps only the last --repository. One imported `git` server
+ * with several paths becomes `git`, `git-2`, `git-3`, ... each with one path.
+ * Returns the same object when nothing changes.
+ */
+export function expandImportedServers(servers) {
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return servers;
+  let changed = false;
+  const result = {};
+  for (const [id, config] of Object.entries(servers)) {
+    const repos = id === 'git' || /^git-[1-9]\d*$/.test(id) ? gitRepositoryArgs(config) : null;
+    if (!repos?.length) { result[id] = config; continue; }
+    const canonical = scopePaths(repos.join('\n'));
+    if (id !== 'git' || canonical.length === 1) {
+      const repo = canonical[0];
+      if (canonical.length === 1 && repo === repos[0] && gitReadToolsMatch(config.readTools)) { result[id] = config; continue; }
+      changed = true;
+      result[id] = { ...config, args: ['mcp-server-git', '--repository', repo], readTools: [...GIT_READ_TOOLS] };
+      continue;
+    }
+    changed = true;
+    canonical.forEach((repo, index) => {
+      result[index === 0 ? 'git' : `git-${index + 1}`] = { ...config, args: ['mcp-server-git', '--repository', repo], readTools: [...GIT_READ_TOOLS] };
+    });
+  }
+  return changed ? result : servers;
+}
+
+/**
+ * Checks preset ids only. `git-2` and later are checked when they are the
+ * generated Git servers. A custom server id, even one that runs uvx
+ * mcp-server-git, is not validated here.
+ */
 export function validatePresetConfig(id, config) {
-  const preset = findPreset(id);
+  const generatedGit = /^git-[1-9]\d*$/.test(id) && gitRepositoryArgs(config);
+  const preset = findPreset(generatedGit ? 'git' : id);
   const field = preset?.fields?.find(item => item.type === 'paths');
-  if (!field) return;
+  if (!field || (id !== preset.id && !generatedGit)) return;
   if (config?.type !== 'stdio' || config.command !== preset.config.command) throw new Error(`${preset.name} must use its built-in ${preset.config.command} command.`);
   const prefix = preset.config.args;
   const args = config.args || [];
   if (args.length < prefix.length || prefix.some((arg, index) => args[index] !== arg)) throw new Error(`${preset.name} was given an unexpected command.`);
   const rest = args.slice(prefix.length);
-  const paths = [];
   if (field.flag) {
-    if (rest.length % 2) throw new Error(`${preset.name} scope paths are incomplete.`);
-    for (let index = 0; index < rest.length; index += 2) {
-      if (rest[index] !== field.flag) throw new Error(`${preset.name} scope paths must use ${field.flag}.`);
-      paths.push(rest[index + 1]);
-    }
-  } else paths.push(...rest);
-  scopePaths(paths);
+    if (rest.length !== 2 || rest[0] !== field.flag) throw new Error(`${preset.name} accepts one repository per server.`);
+    scopePaths(rest[1]);
+    return;
+  }
+  if (!rest.length) throw new Error(`${preset.name} needs at least one directory.`);
+  scopePaths(rest.join('\n'));
 }

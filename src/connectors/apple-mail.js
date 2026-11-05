@@ -40,6 +40,13 @@ export function mailSnapshot({ scopeId, records, cursor = null, complete = true,
   return { events: toNormalizedEvents('apple_mail', 'apple_mail', produced), cursor: { messages: next, counts: { messages: Object.keys(next).length } }, partial: !complete || errors.length > 0, errors };
 }
 
+/** Scope removal follows the saved grant, not a separately cached account binding. */
+export function mailScopeRemoval(saved, cursor, now = Date.now) {
+  const scopeId = saved?.scopeId || null;
+  const allowed = new Set(scopeId ? (saved.folders || []).map(item => item.folderId) : []);
+  return removedMailEvents({ scopeId, cursor, allowed, now });
+}
+
 export function removedMailEvents({ scopeId, cursor, allowed, now = Date.now }) {
   const messages = { ...(cursor?.messages || {}) }, removed = [];
   for (const [id, known] of Object.entries(messages)) {
@@ -72,10 +79,10 @@ export class AppleMailConnector extends Connector {
     try { result = await this.bridge.readMail(this.folders, { since }, { signal }); }
     catch (error) {
       const message = error instanceof NativeAccessError ? error.message : 'Mail could not be read. Check Automation access and try again.';
-      const failure = [{ scope: 'mail', message, retryable: true }];
-      const previous = cursor?.messages || {};
-      if (!Object.keys(previous).length) return { events: [], cursor, partial: true, errors: failure };
-      return mailSnapshot({ scopeId: this.scopeId, records: [], cursor, complete: true, windowStart: since, now: this.now, lossReason: 'permission_or_access_lost', errors: failure });
+      const errors = [{ scope: 'mail', message, retryable: true }];
+      if (!(error instanceof NativeAccessError) || error.code !== 'AUTOMATION_DENIED') return { events: [], cursor, partial: true, errors };
+      if (!Object.keys(cursor?.messages || {}).length) return { events: [], cursor, partial: true, errors };
+      return mailSnapshot({ scopeId: this.scopeId, records: [], cursor, complete: true, windowStart: since, now: this.now, lossReason: 'permission_or_access_lost', errors });
     }
     if (!Array.isArray(result.records) || !Array.isArray(result.errors) || typeof result.complete !== 'boolean') throw new ConnectorError('Mail did not return a valid read result.', { connectorId: this.id });
     const allowed = new Map(this.folders.map(folder => [`${folder.accountId}\0${folder.folderId}`, folder]));

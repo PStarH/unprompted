@@ -28,7 +28,7 @@ import { connectedSources, sourceCounts, sourceAccountBindings } from './src/con
 import { NativeSourceBridge, NativeAccessError } from './src/native-sources.js';
 import { canonicalLocalRoot, mergeLocalRoots, readScopedText } from './src/connectors/local-files.js';
 import { nativeSnapshot } from './src/connectors/local-snapshot.js';
-import { removedMailEvents } from './src/connectors/apple-mail.js';
+import { mailScopeRemoval } from './src/connectors/apple-mail.js';
 import { bindConnectionAccount } from './src/external-work.js';
 import { readRegularFile } from './src/local-files.js';
 import { McpManager, McpConfigStore } from './src/mcp.js';
@@ -404,8 +404,7 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
       const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
       if (!cursor) continue;
       if (id === 'apple_mail') {
-        const allowed = new Set(saved.scopeId ? saved.folders.map(item => item.folderId) : []);
-        const removed = removedMailEvents({ scopeId: store.state.connectionAccounts?.[id], cursor, allowed, now: () => Date.now() });
+        const removed = mailScopeRemoval(saved, cursor);
         if (!removed.events.length) continue;
         for (const event of removed.events) engine.ingest(event);
         store.mutate(state => { state.cursors[id] = removed.cursor; });

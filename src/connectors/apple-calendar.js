@@ -66,9 +66,12 @@ export class AppleCalendarConnector extends Connector {
     try { result = await this.bridge.readCalendar(this.folders, window, { signal }); }
     catch (error) {
       const message = error instanceof NativeAccessError ? error.message : 'Calendar could not be read. Check Automation access and try again.';
+      const errors = [{ scope: 'calendar', message, retryable: true }];
+      // A timeout or a failed read is not evidence that the calendars are gone.
+      if (!(error instanceof NativeAccessError) || error.code !== 'AUTOMATION_DENIED') return { events: [], cursor, partial: true, errors };
       const known = Object.values(cursor?.documents || {}).some(doc => !doc.unavailable);
       return calendarSnapshot({ scopeId: this.scopeId, records: [], cursor, complete: known, windowStart: window.start, now: this.now, baseUrl: this.baseUrl,
-        lossReason: known ? 'permission_or_access_lost' : null, errors: [{ scope: 'calendar', message, retryable: true }] });
+        lossReason: known ? 'permission_or_access_lost' : null, errors });
     }
     if (!Array.isArray(result.records) || !Array.isArray(result.errors) || typeof result.complete !== 'boolean') throw new ConnectorError('Calendar did not return a valid read result.', { connectorId: this.id });
     const allowed = new Map(this.folders.map(folder => [folder.folderId, folder]));
