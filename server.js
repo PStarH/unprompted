@@ -390,22 +390,36 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
   } finally { workspaceChanging = false; }
 }
 
-async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null, reassess = true } = {}) {
+let sourceRefreshGeneration = 0;
+
+function failClosedForRefresh() {
+  engine.policy.shadow = true;
+  if (engine.taskServices?.policy) engine.taskServices.policy.shadow = true;
+  if (documentProvider) documentProvider.shadow = true;
+  if (googleConnector) googleConnector.shadow = true;
+}
+
+async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null, reassess = true, widening = false } = {}) {
   if (workspaceChanging || modelSetupBusy) throw new Error('A connection update is already running.');
   workspaceChanging = true;
   if (durableRuntime) durableRuntime.suspended = true;
   const heldPolicy = engine.policy;
   const previousShadow = heldPolicy.shadow;
+  const previousTaskShadow = engine.taskServices?.policy?.shadow;
+  const previousDocShadow = documentProvider?.shadow;
+  const previousConnectorShadow = googleConnector?.shadow;
   let installed = false;
   try {
+    sourceRefreshGeneration += 1;
     monitoring.stop(); simulation.stop();
-    // Let a prepared action finish under the policy that authorized it.
-    // Flipping shadow first cancels that request before the new grant exists.
+    // Disconnects and scope removals must refuse new writes before the drain.
+    // Only a widening grant may let an already authorized action finish first.
+    if (!widening) failClosedForRefresh();
     await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
     await monitoring.whenIdle(); await engine.whenSettled();
     await durableRuntime?.whenIdle();
     if (shutdownPromise) throw new Error('The application is shutting down.');
-    heldPolicy.shadow = true;
+    if (widening) failClosedForRefresh();
     // Remove revoked local evidence before rebuilding the active sources.
     for (const id of NATIVE_SOURCE_IDS) {
       const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
@@ -487,9 +501,25 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     } else await monitoring.setSettings({ enabled: false });
     return publicSetupStatus();
   } catch (error) {
-    if (!installed) heldPolicy.shadow = previousShadow;
+    if (!installed) {
+      heldPolicy.shadow = previousShadow;
+      if (engine.taskServices?.policy && engine.taskServices.policy !== heldPolicy) engine.taskServices.policy.shadow = previousTaskShadow;
+      if (documentProvider) documentProvider.shadow = previousDocShadow;
+      if (googleConnector) googleConnector.shadow = previousConnectorShadow;
+    }
     throw error;
   } finally { workspaceChanging = false; if (durableRuntime) { durableRuntime.suspended = false; durableRuntime.kick(); } }
+}
+
+function investigateAfterGrant() {
+  const generation = sourceRefreshGeneration;
+  let timer;
+  const bounded = new Promise(resolve => { timer = setTimeout(resolve, 10_000); timer.unref?.(); });
+  void Promise.race([durableRuntime.whenIdle(), bounded]).then(() => {
+    clearTimeout(timer);
+    if (generation !== sourceRefreshGeneration || shutdownPromise) return;
+    engine.investigateWithTools();
+  }).catch(() => {});
 }
 
 function disconnectGoogleForThisRun() {
@@ -753,12 +783,11 @@ async function handleHttpRequest(req, res) {
             await engine.whenSettled();
             const grant = await durableRuntime.artifacts.createGrant(body, { actor: 'user', confirmed: body.confirmed === true });
             localSetup.setArtifactWrites(true);
-            await applyConnectedSources({ request: req, initialRead: false, reassess: false });
+            await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: true });
             for (const task of Object.values(store.state.tasks)) durableRuntime.artifacts.schedulePrepared(task, { retryInterrupted: true });
-            // A new tool investigation starts its own task run. Let the prepared
-            // draft dispatch first so that run does not cancel it.
-            await durableRuntime.whenIdle();
-            engine.investigateWithTools();
+            // The response does not wait for Gmail. Investigation starts after
+            // the draft dispatch, and a later refresh cancels a stale one.
+            investigateAfterGrant();
             return json(res, 200, { grant, setup: publicSetupStatus(), state: engine.publicState() });
           } finally { if (durableRuntime?.suspended) { durableRuntime.suspended = false; durableRuntime.kick(); } }
         }
@@ -879,7 +908,7 @@ async function handleHttpRequest(req, res) {
               await engine.whenSettled();
               const grant = durableRuntime.connectorActions.createGrant(body, { actor: 'user' });
               localSetup.setArtifactWrites(true);
-              await applyConnectedSources({ request: req, initialRead: false, reassess: false });
+              await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: true });
               engine.investigateWithTools();
               return json(res, 200, { grant, setup: publicSetupStatus() });
             } finally { if (durableRuntime?.suspended) { durableRuntime.suspended = false; durableRuntime.kick(); } }
@@ -914,7 +943,7 @@ async function handleHttpRequest(req, res) {
           ? await mcp.import(body.config, { allowDeclaredRead: body.allowDeclaredRead === true })
           : await mcp.update(decodeURIComponent(url.pathname.split('/').pop()), body);
         if (Array.isArray(body.writeTools) && body.writeTools.length) {
-          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false, reassess: false }); }
+          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: true }); }
         }
         engine.investigateWithTools();
         return json(res, 200, { mcp: result, setup: publicSetupStatus() });

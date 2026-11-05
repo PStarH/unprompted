@@ -300,16 +300,16 @@ export class GoogleDocsWriteProvider {
       throw error;
     }
     if (!current.raw?.body?.content?.length) throw new Error('Google Docs did not return an editable document body.');
-      // batchUpdate applies requests in order, and each index is in the document
-      // produced by earlier requests in the same batch. The Docs body is 1-based
-      // UTF-16, matching these JavaScript offsets plus one. Computing every index
-      // against the original text, then reversing same-position inserts, writes
-      // the quotes in the wrong order and fails the readback check.
-      const requests = [];
-      let simulated = normaliseNewlines(current.content);
-      for (const change of changes) {
-        const { index, text } = insertionAt(simulated, change);
-        requests.push({ insertText: { location: { index: index + 1 }, text } });
+    // batchUpdate applies requests in order, and each index is in the document
+    // produced by earlier requests in the same batch. The Docs body is 1-based
+    // UTF-16, matching these JavaScript offsets plus one. Computing every index
+    // against the original text, then reversing same-position inserts, writes
+    // the quotes in the wrong order and fails the readback check.
+    const requests = [];
+    let simulated = normaliseNewlines(current.content);
+    for (const change of changes) {
+      const { index, text } = insertionAt(simulated, change);
+      requests.push({ insertText: { location: { index: index + 1 }, text } });
       simulated = simulated.slice(0, index) + text + simulated.slice(index);
     }
     let accepted = false;
@@ -335,7 +335,7 @@ export class GoogleDocsWriteProvider {
       throw error;
     }
     if (normaliseNewlines(readback.content) !== normaliseNewlines(expectedContent)) {
-      const error = new Error('Google Docs accepted the write, but readback did not contain every requested source quote. The result is uncertain and must be reconciled manually.');
+      const error = new Error('Google Docs accepted the write, but readback did not contain every requested source quote. The result is uncertain and must be reconciled manually. Indexes are taken from the plain-text body; tables and inline objects can shift them.');
       error.writeOutcomeUnknown = true;
       throw error;
     }

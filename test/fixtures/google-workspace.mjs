@@ -21,9 +21,10 @@ export async function startGoogleFixture({ provisioned = true, directory = null,
       const json = (value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
       const account = req.headers.authorization?.includes('reader-b') ? 'reader-b' : 'reader-a';
       if (url.pathname === '/google/oauth2.googleapis.com/token') {
+        if (controls.holdToken) await controls.holdToken;
         const fields = new URLSearchParams(body);
         const id = fields.get('code') === 'reader-b' || fields.get('refresh_token') === 'PRIVATE_REFRESH_reader-b' ? 'reader-b' : 'reader-a';
-        return json({ access_token: `PRIVATE_ACCESS_${id}`, refresh_token: `PRIVATE_REFRESH_${id}`, expires_in: 3600,
+        return json({ access_token: `PRIVATE_ACCESS_${id}`, refresh_token: `PRIVATE_REFRESH_${id}`, expires_in: controls.expiresIn ?? 3600,
           scope: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/documents', ...controls.extraGrantedScopes].join(' ') });
       }
       if (url.pathname === '/google/openidconnect.googleapis.com/v1/userinfo') return json({ sub: account, email: `${account}@example.test`, email_verified: controls.identityVerified });

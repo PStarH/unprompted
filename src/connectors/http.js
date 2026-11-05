@@ -47,9 +47,9 @@ export async function providerJSON(url, { provider, origin, fetchImpl = globalTh
     return await Promise.race([work(), stopped]);
   } catch (error) {
     if (error instanceof ConnectorError) throw error;
-    // A local run or policy failure is not a network outage. Wrapping it hides
-    // the cause and makes a cancelled draft look like a provider timeout.
-    if (error?.code && !/^(?:E|UND_ERR_|ABORT_)/.test(error.code)) throw error;
+    // Only transport failures are rewritten. Other codes, including local run
+    // and policy errors, keep their original message.
+    if (error?.code && !/^(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|EPIPE|UND_ERR_.+|ABORT_ERR)$/.test(error.code)) throw error;
     if (/exceeds \d+ characters/.test(error.message)) throw new ConnectorError(`${provider} returned too much content for one bounded read.`, { connectorId: provider });
     throw new ConnectorError(`${provider} could not be reached or the request timed out.`, { connectorId: provider, retryable: true, timeout: controller.signal.aborted });
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }

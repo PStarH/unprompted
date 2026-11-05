@@ -129,6 +129,11 @@ export class ArtifactActions {
   authorize({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect }) {
     const task = this.runtime.tasks.get(taskId), request = task?.artifactRequests?.find(item => item.key === key);
     const grant = request && this.grants().find(item => item.id === request.grantId);
+    if (request && grant && grant.status === 'active' && grant.version === request.grantVersion && request.status === 'executing'
+      && request.inputVersion === task.inputVersion && request.privacyEpoch === task.privacyEpoch
+      && request.contextVersion !== Number(this.database.get('context_version'))) {
+      throw Object.assign(fail('The artifact context changed before dispatch.'), { code: 'ARTIFACT_CONTEXT_STALE' });
+    }
     if (!request || !grant || grant.version !== request.grantVersion || request.status !== 'executing' || request.inputVersion !== task.inputVersion
       || request.privacyEpoch !== task.privacyEpoch || request.contextVersion !== Number(this.database.get('context_version'))
       || request.family !== actionFamily || tool !== 'create_artifact' || resourceId !== `${grant.accountId}:${grant.targetId}`
@@ -180,6 +185,20 @@ export class ArtifactActions {
       this.record(task.id, request.id, { status: 'verified', receipt: { ...receipt, status: 'verified' } });
     } catch (error) {
       const execution = this.runtime.ledger.byKey(request.key);
+      const staleContext = request.contextVersion !== Number(this.database.get('context_version'));
+      const notDispatched = !execution || execution.status === 'cancelled' || execution.status === 'intent';
+      if (staleContext && notDispatched && !['dispatched', 'accepted', 'unknown'].includes(execution?.status)) {
+        this.record(task.id, request.id, { status: 'blocked', error: 'The destination authorization changed before dispatch. A new attempt was queued.' });
+        const grant = this.grants().find(item => item.id === request.grantId && item.status === 'active');
+        const current = this.runtime.tasks.get(task.id);
+        if (grant && current && !current.artifactRequests?.some(item => item.grantId === grant.id && item.inputVersion === current.inputVersion && !['blocked', 'undone'].includes(item.status))) {
+          try {
+            this.request(task.id, grant.family === 'email.draft' ? { grantId: grant.id } : { grantId: grant.id, title: request.payload.title, body: request.payload.body },
+              { actor: request.explicit ? 'user' : 'activation', retryInterrupted: true, reviewToken: request.explicit ? draftReviewToken(current) : null });
+          } catch { /* the blocked attempt stays visible for review */ }
+        }
+        return;
+      }
       const uncertain = execution && ['dispatched', 'accepted', 'unknown'].includes(execution.status);
       this.record(task.id, request.id, { status: uncertain ? 'unknown' : 'blocked', error: uncertain
         ? 'The provider outcome needs reconciliation. No automatic repeat was attempted.' : 'Authorization or task context changed. Review the task before trying again.' });

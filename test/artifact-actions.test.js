@@ -15,6 +15,7 @@ import { OpenAiCompatibleReasoner, PiReasoner } from '../src/reasoning.js';
 import { piSupported } from '../src/pi-runtime.js';
 import { LocalSetupStore } from '../src/setup.js';
 import { reminderListId } from '../src/connectors/apple-reminders.js';
+import { parseMailbox } from '../src/connectors/google.js';
 
 const parent = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const json = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
@@ -445,7 +446,10 @@ test('mail drafts accept a display name and reject header injection', async t =>
   for (const [id, recipient, header] of [
     ['google', 'Alex <alex@example.com>', /^To: Alex <alex@example.com>/m],
     ['google', '"Alex Chen" <alex@example.com>', /^To: Alex Chen <alex@example.com>/m],
+    ['google', 'Ann; <alex@example.com>', /^To: "Ann;" <alex@example.com>/m],
+    ['google', '=?UTF-8?B?hi?= <alex@example.com>', /^To: =\?UTF-8\?B\?/m],
     ['google', '陈 <alex@example.com>', null],
+    ['microsoft', 'Ann: Bob <alex@example.com>', null],
     ['microsoft', '陈 <alex@example.com>', null]
   ]) {
     const context = await fixture(t, id);
@@ -463,7 +467,7 @@ test('mail drafts accept a display name and reject header injection', async t =>
     } else {
       const posted = context.connection.writes.at(-1).body.toRecipients[0].emailAddress;
       assert.equal(posted.address, 'alex@example.com');
-      assert.equal(posted.name, '陈');
+      assert.equal(posted.name, parseMailbox(recipient).displayName);
     }
   }
   const context = await fixture(t, 'google');
@@ -471,6 +475,30 @@ test('mail drafts accept a display name and reject header injection', async t =>
   await assert.rejects(provider.create({ title: 'Cedar', body: 'Hello', to: 'Alex <alex@example.com>\r\nBcc: evil@example.com', idempotencyKey: 'inject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
   await assert.rejects(provider.create({ title: 'Cedar\nBcc: evil@example.com', body: 'Hello', to: 'alex@example.com', idempotencyKey: 'inject-subject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
   assert.equal(context.connection.writes.length, 0);
+});
+
+test('a new destination grant does not cancel a queued non-mail artifact', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  const version = Number(context.runtime.database.get('context_version'));
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  assert.equal(Number(context.runtime.database.get('context_version')), version + 1);
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.some(item => item.status === 'verified'), true, JSON.stringify(requests));
+  assert.equal(context.connection.writes.length, 1);
 });
 
 test('a permission refresh retries a draft that was cancelled before dispatch', async t => {

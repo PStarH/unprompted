@@ -167,9 +167,12 @@ export class ArtifactProvider {
       } else if (this.connector.id === 'microsoft') {
         const query = new URLSearchParams({ '$expand': `singleValueExtendedProperties($filter=id eq '${graphProperty}')` });
         const draft = await this.request(`/v1.0/me/messages/${encodeURIComponent(receiptId)}?${query}`, { signal });
+        const expected = mailboxHeader(payload.to);
+        const recipient = draft.toRecipients?.[0]?.emailAddress;
         valid = draft.id === receiptId && draft.isDraft === true && draft.subject === payload.title && draft.body?.content === payload.body
-          && String(draft.body.contentType).toLowerCase() === 'text'           && draft.toRecipients?.length === 1
-          && draft.toRecipients[0].emailAddress?.address?.toLowerCase() === mailboxHeader(payload.to)?.address?.toLowerCase()
+          && String(draft.body.contentType).toLowerCase() === 'text' && draft.toRecipients?.length === 1
+          && recipient?.address?.toLowerCase() === expected?.address?.toLowerCase()
+          && (recipient?.name || '') === (expected?.displayName || '')
           && draft.singleValueExtendedProperties?.some(property => property.id === graphProperty && property.value === markerFor(key));
       } else if (this.connector.id === 'notion') {
         const page = await this.request(`/v1/pages/${encodeURIComponent(receiptId)}`, { signal });

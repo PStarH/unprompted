@@ -313,6 +313,23 @@ test('two Google Docs insertions at the same position keep source order and veri
   assert.equal(applied.readbackVerified, true);
 });
 
+test('a Google Docs readback mismatch names the table and inline-object index caveat', async () => {
+  const connector = { auth: { configured: () => true, headers: async () => ({ authorization: 'Bearer test' }) } };
+  const fetchImpl = async () => {
+    const content = 'Heading\n';
+    const document = {
+      documentId: 'google-doc-1', title: 'Proposal', revisionId: 'revision-1',
+      body: { content: [{ startIndex: 1, endIndex: content.length + 1, paragraph: { elements: [{ textRun: { content } }] } }] }
+    };
+    return { ok: true, status: 200, text: async () => JSON.stringify(document) };
+  };
+  const provider = new GoogleDocsWriteProvider({ connector, enabled: true, shadow: false, fetchImpl });
+  const document = { id: 'google-doc-1', externalId: 'google-doc-1', source: 'google', available: true, content: 'Heading\n', version: 4 };
+  await assert.rejects(provider.apply({
+    document, requiredRevisionId: 'revision-1', changes: [{ type: 'append', text: 'Missing from readback' }]
+  }), /tables and inline objects/);
+});
+
 test('the Google Docs writer refuses a revision mismatch before sending a write', async () => {
   let posts = 0;
   const connector = { auth: { configured: () => true, headers: async () => ({ authorization: 'Bearer test' }) } };

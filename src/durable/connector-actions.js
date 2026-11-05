@@ -55,6 +55,9 @@ export class ConnectorActions {
     });
   }
   covers(grant, task, spec, accountId) {
+    // %2F and %2E decode into slashes and dots, so a prefix check after decoding
+    // would treat a different path as inside the grant.
+    if (typeof spec.path !== 'string' || /%(?:2f|2e)/i.test(spec.path)) return false;
     let path; try { path = decodeURIComponent(spec.path); } catch { return false; }
     return grant.status === 'active' && grant.createdBy === 'user' && grant.confirmedAt && grant.accountId === accountId && grant.connectorId === spec.connectorId
       && grant.methods.includes(spec.method) && hasPrefix(path, grant.pathPrefix) && (!grant.taskId || grant.taskId === task.id) && (!grant.project || grant.project === task.request?.subjectEntity);
