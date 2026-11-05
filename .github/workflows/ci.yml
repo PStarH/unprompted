@@ -35,6 +35,19 @@ jobs:
           npm rebuild better-sqlite3
       - name: Test persistent web installation
         run: node --test test/web-install.test.js test/monitoring.test.js test/sync.test.js
+      - name: Install Windows browser test tooling
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          npm install --prefix "$env:RUNNER_TEMP/unprompted-browser" --no-package-lock --ignore-scripts --no-audit --no-fund playwright@1.58.2
+          $module = Join-Path $env:RUNNER_TEMP 'unprompted-browser/node_modules/playwright/index.mjs'
+          $moduleUrl = node --input-type=module -e "import {pathToFileURL} from 'node:url'; console.log(pathToFileURL(process.argv[1]).href);" $module
+          "UNPROMPTED_PLAYWRIGHT_MODULE=$moduleUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Test Windows browser first run
+        if: runner.os == 'Windows'
+        env:
+          UNPROMPTED_BROWSER_CHANNEL: chrome
+        run: npm run test:first-run
   test:
     name: Tests and evaluations
     strategy:

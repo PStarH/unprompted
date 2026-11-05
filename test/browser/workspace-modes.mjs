@@ -28,7 +28,13 @@ try {
   check('field-is-default-and-task-details-stay-closed-until-a-card-is-selected');
   const id = await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task');
   const input = () => page.locator('#taskContent [data-direction-input]');
+  const taskSection = async name => {
+    const en = { '概览': 'Overview', '来源依据': 'Evidence', '跟进设置': 'Follow-up' };
+    const label = await page.locator('html').getAttribute('lang') === 'en' ? en[name] : name;
+    await page.locator('.ws-task-page .detail-focus-navigation').getByRole('tab', { name: label, exact: true }).click();
+  };
   const openDirection = async () => {
+    await taskSection('概览');
     const disclosure = page.locator('#taskContent [data-direction-disclosure]');
     if (await disclosure.count() && !await disclosure.evaluate(node => node.open)) {
       await disclosure.locator('summary').click();
@@ -38,6 +44,7 @@ try {
   const modes = ['field', 'index', 'lanes', 'spotlight', 'pulse'];
   const switchMode = async mode => {
     await page.locator('[data-view="preferences"]').click();
+    await page.locator('#viewPreferences .page-focus-navigation').getByRole('tab', { name: /^(工作台|Workspace)$/ }).click();
     await page.selectOption('#workspaceViewOptions', mode);
     await page.locator('[data-view="home"]').click();
   };
@@ -50,12 +57,12 @@ try {
   assert.equal(await page.locator('#taskContent [data-snooze], #snoozedSummary').count(), 0);
   const followUpSettings = page.locator('#taskContent details[data-preserve^="ws-management-"]');
   assert.equal(await followUpSettings.count(), 1);
-  assert.equal(await followUpSettings.evaluate(node => node.open), false);
-  await followUpSettings.locator('summary').click();
+  await taskSection('跟进设置');
+  assert.equal(await followUpSettings.evaluate(node => node.open), true);
   assert.equal(await followUpSettings.locator('[data-wait-form]').count(), 1);
   const evidenceDetails = page.locator('#taskContent details[data-preserve^="full-evidence-"]');
   assert.match(await evidenceDetails.locator('summary').innerText(), /要求与来源依据/);
-  await evidenceDetails.locator('summary').click();
+  await taskSection('来源依据');
   assert.match(await evidenceDetails.innerText(), /原始请求的要求.*来源中的对应内容/);
   check('one-task-page-keeps-evidence-and-follow-up-settings-without-a-duplicate-record-dialog-or-snooze');
   await openDirection();
@@ -69,6 +76,7 @@ try {
   assert.equal((await state()).outbox.length, 0);
   check('five-views-share-selection-and-drafts');
   await switchMode('field');
+  await taskSection('来源依据');
   await page.locator('#taskContent [data-task-context="sources"]').click();
   await page.locator('#taskContextDialog[open] .ws-source-reference').first().waitFor();
   assert.equal(await page.locator('#taskContent details.ws-sources').count(), 0);
@@ -76,6 +84,7 @@ try {
   await page.waitForFunction(() => !document.querySelector('#taskContextDialog').open);
   assert.equal(await input().inputValue(), '这段方向仍未提交：请包含预算明细。');
   assert.equal(await page.evaluate(() => document.activeElement.dataset.taskContext), 'sources');
+  await openDirection();
   await page.locator('#taskContent .ws-composer [data-task-context="memory"]').click();
   assert.equal(await page.locator('#taskContextDialog [data-memory-scope="task"]').getAttribute('aria-pressed'), 'true');
   await page.locator('#taskContextDialog [data-memory-scope="task"]').click();
@@ -83,6 +92,7 @@ try {
   assert.equal(await input().inputValue(), '这段方向仍未提交：请包含预算明细。');
   assert.equal(await page.evaluate(() => Boolean(document.activeElement.closest('.ws-composer'))), true);
   check('sources-and-memory-open-in-dialogs-and-return-to-the-same-draft-and-focus');
+  await openDirection();
   await page.locator('#taskContent .ws-composer [data-task-context="memory"]').click();
   await page.locator('#taskContextDialog [data-memory-scope="task"]').click();
   await page.waitForFunction(() => !document.querySelector('#taskContextDialog').open);
@@ -110,6 +120,7 @@ try {
   await page.waitForFunction(() => !document.querySelector('#taskContent .ws-direction-receipt'));
   check('direction-replans-invalidates-old-draft-and-undo-restores-without-memory');
   await input().fill('Include a budget breakdown.');
+  await openDirection();
   await page.locator('#taskContent .ws-composer [data-task-context="memory"]').click();
   await page.locator('#taskContextDialog [data-memory-scope="similar"]').click();
   await page.locator('#taskContent .ws-composer button[type="submit"]').click();
@@ -184,7 +195,8 @@ try {
         responsive.push({ width, language, mode });
         if (language === 'en' && [390, 1440].includes(width)) await page.screenshot({ path: `${output}/${mode}-${width}.png`, fullPage: true, animations: 'disabled' });
       }
-      await page.locator('#taskContent [data-task-context="sources"]').click();
+      await taskSection('来源依据');
+  await page.locator('#taskContent [data-task-context="sources"]').click();
       const bounds = await page.locator('#taskContextDialog').boundingBox();
       assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1);
       await page.keyboard.press('Escape');
@@ -312,6 +324,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await switchMode('field');
   await page.locator('[data-view="preferences"]').click();
+  await page.locator('#viewPreferences .page-focus-navigation').getByRole('tab', { name: /^(工作台|Workspace)$/ }).click();
   await page.selectOption('#workspaceViewOptions', 'index');
   assert.equal(await page.locator('#taskContent').getAttribute('data-mode'), 'index');
   await page.locator('[data-view="home"]').click();

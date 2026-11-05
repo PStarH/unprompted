@@ -1,3 +1,4 @@
+import { revealPanel } from './navigation.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { startFixtureServer } from './fixture-server.mjs';
@@ -65,7 +66,7 @@ try {
  record('shared-answer-and-selection-survive-live-update');
  await page.locator('#taskContent [data-select-task="human-a"]').click();
  const settings=page.locator('#taskContent details[data-preserve^="ws-management-"]');
- await settings.locator(':scope > summary').click();
+ await page.locator('.ws-task-page .detail-focus-navigation').getByRole('tab', { name: '跟进设置', exact: true }).click();
  const wait=page.locator('#taskContent [data-wait-form="human-a"]');
  await wait.locator('select').selectOption('time');
  await wait.locator('input').fill('2026-10-29T15:45');
@@ -77,7 +78,7 @@ try {
  assert.equal(await wait.locator('input').evaluate(el=>document.activeElement===el),true);
  record('wait-draft-and-focus-survive-live-update');
  const detail=page.locator('#taskContent details[data-preserve^="full-evidence-"]');
- await detail.locator(':scope > summary').click();
+ assert.equal(await detail.evaluate(el=>el.open),true);
  const note=page.locator('#taskContent [data-reason-for="human-a"]');
  await note.fill('还在输入中文');
  await note.dispatchEvent('compositionstart',{data:'输入'});
@@ -93,9 +94,10 @@ try {
  assert.equal(await page.locator('#taskContent .ws-inspector').count(),0);
  assert.equal(await page.evaluate(()=>document.activeElement.dataset.selectTask),'human-a');
  record('closing-task-page-restores-task-focus');
- const order=[await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task')];
  await emit(s=>{s.tasks[1].management.priority.score=120; s.tasks.push(make('human-new',150));});
- assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'),'human-a');
+ assert.equal(await page.locator('#taskContent [data-inspector-task]').count(),0,'Live updates must not reopen a closed task');
+ await page.locator('#taskContent [data-select-task="human-a"]').click();
+ const order=[await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task')];
  for(const expected of ['human-b','human-new']){
   await page.locator('#taskContent [data-task-step="1"]').click();
   assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'),expected);
@@ -109,6 +111,7 @@ try {
  ready.management.nextAction={kind:'approve'};
  await emit(s=>{s.tasks.push(ready);});
  await page.locator('#taskContent [data-close-inspector]').click();
+ await page.locator('#field-panel-attention-tab').click();
  await page.locator('#taskContent [data-select-task="human-ready"]').click();
  assert.equal(await page.locator('#viewAttention').isVisible(),false);
  assert.equal(await page.locator('#viewHome').isVisible(),true);
@@ -154,7 +157,8 @@ try {
  await emit(s=>{s.history.unshift({id:'record-task-entry',at:new Date().toISOString(),kind:'verification',text:'已核对任务来源',detail:'从日志进入对应任务',taskId:'human-a'});});
  await page.locator('[data-view="activity"]').click();
  const recordEntry=page.locator('#eventContent details.trace-event').filter({has:page.locator('[data-select-task="human-a"]')});
- await recordEntry.locator('summary').click();
+ await revealPanel(page, recordEntry.locator(':scope > summary'));
+ await recordEntry.locator(':scope > summary').click();
  await recordEntry.locator('[data-select-task="human-a"]').click();
  assert.equal(await page.locator('#viewHome').isVisible(),true);
  assert.equal(await page.locator('#taskContent [data-inspector-task="human-a"]').count(),1);
@@ -162,7 +166,7 @@ try {
  record('activity-record-opens-the-selected-standalone-task-page');
  await page.keyboard.press('Escape');
  await page.locator('#taskContent [data-select-task="human-a"]').click();
- await page.locator('#taskContent details[data-preserve^="full-evidence-"] > summary').click();
+ await page.locator('.ws-task-page .detail-focus-navigation').getByRole('tab', { name: '来源依据', exact: true }).click();
  assert.equal(await page.locator('#taskContent details[data-preserve^="full-evidence-"]').evaluate(el=>el.open),true);
  assert.equal(await page.locator('#evidencePeek').isVisible(),false);
  assert.match(await page.locator('#taskContent details[data-preserve^="full-evidence-"]').innerText(),/原始请求的要求/);

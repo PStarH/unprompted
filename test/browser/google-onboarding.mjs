@@ -1,5 +1,6 @@
 // Actual browser + product server + loopback OAuth callback. Google and model
 // responses are explicitly scripted HTTP fixtures, not live account validation.
+import { revealPanel } from './navigation.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { startGoogleFixture } from '../fixtures/google-workspace.mjs';
@@ -73,6 +74,7 @@ try {
   await page.locator('#taskContent [data-close-inspector]').click();
   await initial.locator('[data-go="sources"]').click();
   const settings = page.locator('#setupContent');
+  await revealPanel(page, settings.locator('[data-preserve="google-write-access"] > summary'));
   await settings.locator('[data-preserve="google-write-access"] > summary').click();
   await settings.locator('[name="gmailSend"]').check();
   await grantFrom(settings.locator('[data-preserve="google-write-access"] [data-scope-form] button[type="submit"]'));
@@ -85,6 +87,7 @@ try {
   const googleDraftScope = page.locator('#artifactPermissions [data-artifact-scope="google"]');
   assert.equal(await googleDraftScope.locator('[name="additionalScopes"]').inputValue(), additionalScope);
   record('google-draft-and-send-reauthorization-preserve-additional-scopes');
+  await revealPanel(page, page.locator('#observationContent [name="enabled"]'));
   await page.locator('#observationContent [name="enabled"]').uncheck();
   await page.locator('#observationContent [data-monitor-form] button[type="submit"]').click();
   await page.waitForFunction(() => document.querySelector('#observationContent')?.textContent.includes('Automatic checks paused'));
@@ -92,6 +95,7 @@ try {
   await page.locator('#observationContent [data-monitor-form]').waitFor();
   assert.equal(await page.locator('#observationContent [name="enabled"]').isChecked(), false);
   record('pause-survives-reload-and-retains-the-last-check');
+  await revealPanel(page, page.locator('#connectorContent [data-inspect-connection="google"]'));
   await page.locator('#connectorContent [data-inspect-connection="google"]').click();
   await settings.locator('[data-preserve="google-diagnostics"] > summary').click();
   const cancelledPopup = page.waitForEvent('popup');

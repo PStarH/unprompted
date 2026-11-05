@@ -1,3 +1,4 @@
+import { revealPanel } from './navigation.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { startFixtureServer } from './fixture-server.mjs';
@@ -18,8 +19,9 @@ try {
   await page.waitForFunction(() => !document.querySelector('#durableDialog').open);
   await page.locator('.memory-inspector').waitFor();
   assert.match(await page.locator('.memory-inspector').innerText(), /Weekly notes: results first/);
-  assert.equal(await page.locator('.memory-space-node[aria-pressed="true"]').count(), 1);
+  assert.equal(await page.locator('.memory-result-open[aria-pressed="true"]').count(), 1);
   checks.push('grounded memory can be saved directly in the persistent workspace');
+  await revealPanel(page, page.locator('[data-durable-add="policy"]'));
   await page.locator('[data-durable-add="policy"]').click();
   await page.locator('#durableDialog [name=identity]').fill('alex@example.test');
   await page.locator('#durableDialog [name=confirmed]').check();
@@ -31,6 +33,8 @@ try {
   await page.locator('#policyContent [data-policy-disable]').click();
   await page.waitForFunction(() => !document.querySelector('#policyContent [data-policy-disable]'));
   checks.push('a rule can be stopped with one click');
+  await revealPanel(page, page.locator('.memory-inspector .memory-actions-menu > summary'));
+  await page.locator('.memory-inspector .memory-actions-menu > summary').click();
   await page.locator('.memory-inspector [data-forget-kind="memory"]').click();
   await page.locator('#durableDialog[open] form[data-durable-form="forget"]').waitFor();
   await page.locator('#durableDialog [type=submit]').click();
@@ -40,6 +44,7 @@ try {
   assert.match(await page.locator('.memory-empty').innerText(), /No saved memories yet/);
   checks.push('Forget previews dependencies and actually removes a saved memory');
   await page.goto(fixture.base + '/#preferences');
+  await revealPanel(page, page.locator('[data-attention-settings] [name=hourly]'));
   await page.locator('[data-attention-settings] [name=hourly]').fill('2');
   await page.locator('[data-attention-settings] [name=interval]').fill('15');
   await page.locator('[data-attention-settings] [name=quietStart]').fill('22');
@@ -78,6 +83,7 @@ try {
   assert.match(stateAfterEdit.tasks.find(task => task.id === taskId).draft.body, /User clarification/);
   assert.equal(stateAfterEdit.outbox.length, 0);
   checks.push('the actual task inspector edits a versioned draft without sending');
+  await revealPanel(page, page.locator('#taskContent [data-task-context="sources"]').first());
   await page.locator('#taskContent [data-task-context="sources"]').first().click();
   await page.locator('#taskContextDialog [data-forget-kind="task"]').click();
   await page.locator('#durableDialog [type=submit]').click();

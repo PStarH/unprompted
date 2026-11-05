@@ -279,7 +279,7 @@ test('built-in MCP presets offer Fetch, hosted sign-in, and API-key search', t =
   assert.equal(fetchPreset.auth, 'none');
   assert.equal(fetchPreset.connection.type, 'stdio');
   assert.equal(fetchPreset.connection.command, process.execPath);
-  assert.ok(!JSON.stringify(fetchPreset.connection).includes('/Users/sampan'));
+  assert.equal(fetchPreset.connection.args[0], fileURLToPath(new URL('../src/mcp-fetch-server.js', import.meta.url)));
   const searchPreset = status.presets.find(item => item.id === 'brave-search');
   assert.equal(searchPreset.defaultEnabled, false);
   assert.equal(searchPreset.requiresAuth, true);
@@ -385,13 +385,12 @@ test('an oversized MCP tool page stays connected and keeps the prefix that fits'
 });
 
 test('saved Fetch configs that point at another machine are rewritten to this process', () => {
-  const saved = { type: 'stdio', command: '/Users/sampan/.nvm/versions/node/v22.14.0/bin/node', args: ['/Users/sampan/Documents/GitHub/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true };
+  const saved = { type: 'stdio', command: '/old-machine/runtime/node', args: ['/old-machine/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true };
   const manager = new McpManager({ configStore: { get: () => ({ fetch: saved }) }, executableLookup: () => null });
   assert.equal(manager.configs.fetch.command, process.execPath);
   assert.ok(fs.existsSync(manager.configs.fetch.args[0]));
   assert.ok(manager.configs.fetch.args[0].endsWith(`${path.sep}src${path.sep}mcp-fetch-server.js`));
-  assert.equal(JSON.stringify(manager.configs.fetch).includes('/Users/sampan'), false);
-  assert.equal(JSON.stringify(manager.configs.fetch).includes('.nvm'), false);
+  assert.equal(manager.configs.fetch.args[0], fileURLToPath(new URL('../src/mcp-fetch-server.js', import.meta.url)));
   const legacy = new McpManager({ configStore: { get: () => ({ fetch: { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'], enabled: false, allowDeclaredRead: true } }) }, executableLookup: () => null });
   assert.equal(legacy.configs.fetch.command, process.execPath);
   assert.ok(!legacy.configs.fetch.args.includes('mcp-server-fetch'));
