@@ -86,7 +86,7 @@ export class ArtifactActions {
     const activation = this.runtime.activationFor(task);
     if (!activation.activate || !explicit && (activation.requiresReview || task.guidanceReviewRequired || !grant.automatic)) throw fail('This task requires individual review before creating an artifact.');
   }
-  request(taskId, input, { actor = 'harness', isCurrent = () => false, reviewToken = null } = {}) {
+  request(taskId, input, { actor = 'harness', isCurrent = () => false, reviewToken = null, retryInterrupted = false } = {}) {
     if (!knownKeys(input, ['grantId', 'title', 'body']) || !text(input.grantId, 80)) throw fail('Invalid artifact request.', 'INVALID_ARTIFACT', 400);
     const task = this.runtime.tasks.get(taskId), grant = this.grants().find(item => item.id === input.grantId);
     if (!task) throw fail('Task not found.', 'MISSING_TASK', 404);
@@ -105,8 +105,11 @@ export class ArtifactActions {
       if (input.title != null || input.body != null) throw fail('Mail drafts use the current task reply.', 'INVALID_ARTIFACT', 400);
     } else payload = { title: input.title, body: input.body };
     if (!text(payload.title, 500) || /[\r\n]/.test(payload.title) || !text(payload.body, 64000)) throw fail('Supply a title and 1–64,000 characters of content.', 'INVALID_ARTIFACT', 400);
-    const prior = (task.artifactRequests || []).find(item => item.grantId === grant.id && item.inputVersion === task.inputVersion);
-    if (prior && !(explicit && prior.status === 'blocked' && !['dispatched', 'accepted', 'unknown', 'verified'].includes(this.runtime.ledger.byKey(prior.key)?.status))) return publicRequest(prior);
+    const related = (task.artifactRequests || []).filter(item => item.grantId === grant.id && item.inputVersion === task.inputVersion);
+    const prior = related.find(item => !['blocked', 'undone'].includes(item.status)) || related.at(-1);
+    const executionStatus = prior ? this.runtime.ledger.byKey(prior.key)?.status : null;
+    const interrupted = prior?.status === 'blocked' && !['dispatched', 'accepted', 'unknown', 'verified'].includes(executionStatus);
+    if (prior && !(explicit && interrupted) && !(retryInterrupted && interrupted)) return publicRequest(prior);
     if ((task.artifactRequests || []).length >= 50) throw fail('This task reached its artifact limit.', 'ARTIFACT_LIMIT', 400);
     const id = randomUUID(), key = `artifact:${id}`;
     const request = { id, key, grantId: grant.id, grantVersion: grant.version, accountId: grant.accountId, targetId: grant.targetId,
@@ -230,10 +233,10 @@ export class ArtifactActions {
     if (!provider || execution.privacy_redacted || provider.kind !== execution.provider) return null;
     return { lookup: (key, options) => provider.lookup(key, { ...options, payload: request.payload }) };
   }
-  schedulePrepared(task) {
+  schedulePrepared(task, { retryInterrupted = false } = {}) {
     if (task.status !== 'ready_for_approval' || !task.draft || task.draft.userEdited || task.action) return;
     for (const grant of this.grants().filter(item => item.family === 'email.draft' && item.automatic && this.covers(item, task))) {
-      try { this.request(task.id, { grantId: grant.id }, { actor: 'activation' }); } catch { }
+      try { this.request(task.id, { grantId: grant.id }, { actor: 'activation', retryInterrupted }); } catch { }
     }
   }
   tools({ taskId, isCurrent = () => false } = {}) {

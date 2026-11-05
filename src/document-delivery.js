@@ -187,14 +187,6 @@ export class LocalDocumentProvider {
   }
 }
 
-function googleInsertion(document, content, change) {
-  if (!document?.body?.content?.length) throw new Error('Google Docs did not return an editable document body.');
-  const { index } = insertionAt(content, change);
-  // The default Google Docs body starts at index 1; JavaScript string offsets
-  // therefore map to Docs API indexes by adding one (UTF-16 in both APIs).
-  return index + 1;
-}
-
 /**
  * Explicitly enabled Google Docs writer. It is deliberately separate from the
  * mail provider and requires its own documents/drive.file OAuth scope. Writes
@@ -307,16 +299,19 @@ export class GoogleDocsWriteProvider {
       error.stale = true;
       throw error;
     }
-    const grouped = new Map();
-    for (const change of changes) {
-      const index = googleInsertion(current.raw, current.content, change);
-      const { text } = insertionAt(current.content, change);
-      if (!grouped.has(index)) grouped.set(index, []);
-      grouped.get(index).push(text);
+    if (!current.raw?.body?.content?.length) throw new Error('Google Docs did not return an editable document body.');
+      // batchUpdate applies requests in order, and each index is in the document
+      // produced by earlier requests in the same batch. The Docs body is 1-based
+      // UTF-16, matching these JavaScript offsets plus one. Computing every index
+      // against the original text, then reversing same-position inserts, writes
+      // the quotes in the wrong order and fails the readback check.
+      const requests = [];
+      let simulated = normaliseNewlines(current.content);
+      for (const change of changes) {
+        const { index, text } = insertionAt(simulated, change);
+        requests.push({ insertText: { location: { index: index + 1 }, text } });
+      simulated = simulated.slice(0, index) + text + simulated.slice(index);
     }
-    const requests = [...grouped.entries()]
-      .sort(([a], [b]) => b - a)
-      .map(([index, texts]) => ({ insertText: { location: { index }, text: texts.reverse().join('') } }));
     let accepted = false;
     const expectedContent = applyTextChanges(current.content, changes);
     try {

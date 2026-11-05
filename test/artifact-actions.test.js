@@ -440,3 +440,52 @@ test('undo leaves an artifact the user changed and refuses targets without autom
   const note = notes.runtime.tasks.get(notes.taskId).artifactRequests[0];
   await assert.rejects(notes.runtime.artifacts.undo(notes.taskId, note.id), error => error.code === 'UNDO_UNSUPPORTED');
 });
+
+test('mail drafts accept a display name and reject header injection', async t => {
+  for (const [id, recipient, header] of [
+    ['google', 'Alex <alex@example.com>', /^To: Alex <alex@example.com>/m],
+    ['google', '"Alex Chen" <alex@example.com>', /^To: Alex Chen <alex@example.com>/m],
+    ['google', '陈 <alex@example.com>', null],
+    ['microsoft', '陈 <alex@example.com>', null]
+  ]) {
+    const context = await fixture(t, id);
+    context.store.mutate(state => { state.tasks[context.taskId].draft.to = recipient; });
+    const task = context.runtime.tasks.get(context.taskId);
+    context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id }, { actor: 'user', reviewToken: draftReviewToken(task) });
+    await context.engine.whenSettled();
+    const artifact = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+    assert.equal(artifact.status, 'verified', `${id} ${recipient}`);
+    if (id === 'google') {
+      const raw = Buffer.from(context.connection.writes.at(-1).body.message.raw, 'base64url').toString('utf8');
+      if (header) assert.match(raw, header);
+      else assert.match(raw, /=\?UTF-8\?B\?/);
+      assert.doesNotMatch(raw, /\r\nBcc:/);
+    } else {
+      const posted = context.connection.writes.at(-1).body.toRecipients[0].emailAddress;
+      assert.equal(posted.address, 'alex@example.com');
+      assert.equal(posted.name, '陈');
+    }
+  }
+  const context = await fixture(t, 'google');
+  const provider = new ArtifactProvider(context.connection, 'drafts');
+  await assert.rejects(provider.create({ title: 'Cedar', body: 'Hello', to: 'Alex <alex@example.com>\r\nBcc: evil@example.com', idempotencyKey: 'inject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
+  await assert.rejects(provider.create({ title: 'Cedar\nBcc: evil@example.com', body: 'Hello', to: 'alex@example.com', idempotencyKey: 'inject-subject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a permission refresh retries a draft that was cancelled before dispatch', async t => {
+  const context = await fixture(t, 'google');
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  await context.engine.whenSettled();
+  const task = context.runtime.tasks.get(context.taskId);
+  assert.equal(task.artifactRequests[0].status, 'verified');
+  context.store.mutate(state => { state.tasks[context.taskId].artifactRequests[0].status = 'blocked'; });
+  context.store.db.prepare("UPDATE tool_executions SET status='cancelled', last_error_class='confirmed_no_effect' WHERE idempotency_key=?").run(task.artifactRequests[0].key);
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests.length, 1, 'an ordinary reassessment does not repeat a blocked draft');
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId), { retryInterrupted: true });
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].status, 'verified');
+});

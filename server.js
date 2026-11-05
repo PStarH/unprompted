@@ -390,15 +390,22 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
   } finally { workspaceChanging = false; }
 }
 
-async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null } = {}) {
+async function applyConnectedSources({ observe = localSetup.get().monitoring.enabled, request = null, disconnected = null, initialRead = true, refreshSource = null, reassess = true } = {}) {
   if (workspaceChanging || modelSetupBusy) throw new Error('A connection update is already running.');
   workspaceChanging = true;
   if (durableRuntime) durableRuntime.suspended = true;
+  const heldPolicy = engine.policy;
+  const previousShadow = heldPolicy.shadow;
+  let installed = false;
   try {
-    monitoring.stop(); simulation.stop(); engine.policy.shadow = true;
+    monitoring.stop(); simulation.stop();
+    // Let a prepared action finish under the policy that authorized it.
+    // Flipping shadow first cancels that request before the new grant exists.
     await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
     await monitoring.whenIdle(); await engine.whenSettled();
+    await durableRuntime?.whenIdle();
     if (shutdownPromise) throw new Error('The application is shutting down.');
+    heldPolicy.shadow = true;
     // Remove revoked local evidence before rebuilding the active sources.
     for (const id of NATIVE_SOURCE_IDS) {
       const saved = localSetup.getNativeSource(id), cursor = store.state.cursors?.[id];
@@ -456,19 +463,32 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     googleConnector = runtime.connectors.find(connector => connector.id === 'google') || null;
     documentProvider = googleConnector ? new GoogleDocsWriteProvider({ connector: googleConnector,
       enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: runtime.shadow }) : null;
+    // Task services captured the policy object at startup. Replacing only
+    // engine.policy left Google Docs writes on the drained read-only policy.
+    runtime.policy.temporaryAuthorization = heldPolicy.temporaryAuthorization;
     engine.provider = runtime.provider; engine.policy = runtime.policy; engine.mode = runtime.mode;
-    engine.documentProvider = documentProvider; engine.taskServices.documentProvider = documentProvider;
+    engine.documentProvider = documentProvider;
+    engine.taskServices.policy = runtime.policy;
+    engine.taskServices.provider = runtime.provider;
+    engine.taskServices.mode = runtime.mode;
+    engine.taskServices.documentProvider = documentProvider;
+    installed = true;
     runSimulation = false;
     sync = new ConnectorSync({ connectors: runtime.connectors, cursors: runtime.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
     monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
     store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
-    for (const task of Object.values(store.state.tasks)) if (!task.action && !['completed', 'cancelled'].includes(task.status)) engine.assess(task.id, null, { force: true, allowAutomation: false });
+    // A permission refresh must not rebuild a reply that is already prepared.
+    // That new object cancels the draft request queued for the new destination.
+    if (reassess) for (const task of Object.values(store.state.tasks)) if (!task.action && !['completed', 'cancelled'].includes(task.status)) engine.assess(task.id, null, { force: true, allowAutomation: false });
     engine.changed();
     if (runtime.live) {
       await monitoring.setSettings({ enabled: observe === true });
       if (!observe && initialRead) void monitoring.runNow();
     } else await monitoring.setSettings({ enabled: false });
     return publicSetupStatus();
+  } catch (error) {
+    if (!installed) heldPolicy.shadow = previousShadow;
+    throw error;
   } finally { workspaceChanging = false; if (durableRuntime) { durableRuntime.suspended = false; durableRuntime.kick(); } }
 }
 
@@ -727,12 +747,20 @@ async function handleHttpRequest(req, res) {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'Invalid artifact request.' });
         if (url.pathname === '/api/artifact-grants') {
           if (process.env.UNPROMPTED_SHADOW_MODE === 'true') return json(res, 403, { error: 'The launch environment explicitly requires read-only mode.', code: 'SHADOW_MODE' });
-          const grant = await durableRuntime.artifacts.createGrant(body, { actor: 'user', confirmed: body.confirmed === true });
-          localSetup.setArtifactWrites(true);
-          await applyConnectedSources({ request: req, initialRead: false });
-          engine.investigateWithTools();
-          for (const task of Object.values(store.state.tasks)) durableRuntime.artifacts.schedulePrepared(task);
-          return json(res, 200, { grant, setup: publicSetupStatus(), state: engine.publicState() });
+          if (durableRuntime) durableRuntime.suspended = true;
+          try {
+            await durableRuntime.whenIdle();
+            await engine.whenSettled();
+            const grant = await durableRuntime.artifacts.createGrant(body, { actor: 'user', confirmed: body.confirmed === true });
+            localSetup.setArtifactWrites(true);
+            await applyConnectedSources({ request: req, initialRead: false, reassess: false });
+            for (const task of Object.values(store.state.tasks)) durableRuntime.artifacts.schedulePrepared(task, { retryInterrupted: true });
+            // A new tool investigation starts its own task run. Let the prepared
+            // draft dispatch first so that run does not cancel it.
+            await durableRuntime.whenIdle();
+            engine.investigateWithTools();
+            return json(res, 200, { grant, setup: publicSetupStatus(), state: engine.publicState() });
+          } finally { if (durableRuntime?.suspended) { durableRuntime.suspended = false; durableRuntime.kick(); } }
         }
         const revoke = url.pathname.match(/^\/api\/artifact-grants\/([^/]+)\/revoke$/);
         if (revoke) {
@@ -845,11 +873,16 @@ async function handleHttpRequest(req, res) {
         try {
           if (url.pathname === '/api/connector-grants') {
             if (process.env.UNPROMPTED_SHADOW_MODE === 'true') return json(res, 403, { error: 'The launch environment requires read-only mode.' });
-            const grant = durableRuntime.connectorActions.createGrant(body, { actor: 'user' });
-            localSetup.setArtifactWrites(true);
-            await applyConnectedSources({ request: req, initialRead: false });
-            engine.investigateWithTools();
-            return json(res, 200, { grant, setup: publicSetupStatus() });
+            if (durableRuntime) durableRuntime.suspended = true;
+            try {
+              await durableRuntime.whenIdle();
+              await engine.whenSettled();
+              const grant = durableRuntime.connectorActions.createGrant(body, { actor: 'user' });
+              localSetup.setArtifactWrites(true);
+              await applyConnectedSources({ request: req, initialRead: false, reassess: false });
+              engine.investigateWithTools();
+              return json(res, 200, { grant, setup: publicSetupStatus() });
+            } finally { if (durableRuntime?.suspended) { durableRuntime.suspended = false; durableRuntime.kick(); } }
           }
           const revoke = url.pathname.match(/^\/api\/connector-grants\/([^/]+)\/revoke$/);
           if (revoke) { durableRuntime.connectorActions.revoke(decodeURIComponent(revoke[1])); return json(res, 200, { setup: publicSetupStatus() }); }
@@ -881,7 +914,7 @@ async function handleHttpRequest(req, res) {
           ? await mcp.import(body.config, { allowDeclaredRead: body.allowDeclaredRead === true })
           : await mcp.update(decodeURIComponent(url.pathname.split('/').pop()), body);
         if (Array.isArray(body.writeTools) && body.writeTools.length) {
-          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false }); }
+          if (process.env.UNPROMPTED_SHADOW_MODE !== 'true') { localSetup.setArtifactWrites(true); await applyConnectedSources({ request: req, initialRead: false, reassess: false }); }
         }
         engine.investigateWithTools();
         return json(res, 200, { mcp: result, setup: publicSetupStatus() });

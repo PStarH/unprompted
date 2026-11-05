@@ -95,7 +95,7 @@ function assertNoHeaderBreak(value, label) {
 }
 
 /** Parse exactly one mailbox: `address` or `Display Name <address>`. */
-function parseMailbox(value) {
+export function parseMailbox(value) {
   const raw = String(value ?? '').trim();
   if (!raw) throw new ConnectorError('A recipient address is required.', { connectorId: 'google' });
   assertNoHeaderBreak(raw, 'The recipient address');
@@ -136,7 +136,7 @@ function encodeHeaderValue(value, { maxBytes = 45 } = {}) {
   return words.join('\r\n ');
 }
 
-function formatMailbox({ address, displayName }) {
+export function formatMailbox({ address, displayName }) {
   if (!displayName) return address;
   const ascii = /^[\x20-\x7e]*$/.test(displayName);
   const rendered = ascii
@@ -1138,4 +1138,4 @@ export function googleConfigFromEnv(env = process.env) {
   };
 }
 
-export const googleApi = { GoogleAuth, GoogleWorkspaceConnector, googleConfigFromEnv };
+export const googleApi = { GoogleAuth, GoogleWorkspaceConnector, googleConfigFromEnv, parseMailbox, formatMailbox };
