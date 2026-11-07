@@ -23,7 +23,7 @@ authorized source → observed change → evidence check → prepared work
 
 ## Current limits
 
-The app is one person, one machine, one process. It binds to `127.0.0.1` and has no login. The local database, tokens, and model keys are not encrypted. A source starts read-only. Sending, drafts, and other writes stay off until you grant them. [Permissions and privacy](permissions.md) states the boundary. [Connectors](connectors.md) states what each source can do.
+The app is one person, one machine, one process. It binds to `127.0.0.1` and has no login. OAuth tokens, model keys, and connector credentials are encrypted at rest. The workspace database that holds synced mail and documents is not. A source starts read-only. Sending, drafts, and other writes stay off until you grant them. [Permissions and privacy](permissions.md) states the boundary. [Connectors](connectors.md) states what each source can do.
 
 Normal startup does not insert sample tasks. `npm run demo` is a separate disposable simulation. It does not use saved accounts.
 

@@ -128,9 +128,10 @@ completion criteria or execute source writes on their own. Text returned by a
 tool can be sent to the configured model and retained in the private task record.
 
 Credentials and sign-in tokens stay in the private `mcp.json` next to local
-setup, with mode `0600`. The API never returns commands, arguments, environment
-values, headers, or tokens. This file is not encrypted. Replacing a server's
-config uses the same server name.
+setup, with mode `0600`, and are encrypted at rest. The API never returns
+commands, arguments, environment values, headers, or tokens. Replacing a
+server's config uses the same server name. See
+[secrets at rest](CONFIGURATION.md#secrets-at-rest).
 The implementation uses the [official MCP TypeScript client](https://github.com/modelcontextprotocol/typescript-sdk).
 
 ## Local sources

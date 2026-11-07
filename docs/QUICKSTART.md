@@ -84,8 +84,9 @@ Pause observation or run **Check now** from Connections whenever you want.
 
 Sources start read-only. Google sending and document edits require separate
 permissions; other listed connectors do not send or edit. A configured model
-provider can receive the selected source content. Local state contains source
-content and is not encrypted. Review [data handling](CONFIGURATION.md#what-stays-on-your-machine)
+provider can receive the selected source content. Credentials are encrypted
+at rest. The local workspace still contains source content and is not
+encrypted. Review [secrets at rest](CONFIGURATION.md#secrets-at-rest)
 before connecting sensitive work.
 
 For source permissions, limits and account setup, read [Connectors](CONNECTORS.md)

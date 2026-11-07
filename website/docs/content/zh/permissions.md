@@ -42,7 +42,7 @@ YOLO 是已保存的用户授权，不是模型决定。模型响应或工具参
 | Linux | `${XDG_CONFIG_HOME:-~/.config}/unprompted` |
 | Windows | `%APPDATA%\Unprompted` |
 
-`UNPROMPTED_CONFIG_DIR` 选择其他目录；`UNPROMPTED_SETUP_FILE` 指定具体文件。POSIX 系统上目录权限为 `0700`，设置、模型和 MCP 文件在支持时为 `0600`。**工作区和凭据未加密。** 请使用全盘加密和私人账号。
+`UNPROMPTED_CONFIG_DIR` 选择其他目录；`UNPROMPTED_SETUP_FILE` 指定具体文件。POSIX 系统上目录权限为 `0700`，设置、模型和 MCP 文件在支持时为 `0600`。**凭据在本机加密保存。工作区数据库不加密。** 请使用全盘加密和私人账号。以同一系统用户运行的进程仍能读到密钥。
 
 已连接的云来源会联系其服务商。启用的模型会联系配置的端点。界面使用系统字体，不请求第三方字体。演示不调用服务商、模型或外部字体。
 

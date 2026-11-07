@@ -19,7 +19,7 @@ People using the app set the model and sources in the interface. Environment var
 
 Setup is `setup.json` in the platform config directory. On macOS that is `~/Library/Application Support/Unprompted`. Linux uses `${XDG_CONFIG_HOME:-~/.config}/unprompted`. Windows uses `%APPDATA%\Unprompted`. The directory mode is `0700` and the file mode is `0600` where the system supports it.
 
-`UNPROMPTED_CONFIG_DIR` and `UNPROMPTED_SETUP_FILE` override those paths for development. MCP credentials are in `mcp.json` beside the setup file. A normal state path ending in `*-state.json` is stored as SQLite. Do not edit the database while the process is running.
+`UNPROMPTED_CONFIG_DIR` and `UNPROMPTED_SETUP_FILE` override those paths for development. MCP credentials are in `mcp.json` beside the setup file. Tokens, model keys, and connector credentials in those files are encrypted at rest. On macOS the key is in the login keychain. A normal state path ending in `*-state.json` is stored as SQLite and is not encrypted. Do not edit the database while the process is running. The repository's [configuration guide](https://github.com/PStarH/unprompted/blob/main/docs/CONFIGURATION.md#secrets-at-rest) describes migration and the threat model.
 
 ## Settings that matter
 

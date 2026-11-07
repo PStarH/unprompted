@@ -1396,7 +1396,7 @@ function renderDemoJourney() {
 }
 
 function privacyFacts() {
-  return ui`<ul class="privacy-facts"><li>${copy('邮件、文档和任务内容会发送给你选择的模型。')}</li><li>${copy('本机数据库和密钥不加密，请只在你自己的电脑上运行。')}</li><li>${copy('断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。')}</li></ul>`;
+  return ui`<ul class="privacy-facts"><li>${copy('邮件、文档和任务内容会发送给你选择的模型。')}</li><li>${copy('令牌和密钥在本机加密保存。工作区里的邮件和文档不加密，请只在你自己的电脑上运行。')}</li><li>${copy('断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。')}</li></ul>`;
 }
 
 function modelProtocolLabel(value) {

@@ -31,7 +31,7 @@ node --env-file=.env server.js
 | `UNPROMPTED_CONFIG_DIR` | Platform application-support directory |
 | `UNPROMPTED_SETUP_FILE` | `setup.json` in the config directory |
 
-The default config directory is `~/Library/Application Support/Unprompted` on macOS, `${XDG_CONFIG_HOME:-~/.config}/unprompted` on Linux, and `%APPDATA%\Unprompted` on Windows. On POSIX, the directory is mode `0700`; setup, model, and MCP files are mode `0600` where supported. Workspace state is **not encrypted**.
+The default config directory is `~/Library/Application Support/Unprompted` on macOS, `${XDG_CONFIG_HOME:-~/.config}/unprompted` on Linux, and `%APPDATA%\Unprompted` on Windows. On POSIX, the directory is mode `0700`; setup, model, and MCP files are mode `0600` where supported. Tokens and keys in those files are encrypted at rest. Workspace state is **not encrypted**.
 
 UI-connected accounts use separate hashed state filenames in that directory. One process may write a state file at a time.
 
