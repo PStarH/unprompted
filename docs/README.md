@@ -18,6 +18,7 @@ developers as `npm run demo`.
 | Understand the engine and its boundaries | [Architecture](ARCHITECTURE.md) |
 | Review the send read-back design (not implemented yet) | [Send verification](SEND_VERIFICATION.md) |
 | Review the execution-layer authority design (not implemented yet) | [Authority enforcement](AUTHORITY_ENFORCEMENT.md) |
+| Read the independent review of those two designs | [Spec review](reviews/SEND_AUTHORITY_SPEC_REVIEW.md) |
 | Change a complete framework workflow | [First workflow](EXTENDING.md) |
 | Run checks or add a regression | [Testing](TESTING.md) |
 | Call the local API | [API reference](API.md) |
