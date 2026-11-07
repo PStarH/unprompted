@@ -396,7 +396,7 @@ const messages = {
   "这个来源已断开，本机副本已清除。": "This source is disconnected and its local copy has been cleared.",
   "Google 已断开，这个来源的本机副本已清除。": "Google is disconnected and its local copy has been cleared.",
   "邮件、文档和任务内容会发送给你选择的模型。": "Email, documents, and task content are sent to the model you choose.",
-  "本机数据库和密钥不加密，请只在你自己的电脑上运行。": "The local database and keys are not encrypted. Run this only on your own computer.",
+  "令牌和密钥在本机加密保存。工作区里的邮件和文档不加密，请只在你自己的电脑上运行。": "Tokens and keys are encrypted on this computer. Mail and documents in the workspace are not. Run this only on your own computer.",
   "断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。": "Disconnecting stops reading but does not delete saved records. To delete the local copy, use Disconnect and clear.",
   "断开 Google": "Disconnect Google",
   "连接用于理解工作的模型": "Connect a model to understand your work",

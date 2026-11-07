@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readRegularFile } from './local-files.js';
+import { createKeyStore, openMcpDocument, sealMcpDocument, SecretBoxError, visitMcpSecrets, writeSealedJson } from './at-rest.js';
 import { MCP_PRESETS, publicPresetConnection, RUNTIME_HINTS, validatePresetConfig, expandImportedServers, isGitPresetServer, isGitReadTool } from './mcp-presets.js';
 
 export { MCP_PRESETS };
@@ -124,26 +125,52 @@ export function parseMcpImport(value, { allowDeclaredRead = false } = {}) {
   return Object.fromEntries(Object.entries(servers).map(([id, config]) => [id, normalizeMcpConfig(id, { ...config, writeTools: [], allowDeclaredRead }, { oauth: 'reject' })]));
 }
 
-/** Private configuration is deliberately separate from task exports and state. */
+/** Private configuration is deliberately separate from task exports and state. Credentials are sealed before they are written. */
 export class McpConfigStore {
-  constructor(directory) { this.directory = directory; this.filePath = path.join(directory, 'mcp.json'); }
+  constructor(directory, { keyStore = null, env = process.env } = {}) {
+    this.directory = directory;
+    this.filePath = path.join(directory, 'mcp.json');
+    this.env = env;
+    this.boundKeyStore = keyStore;
+    this.keyStore = null;
+    this.secretKey = null;
+  }
+  #store() {
+    if (this.boundKeyStore) return this.boundKeyStore;
+    if (!this.keyStore) this.keyStore = createKeyStore({ directory: this.directory, env: this.env });
+    return this.keyStore;
+  }
+  #key() {
+    if (this.secretKey) return this.secretKey;
+    try { this.secretKey = this.#store().load(); }
+    catch (error) {
+      if (error instanceof SecretBoxError) throw fail(error.message, 500);
+      throw error;
+    }
+    return this.secretKey;
+  }
   get() {
-    try {
-      const data = JSON.parse(readRegularFile(this.filePath, { maxBytes: MCP_LIMITS.configBytes, mode: 0o600 }));
-      if (!object(data) || Object.keys(data).length > MCP_LIMITS.servers) throw fail('Invalid saved MCP configuration.');
-      return Object.fromEntries(Object.entries(data).map(([id, value]) => [id, normalizeMcpConfig(id, value)]));
-    } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+    let data;
+    try { data = JSON.parse(readRegularFile(this.filePath, { maxBytes: MCP_LIMITS.configBytes, mode: 0o600 })); }
+    catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+    if (!object(data) || Object.keys(data).length > MCP_LIMITS.servers) throw fail('Invalid saved MCP configuration.');
+    let opened;
+    try { opened = openMcpDocument(data, this.#key()); }
+    catch (error) {
+      if (error instanceof SecretBoxError) throw fail('Saved MCP credentials could not be decrypted. The file was left unchanged.', 500);
+      throw error;
+    }
+    const configs = Object.fromEntries(Object.entries(opened.document).map(([id, value]) => [id, normalizeMcpConfig(id, value)]));
+    if (opened.migrated) this.write(configs);
+    return configs;
   }
   write(configs) {
-    const payload = JSON.stringify(configs, null, 2) + '\n';
-    if (Buffer.byteLength(payload) > MCP_LIMITS.configBytes) throw fail('MCP configuration is too large.');
-    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const temporary = `${this.filePath}.${randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(temporary, payload, { mode: 0o600, flag: 'wx' });
-      fs.renameSync(temporary, this.filePath);
-      fs.chmodSync(this.filePath, 0o600);
-    } finally { try { fs.unlinkSync(temporary); } catch { /* already renamed */ } }
+    try { writeSealedJson(this.filePath, configs, this.#key(), sealMcpDocument, visitMcpSecrets, { maxBytes: MCP_LIMITS.configBytes }); }
+    catch (error) {
+      if (error instanceof SecretBoxError && error.code === 'SECRET_TOO_LARGE') throw fail('MCP configuration is too large.');
+      if (error instanceof SecretBoxError) throw fail(error.message, 500);
+      throw error;
+    }
   }
 }
 

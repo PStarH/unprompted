@@ -42,7 +42,7 @@ The platform application-support directory holds `setup.json`:
 | Linux | `${XDG_CONFIG_HOME:-~/.config}/unprompted` |
 | Windows | `%APPDATA%\Unprompted` |
 
-`UNPROMPTED_CONFIG_DIR` selects another directory; `UNPROMPTED_SETUP_FILE` selects a specific file. On POSIX systems the directory is mode `0700` and setup/model/MCP files are mode `0600` where supported. **The workspace and credentials are not encrypted.** Use full-disk encryption and a private account.
+`UNPROMPTED_CONFIG_DIR` selects another directory; `UNPROMPTED_SETUP_FILE` selects a specific file. On POSIX systems the directory is mode `0700` and setup/model/MCP files are mode `0600` where supported. **Credentials are encrypted at rest. The workspace database is not.** Use full-disk encryption and a private account. A process running as the same user can still read the key.
 
 Connected cloud sources contact their providers. An enabled model contacts its configured endpoint. The interface uses system fonts and makes no third-party font requests. The demo makes no provider, model, or font calls.
 

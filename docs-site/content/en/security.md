@@ -25,7 +25,7 @@ The repository policy is [SECURITY.md](https://github.com/PStarH/unprompted/blob
 - Normal mode is read-only until you grant a write. An explicit `UNPROMPTED_SHADOW_MODE=true` blocks external writes.
 - `npm run demo` keeps its own state and only simulates sending.
 - A model reply cannot approve an action, widen a permission, or stand in as evidence. A remote model can receive the task content from the sources you connected.
-- Local state holds synchronized content and evidence. It is not encrypted.
+- OAuth tokens, model keys, and connector credentials are encrypted at rest. The workspace database that holds synchronized content and evidence is not. A process running as the same user can still read both.
 - Local folders and Apple Notes stay inside the scopes you selected. Apple Notes needs macOS Automation permission. Revoking access invalidates that source evidence. It does not mark the work complete.
 
 A mistake in these pages, or an ordinary product bug, can be a public issue. Use **Report a problem with this page** at the bottom. Keep secrets out of it.

@@ -101,7 +101,7 @@ Standard and Pi can both use authorized tools if the model supports function cal
 
 Resource-only servers are supported. In **Resources and access**, select each resource the agent may read; none are enabled by default. Only text is used. Resource templates, subscriptions, and automatic change observation are not supported yet.
 
-Credentials and sign-in tokens stay in a private `mcp.json` next to local setup, with mode `0600` where supported. The API never returns commands, arguments, environment values, headers, or tokens. The file is not encrypted. Call records are bounded and remain in the task workspace.
+Credentials and sign-in tokens stay in a private `mcp.json` next to local setup, with mode `0600` where supported, and are encrypted at rest. The API never returns commands, arguments, environment values, headers, or tokens. Call records are bounded and remain in the task workspace.
 
 ## Provision a distribution
 

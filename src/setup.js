@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { connectionProvider, validClientSecret, validPublicClientId } from './connection-catalog.js';
 import { readRegularFile } from './local-files.js';
+import { createKeyStore, openSetupDocument, sealSetupDocument, SecretBoxError, visitSetupSecrets, writeSealedJson } from './at-rest.js';
 
 export const NATIVE_SOURCE_IDS = Object.freeze(['local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts']);
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
@@ -111,35 +112,66 @@ function normalise(state) {
 }
 
 /**
- * User-level local configuration. Secret values are written only to this
- * 0600 file and every browser-facing method returns a redacted projection.
+ * User-level local configuration. Secret values are encrypted before they are
+ * written to this 0600 file. Every browser-facing method returns a redacted
+ * projection. Plaintext files from older installs are sealed on first read.
  */
 export class LocalSetupStore {
-  constructor({ filePath = null, env = process.env } = {}) {
+  constructor({ filePath = null, env = process.env, keyStore = null } = {}) {
     this.directory = filePath ? path.dirname(path.resolve(filePath)) : defaultSetupDirectory(env);
     this.filePath = filePath ? path.resolve(filePath) : path.join(this.directory, 'setup.json');
+    this.env = env;
+    this.boundKeyStore = keyStore;
+    this.keyStore = null;
+    this.secretKey = null;
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(this.directory, 0o700); } catch { /* best effort on filesystems without POSIX modes */ }
     this.#read();
   }
 
-  #read() {
-    try {
-      this.state = normalise(JSON.parse(readRegularFile(this.filePath, { mode: 0o600 })));
-    } catch (error) {
-      if (error.code === 'ENOENT') this.state = clone(DEFAULT_STATE);
-      else if (error instanceof SyntaxError) throw new Error('The local setup file is invalid JSON; move it aside to restore defaults.');
-      else throw error;
+  #keyStore() {
+    if (this.boundKeyStore) return this.boundKeyStore;
+    if (!this.keyStore) this.keyStore = createKeyStore({ directory: this.directory, env: this.env });
+    return this.keyStore;
+  }
+
+  #key() {
+    if (this.secretKey) return this.secretKey;
+    try { this.secretKey = this.#keyStore().load(); }
+    catch (error) {
+      if (error instanceof SecretBoxError) throw new Error(error.message);
+      throw error;
     }
+    return this.secretKey;
+  }
+
+  #read() {
+    let text;
+    try { text = readRegularFile(this.filePath, { mode: 0o600 }); }
+    catch (error) {
+      if (error.code === 'ENOENT') { this.state = clone(DEFAULT_STATE); return; }
+      throw error;
+    }
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch { throw new Error('The local setup file is invalid JSON; move it aside to restore defaults.'); }
+    let opened;
+    try { opened = openSetupDocument(parsed, this.#key()); }
+    catch (error) {
+      if (error instanceof SecretBoxError) throw new Error(error.message);
+      throw error;
+    }
+    this.state = normalise(opened.document);
+    if (opened.migrated) this.#write(this.state);
   }
 
   #write(next) {
     const state = normalise(next);
-    const temporary = `${this.filePath}.${process.pid}.${randomBytes(5).toString('hex')}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-    try { fs.chmodSync(temporary, 0o600); } catch { /* best effort */ }
-    fs.renameSync(temporary, this.filePath);
-    try { fs.chmodSync(this.filePath, 0o600); } catch { /* best effort */ }
+    try { writeSealedJson(this.filePath, state, this.#key(), sealSetupDocument, visitSetupSecrets); }
+    catch (error) {
+      if (error instanceof SecretBoxError) throw new Error(error.message);
+      throw error;
+    }
     this.state = state;
     return clone(state);
   }
@@ -451,8 +483,10 @@ export class LocalSetupStore {
       : !runtime?.live ? (hasRefreshToken ? 'configured_unverified' : 'not_configured')
       : latestSyncAfterValidation ? (connectorStatus?.ok ? 'sync_ok' : 'sync_failed')
         : google.lastValidation?.status === 'validated' ? 'validated' : 'configured_unverified';
+    const keyStore = this.boundKeyStore || this.keyStore;
     return {
       fileProtection: '0600',
+      secretsAtRest: { algorithm: 'aes-256-gcm', backend: keyStore ? keyStore.describe().backend : null },
       model: { baseUrl: state.model.baseUrl, model: state.model.model, hasApiKey: Boolean(state.model.apiKey), harness: state.model.harness, protocol: state.model.protocol || 'chat-completions', role: state.model.role, lastValidation: state.model.lastValidation },
       monitoring: monitoring || { ...state.monitoring },
       google: {

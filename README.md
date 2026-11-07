@@ -135,7 +135,7 @@ if you prefer not to use Git.
   for a successful model reading.
 - The server binds to `127.0.0.1` and has no authentication. Run it on your own
   machine. Email, document and task content are sent to the model you choose.
-- The local database, tokens and model keys are **not encrypted**.
+- OAuth tokens, model keys, and connector credentials are **encrypted at rest**. The workspace database (synced mail and documents) is not.
 - Disconnecting stops new reads and keeps the saved copy. **Disconnect and
   clear** deletes that source's local inbox, tasks, snapshots and derived
   records.
@@ -164,7 +164,7 @@ process. Real-world usefulness and error rates still need user feedback.
 | Task management | Trusted commitment revisions/withdrawals, persisted waits, reversible corrections and shared dependencies |
 | Document changes | Source-backed, version-checked patches with separate authorization and readback |
 | Local app | Browser OAuth setup, continuous observation controls and an unsigned macOS app builder |
-| Storage | One user, one process, SQLite WAL + FTS5. Local files, tokens and model keys are not encrypted |
+| Storage | One user, one process, SQLite WAL + FTS5. Tokens and model keys are encrypted at rest. The workspace database is not |
 
 Google, GitHub, Outlook, Slack and Notion need an OAuth client you register, or
 a build that already includes one. This repository does not ship a public

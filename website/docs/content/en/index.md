@@ -30,7 +30,7 @@ The interface is designed to stay quiet. New tasks and live updates do not open 
 
 ## Current scope
 
-This is a local, single-user, single-process implementation. It runs on your machine, binds to `127.0.0.1`, and has no built-in authentication. The local database, tokens, and model keys are not encrypted. Review [Permissions & privacy](permissions.md) before connecting sensitive work.
+This is a local, single-user, single-process implementation. It runs on your machine, binds to `127.0.0.1`, and has no built-in authentication. OAuth tokens, model keys, and connector credentials are encrypted at rest. The workspace database that holds synced mail and documents is not. Review [Permissions & privacy](permissions.md) before connecting sensitive work.
 
 The repository does not ship a public OAuth client. Cloud sources need a client you register or a distribution that includes one. Real-account acceptance for several connectors is still pending; [Connectors](connectors.md) states the current boundary.
 

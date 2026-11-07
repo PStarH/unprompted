@@ -27,8 +27,10 @@ test('local setup stores secrets in a private file and exposes only a redacted s
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
   const persisted = fs.readFileSync(file, 'utf8');
-  assert.match(persisted, /private-desktop-secret/);
-  assert.match(persisted, /private-refresh-token/);
+  assert.doesNotMatch(persisted, /private-desktop-secret|private-refresh-token/);
+  assert.match(persisted, /unprompted-seal:v1:/);
+  assert.equal(new LocalSetupStore({ filePath: file }).get().google.clientSecret, 'private-desktop-secret');
+  assert.equal(new LocalSetupStore({ filePath: file }).get().google.refreshToken, 'private-refresh-token');
   const publicStatus = JSON.stringify(store.publicStatus());
   assert.doesNotMatch(publicStatus, /private-desktop-secret|private-refresh-token|client_secret|refresh_token/);
   assert.equal(store.publicStatus().google.hasClient, true);

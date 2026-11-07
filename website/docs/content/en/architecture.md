@@ -43,7 +43,7 @@ Readiness is recorded as a source-grounded review. The original verifiable requi
 
 ## Storage and process model
 
-Normal mode uses one local SQLite workspace with WAL and FTS5. A process lock prevents two processes from writing the same state file. State is written atomically with restrictive permissions where the operating system supports them. It is not encrypted.
+Normal mode uses one local SQLite workspace with WAL and FTS5. A process lock prevents two processes from writing the same state file. State is written atomically with restrictive permissions where the operating system supports them. The workspace database is not encrypted. OAuth tokens, model keys, and connector credentials are encrypted at rest.
 
 The workspace can contain source content, requests, evidence excerpts, drafts, action history, and bounded model/MCP call records. Treat it as personal data. UI-connected cloud accounts use separate hashed state files in the same configuration directory.
 
@@ -83,7 +83,7 @@ Not implemented: calendar, general desktop control, unrestricted autonomous docu
 
 ## Known limitations
 
-- The database, tokens, and keys are not encrypted.
+- The workspace database is not encrypted. OAuth tokens, model keys, and connector credentials are encrypted at rest. Same-user malware and a memory dump are outside that boundary.
 - There is no built-in authentication or multi-user isolation.
 - Provider push is not enabled; observation uses polling and bounded continuation passes.
 - An uncertain external result cannot be retried until reconciliation.

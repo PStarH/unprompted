@@ -235,10 +235,70 @@ OAuth credentials can be entered in the local Connections setup panel or
 provided through the environment. The setup panel stores them separately from
 workspace state. Model keys can also be saved in that private setup file, with
 mode 0600 on systems supporting those permission bits, or provided through the
-environment. API and SSE projections do not return keys. Workspace state is
-written atomically with restrictive file permissions and an exclusive process lock.
-The permission bits depend on operating-system support; the state is not
-encrypted. Don't put it in a public or shared directory.
+environment. API and SSE projections do not return keys. Saved tokens, model
+keys, and connector credentials are encrypted before they are written. See
+[secrets at rest](#secrets-at-rest). Workspace state is written atomically with
+restrictive file permissions and an exclusive process lock. The permission bits
+depend on operating-system support. The workspace database is not encrypted.
+Don't put it in a public or shared directory.
+
+## Secrets at rest
+
+`setup.json` and `mcp.json` seal these values with AES-256-GCM before writing
+them:
+
+- model API keys
+- Google OAuth client secrets and refresh tokens
+- connector access tokens, refresh tokens, and client secrets (GitHub,
+  Microsoft, Slack, Notion, Todoist)
+- MCP environment values, request headers, OAuth access/refresh/ID tokens,
+  client secrets, and PKCE code verifiers
+
+Public client IDs, account labels, scopes, and the workspace database stay
+unencrypted. The workspace can still hold synchronized mail, documents, and
+evidence. Decryption happens in process memory when a connector or the model
+needs the value. These paths do not log the plaintext.
+
+### Where the key lives
+
+One OS user has one key. The first successful store is recorded in
+`secret-key.json` (no key material) and reused after that.
+
+| Platform | Store | What a copied config directory is worth without it |
+| --- | --- | --- |
+| macOS | Login keychain item `com.unprompted.at-rest` / account `default`, available after first unlock, any app of this user (`security -A`) | Not decryptable. The keychain file itself is protected by the login password |
+| Linux | Session secret service via `secret-tool`, same service and account, when `secret-tool` works | Not decryptable without the unlocked keyring |
+| Windows | DPAPI `CurrentUser` blob in `secret.key.dpapi` | Not decryptable without that Windows user's password |
+| Fallback | `secret.key`, mode `0600`, when the OS store cannot be used on first run | Decryptable. The key sits next to the ciphertext |
+
+`UNPROMPTED_SECRET_BACKEND=file` forces the file key.
+`UNPROMPTED_SECRET_BACKEND=os-keychain` requires the OS store and does not fall
+back. On Windows that name still uses DPAPI.
+
+The macOS key is passed to `security` as an argument only while the item is
+created. Later reads do not put it on the command line. Creating the item
+allows later reads by this user without a keychain prompt, so a background
+launch is not blocked on a dialog.
+
+### Upgrading an existing install
+
+The first launch after this update reads plaintext credentials, seals them, and
+replaces `setup.json` and `mcp.json`. Sign-in is not repeated when the tokens
+are still present. The rewrite is one way. If decryption later fails, those
+files are left unchanged and the process reports that the key is missing
+rather than deleting them. Restoring the keychain item, secret-service item,
+DPAPI blob, or `secret.key` makes the same tokens readable again. If the key
+cannot be restored, move those files aside and connect the accounts again.
+
+### What this does and does not stop
+
+It stops someone who can read `setup.json` or `mcp.json`, and someone who
+copies the config directory without the OS key store (a stolen disk image or
+backup that does not include an unlocked keychain, keyring, or Windows
+profile). It does not stop malware running as the same user, a memory dump, or
+anyone who can unlock that OS store. The file-key fallback does not stop a
+copy of the whole config directory. Full-disk encryption is still the right
+control for the workspace database.
 
 Connected cloud sources contact their providers. An enabled model contacts its
 configured endpoint.

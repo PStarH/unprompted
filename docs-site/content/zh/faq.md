@@ -43,7 +43,7 @@ description: 关于 Unprompted 在哪里运行、能改什么、数据留在哪�
 
 ## 数据存在哪里？加密吗？
 
-工作区是本机的 SQLite 文件。设置和令牌在平台配置目录。macOS 上是 `~/Library/Application Support/Unprompted`。这些都不加密。系统支持时，目录权限为 `0700`，文件权限为 `0600`。见[权限与隐私](permissions.md)。
+工作区是本机的 SQLite 文件，不加密。OAuth 令牌、模型密钥和连接器凭据在平台配置目录中加密保存。macOS 上是 `~/Library/Application Support/Unprompted`，密钥放在登录钥匙串。系统支持时，目录权限为 `0700`，文件权限为 `0600`。见[权限与隐私](permissions.md)。
 
 ## 可以连接哪些来源？
 

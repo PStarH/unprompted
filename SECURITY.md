@@ -34,9 +34,16 @@ basis; no response-time guarantee or bounty is offered.
 - Local folders and Apple Notes are limited to selected scopes and are read-only.
   Apple Notes requires macOS Automation permission. Revoking access invalidates
   source evidence; it does not establish that work is complete.
-- Local state contains synchronized content and evidence. It is not encrypted.
-  OAuth and model credentials are kept in the private local setup file or
-  supplied by the environment; don't store them in issues or fixtures.
+- OAuth tokens, model keys, and connector credentials are encrypted at rest
+  with AES-256-GCM before they are written to `setup.json` or `mcp.json`. The
+  key is stored in the macOS login keychain, the Linux secret service, or
+  Windows DPAPI when that store is available. The first launch after an
+  upgrade seals existing plaintext credentials without asking the user to
+  sign in again.
+- The workspace database still contains synchronized content and evidence and
+  is not encrypted. This does not stop malware running as the same user, or a
+  memory dump of the running process. Don't put tokens, keys, or state files
+  in issues or fixtures. See [secrets at rest](docs/CONFIGURATION.md#secrets-at-rest).
 
 See [configuration and data handling](docs/CONFIGURATION.md) for the complete
 mode and storage behavior.

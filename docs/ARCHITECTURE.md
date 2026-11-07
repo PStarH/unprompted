@@ -286,8 +286,10 @@ no semantic tombstone is retained. Copies already sent to a model or connector,
 filesystem snapshots and independent backups follow their own retention policies.
 
 State contains synchronized content and evidence excerpts, so it must stay out
-of public bug reports and commits. It is not encrypted. See
-[configuration and data handling](CONFIGURATION.md#what-stays-on-your-machine).
+of public bug reports and commits. That workspace database is not encrypted.
+OAuth tokens, model keys, and connector credentials are encrypted before they
+are written to the local setup and MCP files. See
+[secrets at rest](CONFIGURATION.md#secrets-at-rest).
 
 Accepted model probes are checkpointed per task and validated again when restored.
 Only deterministic plans use the shared plan cache. Brief model concurrency bursts
@@ -328,6 +330,10 @@ they cannot authorize another send or create a verified completion. See the
 
 ## Known limitations
 
+- OAuth tokens, model API keys, and connector credentials are encrypted at
+  rest. The SQLite workspace (synced mail, documents, and evidence) is not.
+  Same-user malware and a memory dump are outside this boundary. See
+  [secrets at rest](CONFIGURATION.md#secrets-at-rest).
 - Discovery retains deterministic source/eligibility gates. The main model-backed
   path uses primary interpretation; this remains a bounded request/evidence
   workflow, not unrestricted understanding of all activity in a user's life.

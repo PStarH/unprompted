@@ -43,7 +43,7 @@ No. It is a disposable simulation. It ignores saved accounts and does not insert
 
 ## Where is data stored, and is it encrypted?
 
-The workspace is a local SQLite file. Setup and tokens live in the platform config directory. On macOS that is `~/Library/Application Support/Unprompted`. None of it is encrypted. Where the system supports it, the directory is mode `0700` and the file is mode `0600`. See [Permissions and privacy](permissions.md).
+The workspace is a local SQLite file and is not encrypted. OAuth tokens, model keys, and connector credentials are encrypted at rest in the platform config directory. On macOS that is `~/Library/Application Support/Unprompted`, and the key is kept in the login keychain. Where the system supports it, the directory is mode `0700` and the files are mode `0600`. See [Permissions and privacy](permissions.md).
 
 ## Which sources can I connect?
 

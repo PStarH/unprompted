@@ -31,7 +31,7 @@ node --env-file=.env server.js
 | `UNPROMPTED_CONFIG_DIR` | 平台应用支持目录 |
 | `UNPROMPTED_SETUP_FILE` | 配置目录中的 `setup.json` |
 
-macOS 默认配置目录为 `~/Library/Application Support/Unprompted`，Linux 为 `${XDG_CONFIG_HOME:-~/.config}/unprompted`，Windows 为 `%APPDATA%\Unprompted`。POSIX 上目录为 `0700`，设置、模型和 MCP 文件在支持时为 `0600`。工作区状态**未加密**。
+macOS 默认配置目录为 `~/Library/Application Support/Unprompted`，Linux 为 `${XDG_CONFIG_HOME:-~/.config}/unprompted`，Windows 为 `%APPDATA%\Unprompted`。POSIX 上目录为 `0700`，设置、模型和 MCP 文件在支持时为 `0600`。这些文件中的令牌和密钥在写入前加密。工作区状态**不加密**。
 
 界面连接的账号会在该目录使用单独的哈希状态文件名。同一时间只能有一个进程写入一个状态文件。
 
