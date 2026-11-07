@@ -117,9 +117,12 @@ test('hosted MCP sign-in exchanges a loopback code, redacts tokens, and refreshe
   catch (error) { assert.fail(`${error.message}\n${causesOf(causes)}`); }
   assert.equal(started.phase, 'authorizing');
   assert.match(started.authorizeUrl, /code_challenge=/);
-  const during = JSON.parse(fs.readFileSync(configStore.filePath, 'utf8'));
-  const verifier = during.notion.oauth.codeVerifier;
+  const duringDisk = fs.readFileSync(configStore.filePath, 'utf8');
+  const during = JSON.parse(duringDisk);
+  assert.match(during.notion.oauth.codeVerifier, /^unprompted-seal:v1:/);
+  const verifier = configStore.get().notion.oauth.codeVerifier;
   assert.equal(typeof verifier, 'string');
+  assert.equal(duringDisk.includes(verifier), false);
   assert.ok(!JSON.stringify(manager.describe()).includes(verifier));
 
   const authorize = await fetch(started.authorizeUrl, { redirect: 'manual' });
@@ -130,10 +133,18 @@ test('hosted MCP sign-in exchanges a loopback code, redacts tokens, and refreshe
   assert.match(await callback.text(), /You can close this window/);
   if (causes.length) assert.fail(causesOf(causes));
 
-  const saved = JSON.parse(fs.readFileSync(configStore.filePath, 'utf8'));
-  assert.equal(saved.notion.oauth.tokens.access_token, 'oauth-fixture-token');
-  assert.equal(saved.notion.oauth.tokens.refresh_token, 'oauth-fixture-refresh');
+  const savedDisk = fs.readFileSync(configStore.filePath, 'utf8');
+  const saved = JSON.parse(savedDisk);
+  assert.match(saved.notion.oauth.tokens.access_token, /^unprompted-seal:v1:/);
+  assert.match(saved.notion.oauth.tokens.refresh_token, /^unprompted-seal:v1:/);
   assert.equal(saved.notion.oauth.codeVerifier, undefined);
+  assert.equal(savedDisk.includes('oauth-fixture-token'), false);
+  assert.equal(savedDisk.includes('oauth-fixture-refresh'), false);
+  assert.equal(savedDisk.includes(verifier), false);
+  const stored = configStore.get().notion.oauth;
+  assert.equal(stored.tokens.access_token, 'oauth-fixture-token');
+  assert.equal(stored.tokens.refresh_token, 'oauth-fixture-refresh');
+  assert.equal(stored.codeVerifier, undefined);
   assert.equal(saved.notion.enabled, true);
   const described = JSON.stringify(manager.describe());
   for (const secret of ['oauth-fixture-token', 'oauth-fixture-refresh', 'oauth-fixture-client', verifier]) {
@@ -149,7 +160,12 @@ test('hosted MCP sign-in exchanges a loopback code, redacts tokens, and refreshe
   assert.ok(seen.every(header => header === 'Bearer oauth-fixture-token'));
 
   assert.equal(await broker.refresh('notion'), true, causesOf(causes));
-  assert.equal(JSON.parse(fs.readFileSync(configStore.filePath, 'utf8')).notion.oauth.tokens.access_token, 'oauth-fixture-token-2');
+  const refreshedDisk = fs.readFileSync(configStore.filePath, 'utf8');
+  const refreshed = JSON.parse(refreshedDisk);
+  assert.match(refreshed.notion.oauth.tokens.access_token, /^unprompted-seal:v1:/);
+  assert.equal(refreshedDisk.includes('oauth-fixture-token-2'), false);
+  assert.equal(refreshedDisk.includes('oauth-fixture-token'), false);
+  assert.equal(configStore.get().notion.oauth.tokens.access_token, 'oauth-fixture-token-2');
   assert.ok(!JSON.stringify(manager.describe()).includes('oauth-fixture-token-2'));
   assert.match((await tool.execute('oauth-refresh', { query: 'refreshed' })).content[0].text, /refreshed/);
   assert.ok(seen.at(-1) === 'Bearer oauth-fixture-token-2');

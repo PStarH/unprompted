@@ -383,8 +383,8 @@ test('setup API, state and SSE redact saved OAuth credentials and persist observ
     assert.equal(fs.fstatSync(descriptor).mode & 0o777, 0o600);
     localFile = fs.readFileSync(descriptor, 'utf8');
   } finally { fs.closeSync(descriptor); }
-  assert.match(localFile, /api-private-client-secret/);
-  assert.match(localFile, /api-private-refresh-token/);
+  assert.doesNotMatch(localFile, /api-private-client-secret|api-private-refresh-token/);
+  assert.match(localFile, /unprompted-seal:v1:/);
 });
 
 test('forgetting Google stops this process, rejects new syncs, and keeps approval writes shadowed', async () => {
