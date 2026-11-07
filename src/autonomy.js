@@ -37,7 +37,11 @@ export class Autonomy {
   expire() {
     const expired = this.grants().filter(grant => grant.status === 'active' && !this.valid(grant));
     if (expired.length) this.engine.store.mutate(state => {
-      for (const grant of state.autonomyGrants) if (expired.some(item => item.id === grant.id)) grant.status = 'expired';
+      for (const grant of state.autonomyGrants) if (expired.some(item => item.id === grant.id)) {
+        grant.status = 'expired';
+        grant.version = (Number(grant.version) || 1) + 1;
+        this.engine.durableRuntime?.ledger.cancelUndispatched({ kind: 'yolo', id: grant.id, state });
+      }
     });
   }
   create(input = {}) {
@@ -49,13 +53,17 @@ export class Autonomy {
     if (mode === 'task' && (typeof taskId !== 'string' || !active(this.engine.store.state.tasks[taskId]) || durationMinutes !== null)) throw invalid('Task YOLO requires an active task and no duration.');
     if (mode === 'time' && (taskId !== null || typeof durationMinutes !== 'number' || !Number.isFinite(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440)) throw invalid('Time YOLO requires 1–1440 minutes and covers this workspace.');
     this.expire();
-    const grant = { id: randomUUID(), mode, taskId, source: 'user', status: 'active',
+    const grant = { id: randomUUID(), mode, taskId, source: 'user', status: 'active', version: 1,
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: mode === 'time' ? new Date(this.now() + durationMinutes * 60000).toISOString() : null };
     this.engine.store.mutate(state => {
       // Replacing a lease revokes it, including operations queued under its ID.
       state.autonomyGrants = (state.autonomyGrants || []).filter(item => item.status === 'active');
-      for (const item of state.autonomyGrants) if (item.mode === mode && item.taskId === taskId) item.status = 'revoked';
+      for (const item of state.autonomyGrants) if (item.mode === mode && item.taskId === taskId) {
+        item.status = 'revoked';
+        item.version = (Number(item.version) || 1) + 1;
+        this.engine.durableRuntime?.ledger.cancelUndispatched({ kind: 'yolo', id: item.id, state });
+      }
       state.autonomyGrants.push(grant);
     });
     this.engine.changed();
@@ -63,7 +71,12 @@ export class Autonomy {
   }
   revoke(id) {
     if (!this.grants().some(grant => grant.id === id)) throw invalid('Unknown YOLO authorization.');
-    this.engine.store.mutate(state => { state.autonomyGrants.find(grant => grant.id === id).status = 'revoked'; });
+    this.engine.store.mutate(state => {
+      const grant = state.autonomyGrants.find(item => item.id === id);
+      grant.status = 'revoked';
+      grant.version = (Number(grant.version) || 1) + 1;
+      this.engine.durableRuntime?.ledger.cancelUndispatched({ kind: 'yolo', id: grant.id, state });
+    });
     this.engine.changed();
   }
   schedule() {
@@ -78,6 +91,7 @@ export class Autonomy {
     for (const task of Object.values(state.tasks)) {
       const grant = this.forTask(task.id);
       if (!grant || this.runningTasks.has(task.id) || task.control?.paused || task.guidanceReviewRequired || task.contextReadRequired || task.pendingCommitmentChange) continue;
+      if (task.lastLiveAttemptClass === 'user_attested_absent') continue;
       const latestPatch = Object.values(state.documentPatches || {}).filter(item => item.taskId === task.id).at(-1);
       const patch = latestPatch?.status === 'prepared' ? latestPatch : null;
       if (latestPatch && !patch && latestPatch.status !== 'applied') continue;

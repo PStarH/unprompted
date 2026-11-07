@@ -10,6 +10,7 @@ import { DurableWorker } from '../src/durable/jobs.js';
 import { WorkEngine } from '../src/engine.js';
 import { SimulatedMailProvider } from '../src/providers.js';
 import { DurableDatabase, iso } from '../src/durable/database.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 const latch = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 function setup(t) {
@@ -31,7 +32,7 @@ function run(c, key = 'unit') {
   c.tasks.checkpoint(executionRun, job, { expectedInputVersion: 0, plan: {} });
   return { taskId: created.taskId, run: executionRun, job };
 }
-function intent(c, current) { return c.ledger.intent({ ...current, provider: 'fixture', resourceId: 'resource', tool: 'send', actionFamily: 'fixture.send', key: 'safe-write', payload: {}, effect: { type: 'fixture' }, authorize: () => ({ allowed: true }) }); }
+function intent(c, current) { return c.ledger.intent({ ...current, provider: 'fixture', resourceId: 'resource', tool: 'send', actionFamily: 'fixture.send', key: 'safe-write', payload: {}, effect: { type: 'fixture' }, authorize: () => authorizeForTests() }); }
 
 test('revoking a standing grant during provider authentication prevents the actual send', async t => {
   const c = setup(t), task = await ready(c), entered = latch(), proceed = latch();
@@ -123,14 +124,14 @@ test('a wrong receipt from the verification adapter cannot complete a real engin
   c.provider.verifyReceipt = () => ({ status: 'found', receipt: { id: 'other-message', idempotencyKey: 'other-operation' } });
   await c.engine.approve(task.id, { reviewToken: task.reviewToken });
   assert.equal(c.store.state.tasks[task.id].status, 'blocked');
-  assert.equal(c.ledger.list()[0].status, 'accepted');
+  assert.equal(c.ledger.list()[0].status, 'unknown');
   assert.notEqual(c.store.db.prepare('SELECT claim_state FROM resource_claims').get().claim_state, 'free');
 });
 
 test('restart before intent persistence exposes a safe retry and never blindly dispatches the queued write', async t => {
   const c = setup(t), task = await ready(c), key = `send:${task.id}:${task.draft.documentVersion}:i${task.inputVersion}`;
   c.store.mutate(state => {
-    state.tasks[task.id].action = { id: 'prepared-send', idempotencyKey: key, version: 1, permission: 'user_approved', inputVersion: task.inputVersion, status: 'executing', live: false };
+    state.tasks[task.id].action = { id: 'prepared-send', idempotencyKey: key, version: 1, permission: 'user_approved', taskId: task.id, inputVersion: task.inputVersion, status: 'executing', live: false, authority: { kind: 'approval', id: key, version: 1 } };
     state.tasks[task.id].status = 'verifying';
   });
   c.jobs.enqueue({ queue: 'effects', type: 'external_dispatch', taskId: task.id, key: `${key}:attempt:0`, payload: { taskId: task.id, key } });
@@ -150,9 +151,12 @@ test('pausing during authentication stops dispatch; resume reconciles before a u
   try { await entered.promise; c.engine.setTaskPaused(task.id, true); } finally { proceed.resolve(); }
   await pending; assert.equal(c.store.state.outbox.length, 0);
   assert.equal(c.store.state.tasks[task.id].control.paused, true);
+  assert.equal(c.store.state.tasks[task.id].action, null);
   c.engine.setTaskPaused(task.id, false); await c.engine.whenSettled();
-  assert.equal(c.store.state.tasks[task.id].action.status, 'confirmed_absent');
-  await c.engine.retry(task.id); assert.equal(c.store.state.outbox.length, 1);
+  const resumed = c.store.state.tasks[task.id];
+  assert.equal(resumed.status, 'ready_for_approval');
+  await c.engine.approve(resumed.id);
+  assert.equal(c.store.state.outbox.length, 1);
 });
 
 test('pausing an already dispatched operation records unknown and never pretends to undo it', async t => {

@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
  provider_receipt_id TEXT, conditional_version TEXT, provider_idempotent INTEGER NOT NULL DEFAULT 0,
  lease_owner TEXT, lease_token INTEGER, input_version INTEGER NOT NULL, run_generation INTEGER NOT NULL, privacy_epoch INTEGER NOT NULL,
  dispatched_at TEXT, verified_at TEXT, last_error_class TEXT,
+ evidence_json TEXT, authority_json TEXT,
  privacy_redacted INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );

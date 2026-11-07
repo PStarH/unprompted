@@ -123,7 +123,8 @@ export class GoogleMailAdapter {
       };
     } catch (error) {
       // Network faults are ambiguous: the message may have been accepted.
-      if (error.retryable) throw new UncertainDeliveryError(`Gmail send outcome is unknown: ${error.message}`);
+      if (error.retryable || error.status === 429) throw new UncertainDeliveryError(`Gmail send outcome is unknown: ${error.message}`);
+      if (error.status === 400) error.noMessageCreated = true;
       throw error;
     }
   }
@@ -136,10 +137,8 @@ export class GoogleMailAdapter {
    */
   async verifyReceipt(receipt, { signal = null } = {}) {
     if (!receipt?.id) return { status: 'unknown', receipt: null, detail: 'Gmail returned no message id, so the message cannot be read back.' };
-    const result = await this.connector.verifyMessage(receipt.id, { signal });
-    if (result.status === 'found') {
-      return { status: 'found', receipt: { ...result.receipt, idempotencyKey: receipt.idempotencyKey }, detail: result.detail };
-    }
+    const result = await this.connector.verifyMessage(receipt.id, { signal, idempotencyKey: receipt.idempotencyKey });
+    if (result.status === 'found') return { status: 'found', receipt: result.receipt, detail: result.detail };
     return { status: result.status, receipt: null, detail: result.detail };
   }
 
@@ -151,10 +150,8 @@ export class GoogleMailAdapter {
   async lookup(idempotencyKey, options = {}) {
     if (options.receiptId) {
       try {
-        const direct = await this.connector.verifyMessage(options.receiptId, { signal: options.signal });
-        if (direct.status === 'found') {
-          return { status: 'found', receipt: { ...direct.receipt, idempotencyKey }, detail: direct.detail };
-        }
+        const direct = await this.connector.verifyMessage(options.receiptId, { signal: options.signal, idempotencyKey });
+        if (direct.status === 'found') return { status: 'found', receipt: direct.receipt, detail: direct.detail };
       } catch (error) {
         if (error.status === 401 || error.status === 403) throw error;
         // Fall through to the Message-ID search; both paths are read-only.

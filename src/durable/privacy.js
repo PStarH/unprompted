@@ -84,7 +84,7 @@ export class ForgetService {
           this.db.prepare('DELETE FROM artifacts WHERE task_id=?').run(row.id);
           this.db.prepare("UPDATE task_runs SET status='cancelled',checkpoint_json=NULL,updated_at=? WHERE task_id=?").run(at, row.id);
           this.db.prepare("UPDATE plan_steps SET expected_effect_json='{}',omission_reason=NULL,updated_at=? WHERE task_run_id IN (SELECT id FROM task_runs WHERE task_id=?)").run(at, row.id);
-          this.db.prepare("UPDATE tool_executions SET payload_json=NULL,result_json=NULL,effect_signature_json='{}',privacy_redacted=1,updated_at=? WHERE task_id=?").run(at, row.id);
+          this.db.prepare("UPDATE tool_executions SET payload_json=NULL,result_json=NULL,effect_signature_json='{}',evidence_json=CASE WHEN evidence_json IS NULL THEN NULL ELSE '{\"status\":\"redacted\"}' END,authority_json=CASE WHEN authority_json IS NULL THEN NULL ELSE json_object('kind', json_extract(authority_json,'$.kind'), 'id', json_extract(authority_json,'$.id')) END,privacy_redacted=1,updated_at=? WHERE task_id=?").run(at, row.id);
           next = { sourceConnectorId: connectorId, privacyRedacted: true, privacyInvalidated: true, subject: 'Redacted', control: { paused: true, pauseReason: 'permission_revoked', updatedAt: at } };
         } else {
           this.db.prepare('UPDATE artifacts SET stale=1,updated_at=? WHERE task_id=? AND stale=0').run(at, row.id);
@@ -256,7 +256,7 @@ export class ForgetService {
         const executions = this.db.prepare('SELECT * FROM tool_executions WHERE task_id=?').all(taskId);
         for (const execution of executions) {
           const pending = execution.is_write && ['dispatched', 'accepted', 'unknown'].includes(execution.status);
-          this.db.prepare(`UPDATE tool_executions SET payload_json=NULL,result_json=NULL,effect_signature_json='{}',privacy_redacted=1,
+          this.db.prepare(`UPDATE tool_executions SET payload_json=NULL,result_json=NULL,effect_signature_json='{}',evidence_json=CASE WHEN evidence_json IS NULL THEN NULL ELSE '{"status":"redacted"}' END,authority_json=CASE WHEN authority_json IS NULL THEN NULL ELSE json_object('kind', json_extract(authority_json,'$.kind'), 'id', json_extract(authority_json,'$.id')) END,privacy_redacted=1,
             status=CASE WHEN ?=1 THEN 'unknown' WHEN status='intent' THEN 'cancelled' ELSE status END,updated_at=? WHERE id=?`).run(Number(Boolean(pending)), at, execution.id);
           if (pending) {
             pendingExecutions.push({ id: execution.id, provider: execution.provider });

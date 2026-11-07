@@ -169,6 +169,7 @@ export class LocalDocumentProvider {
     this.id = 'local';
     this.simulated = true;
     this.live = false;
+    this.applied = new Map();
   }
 
   supports(document) {
@@ -183,7 +184,14 @@ export class LocalDocumentProvider {
   apply({ document, changes, beforeWrite = null }) {
     if (!this.supports(document)) throw new Error('The local document is no longer available for editing.');
     beforeWrite?.();
-    return { content: applyTextChanges(document.content, changes), revisionId: null, provider: this.id, simulated: true };
+    const content = applyTextChanges(document.content, changes);
+    const held = { content, revisionId: `local:${document.id}:${content.length}` };
+    this.applied.set(document.id, held);
+    return { ...held, provider: this.id, simulated: true };
+  }
+  read(document) {
+    if (!this.supports(document)) throw new Error('The local document is no longer available for editing.');
+    return this.applied.get(document.id) || { content: document.content, revisionId: null };
   }
 }
 

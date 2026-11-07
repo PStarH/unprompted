@@ -51,6 +51,9 @@ const httpBodyLimits = {
 const requestTimeoutMs = httpLimit('UNPROMPTED_HTTP_REQUEST_TIMEOUT_MS', 35_000, 1000, 10 * 60_000);
 const localSetup = new LocalSetupStore({ filePath: process.env.UNPROMPTED_SETUP_FILE || null });
 const mcp = new McpManager({ configStore: new McpConfigStore(localSetup.directory) });
+mcp.onWriteToolsChanged = ({ id, removed }) => {
+  for (const tool of removed || []) engine.durableRuntime?.ledger.cancelUndispatched({ kind: 'standing', id: `mcp:${id}:${tool}` });
+};
 const nativeBridge = new NativeSourceBridge();
 const currentSources = () => connectedSources(localSetup, { nativeBridge, baseUrl: `http://${host}:${port}` });
 const artifactConnectionFor = id => {
@@ -1277,7 +1280,7 @@ async function handleHttpRequest(req, res) {
         const miss = engine.recordMiss({ note: body?.note, sourceHint: body?.sourceHint });
         return json(res, 200, { miss, state: engine.publicState() });
       }
-      const route = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(approve|reject|reconcile|retry|cancel|reopen)$/);
+      const route = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(approve|reject|reconcile|retry|attest|cancel|reopen)$/);
       if (route) {
         const id = decodeURIComponent(route[1]);
         const operation = route[2];
@@ -1288,6 +1291,7 @@ async function handleHttpRequest(req, res) {
         if (operation === 'reject') return json(res, 200, engine.reject(id));
         if (operation === 'reconcile') return json(res, 200, await engine.reconcile(id));
         if (operation === 'retry') return json(res, 200, await engine.retry(id));
+        if (operation === 'attest') return json(res, 200, engine.attestAbsent(id));
         if (operation === 'cancel') return json(res, 200, engine.cancel(id));
         if (operation === 'reopen') return json(res, 200, engine.reopen(id));
       }

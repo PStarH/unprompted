@@ -12,6 +12,7 @@ import { DurableRuntime } from '../src/durable/runtime.js';
 import { WorkEngine } from '../src/engine.js';
 import { SimulatedMailProvider } from '../src/providers.js';
 import { DurableDatabase, SQLITE_RUNTIME, iso } from '../src/durable/database.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 const workerPath = fileURLToPath(new URL('./fixtures/durable-worker.mjs', import.meta.url));
 const related = ({ events }) => ({ outcome: 'RELATED_WAIT', summary: 'Waiting for delivery terms.', missingEvidence: ['Delivery date'],
@@ -371,7 +372,7 @@ test('activation v1.5 replay matrix', async t => {
     const job = env.runtime.jobs.claim('forget-owner', { id: enqueued.id });
     const run = env.runtime.tasks.beginRun(job, { advanceGeneration: false });
     env.runtime.tasks.checkpoint(run, job, { expectedInputVersion: run.input_version, plan: {}, sources: [{ kind: 'event', id: 'event:seed' }] });
-    const intent = env.runtime.ledger.intent({ taskId: task.id, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'forget-write', effect: { type: 'email' }, payload: {}, authorize: () => ({ allowed: true }) });
+    const intent = env.runtime.ledger.intent({ taskId: task.id, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'forget-write', effect: { type: 'email' }, payload: {}, authorize: () => authorizeForTests() });
     env.runtime.db.prepare("UPDATE tool_executions SET status='dispatched',dispatched_at=? WHERE id=?").run(iso(env.runtime.database.now()), intent.execution.id);
     const at = iso(env.runtime.database.now());
     env.runtime.database.atomic(() => {
@@ -427,7 +428,7 @@ test('activation v1.5 replay matrix', async t => {
     const job = env.runtime.jobs.claim('dispatch-owner');
     const run = env.runtime.tasks.beginRun(job, { advanceGeneration: false });
     env.runtime.tasks.checkpoint(run, job, { expectedInputVersion: 0, plan: {}, sources: [] });
-    const intent = env.runtime.ledger.intent({ taskId: created.taskId, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'unknown-write', effect: { type: 'email' }, payload: {}, authorize: () => ({ allowed: true }) });
+    const intent = env.runtime.ledger.intent({ taskId: created.taskId, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'unknown-write', effect: { type: 'email' }, payload: {}, authorize: () => authorizeForTests() });
     await assert.rejects(env.runtime.ledger.dispatch(intent, { run, job, send: async (_signal, beforeDispatch) => { beforeDispatch(); sends += 1; throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); } }), { code: 'ETIMEDOUT' });
     assert.equal(env.runtime.ledger.get(intent.execution.id).status, 'unknown');
     assert.equal(sends, 1);

@@ -66,7 +66,9 @@ test('Reminders changes and deletion need selected-list grants, a current revisi
   const remove = { ...change, request: { method: 'DELETE', path: itemPath, body: { expectedUpdatedAt: item.updatedAt } }, verification: { request: { path: itemPath }, status: 404 } };
   await assert.rejects(context.runtime.connectorActions.request(context.taskId, remove, { actor: 'user' }), /Allow actions/);
   context.runtime.connectorActions.createGrant({ connectorId: 'apple_reminders', methods: ['DELETE'], pathPrefix: `/lists/${listId}`, confirmed: true });
-  assert.equal((await context.runtime.connectorActions.request(context.taskId, remove, { actor: 'user' })).state, 'verified');
+  const removed = await context.runtime.connectorActions.request(context.taskId, remove, { actor: 'user' });
+  assert.equal(removed.state, 'accepted');
+  assert.equal(removed.verified, false);
   assert.equal(writes, 2); assert.equal(item, null);
 });
 
@@ -200,13 +202,13 @@ for (const harness of ['standard', 'pi']) {
       reasoner = new OpenAiCompatibleReasoner({ baseUrl: 'https://model.invalid/v1', model: 'fixture', fetchImpl: async (_url, options) => {
         const body = JSON.parse(options.body); calls++;
         if (calls === 1) { assert.ok(body.tools.some(tool => tool.function.name === 'platform_api')); return response({ choices: [{ message: { content: null, tool_calls: [{ id: 'update-1', type: 'function', function: { name: 'platform_api', arguments: JSON.stringify(args) } }] } }] }); }
-        assert.equal(JSON.parse(body.messages.find(message => message.role === 'tool').content).state, 'verified');
+        assert.equal(JSON.parse(body.messages.find(message => message.role === 'tool').content).state, 'accepted');
         return response({ choices: [{ message: { content: JSON.stringify(answer) } }] });
       } });
     } else {
       const { createAssistantMessageEventStream } = await import('@earendil-works/pi-ai');
       reasoner = new PiReasoner({ baseUrl: 'https://model.invalid/v1', model: 'fixture', runtimeOptions: { streamFn: async (model, context) => {
-        calls++; if (calls > 1) assert.match(JSON.stringify(context.messages.find(message => message.role === 'toolResult').content), /verified/);
+        calls++; if (calls > 1) assert.match(JSON.stringify(context.messages.find(message => message.role === 'toolResult').content), /accepted/);
         const content = calls === 1 ? [{ type: 'toolCall', id: 'update-1', name: 'platform_api', arguments: args }] : [{ type: 'text', text: JSON.stringify(answer) }];
         const stream = createAssistantMessageEventStream(), message = { role: 'assistant', content, api: model.api, provider: model.provider, model: model.id, usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: calls === 1 ? 'toolUse' : 'stop', timestamp: Date.now() };
         stream.push({ type: 'done', reason: message.stopReason, message }); stream.end(message); return stream;
@@ -217,7 +219,7 @@ for (const harness of ['standard', 'pi']) {
     c.runtime.scheduleTask(c.taskId, `platform-${harness}`); c.runtime.kick(); await c.engine.whenSettled();
     assert.equal(calls, 2, JSON.stringify({ error: reasoner.lastError, task: c.runtime.tasks.get(c.taskId).reasoningWork }));
     assert.equal(c.writes.length, 1);
-    assert.ok(c.runtime.ledger.list().some(item => item.action_family === 'connector.request' && item.status === 'verified'));
+    assert.ok(c.runtime.ledger.list().some(item => item.action_family === 'connector.request' && item.status === 'accepted'));
     assert.notEqual(c.runtime.tasks.get(c.taskId).status, 'completed');
   });
 }

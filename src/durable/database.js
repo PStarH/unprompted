@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { randomBytes, createHmac } from 'node:crypto';
 
-export const SQLITE_RUNTIME = Object.freeze({ package: 'better-sqlite3', packageVersion: '12.11.1', sqliteVersion: '3.53.2', schemaVersion: 7 });
+export const SQLITE_RUNTIME = Object.freeze({ package: 'better-sqlite3', packageVersion: '12.11.1', sqliteVersion: '3.53.2', schemaVersion: 8 });
 export const durableError = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
 export const iso = value => new Date(value ?? Date.now()).toISOString();
 export const parse = value => value == null ? null : JSON.parse(value);
@@ -91,6 +91,9 @@ export class DurableDatabase {
           if (!artifacts.has('situation_id')) this.db.exec('ALTER TABLE artifacts ADD COLUMN situation_id TEXT');
           if (!artifacts.has('situation_version')) this.db.exec('ALTER TABLE artifacts ADD COLUMN situation_version INTEGER');
           if (!artifacts.has('stale')) this.db.exec('ALTER TABLE artifacts ADD COLUMN stale INTEGER NOT NULL DEFAULT 0');
+          const executions = new Set(this.db.pragma('table_info(tool_executions)').map(column => column.name));
+          if (!executions.has('evidence_json')) this.db.exec('ALTER TABLE tool_executions ADD COLUMN evidence_json TEXT');
+          if (!executions.has('authority_json')) this.db.exec('ALTER TABLE tool_executions ADD COLUMN authority_json TEXT');
           this.migrateMemorySpace();
           this.db.pragma(`user_version=${SQLITE_RUNTIME.schemaVersion}`);
         }
@@ -104,7 +107,7 @@ export class DurableDatabase {
   }
   atomic(callback) { return this.db.inTransaction ? callback(this.db) : this.writes.sync(callback); }
   write(callback) { return this.writes.write(callback); }
-  /** Additive, idempotent upgrade through v7 for the Memory Space storage layer.
+  /** Additive, idempotent upgrade through v8 for the Memory Space storage layer.
    * Existing rows keep their content; inactive task_memory sources become
    * deleted. Each memory gets one labelled baseline snapshot, never a
    * fabricated edit history. */

@@ -7,6 +7,7 @@ import { ToolExecutionLedger } from '../src/durable/execution.js';
 import { ExperienceService, arbitrateExperiences } from '../src/durable/experience.js';
 import { FeatureRegistry, ActivationPolicies } from '../src/durable/context.js';
 import { PermissionPolicy } from '../src/permissions.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 function setup(t) {
   let now = Date.now(); const database = new DurableDatabase(':memory:', { now: () => now });
@@ -40,7 +41,7 @@ test('v0.3/12 rejecting a proposed plan suppresses its equivalent action before 
   context.experiences.feedback({ kind: 'explicit_rejection', planStepId: current.step.id });
   assert.equal(context.experiences.blocked({ taskId: current.taskId, actionFamily: 'email.send', effect: JSON.parse(current.step.expected_effect_json) }), true);
   assert.throws(() => context.ledger.intent({ taskId: current.taskId, run: current.run, job: current.job, provider: 'fixture', tool: 'send', actionFamily: 'email.send', resourceId: 'mail', key: 'blocked',
-    effect: JSON.parse(current.step.expected_effect_json), payload: {}, authorize: () => ({ allowed: true }) }), /rejected an equivalent action/);
+    effect: JSON.parse(current.step.expected_effect_json), payload: {}, authorize: () => authorizeForTests() }), /rejected an equivalent action/);
 });
 
 test('v0.3/13 a heavy rewrite followed by verified sending does not reward the original style', async t => {
@@ -49,7 +50,7 @@ test('v0.3/13 a heavy rewrite followed by verified sending does not reward the o
   const revised = context.experiences.editedArtifact(artifact.id, { expectedVersion: 1, originalContent: 'Original formal wording with a long introduction.', content: 'Completely different message: revised facts and new structure.' });
   assert.ok(revised.edit_ratio >= 0.7);
   context.experiences.transitionStep(current.step.id, 'proposed', 'approved');
-  const intent = context.ledger.intent({ ...current, provider: 'fixture', tool: 'send', actionFamily: 'email.send', resourceId: 'mail', key: 'edited-write', effect: { artifactId: artifact.id }, payload: {}, planStepId: current.step.id, authorize: () => ({ allowed: true }) });
+  const intent = context.ledger.intent({ ...current, provider: 'fixture', tool: 'send', actionFamily: 'email.send', resourceId: 'mail', key: 'edited-write', effect: { artifactId: artifact.id }, payload: {}, planStepId: current.step.id, authorize: () => authorizeForTests({ id: 'edited-write' }) });
   await context.ledger.dispatch(intent, { ...current, send: async () => ({ id: 'receipt' }), verify: async receipt => ({ status: 'found', receipt }) });
   context.experiences.feedback({ kind: 'verified_consumption', taskId: current.taskId, planStepId: current.step.id, executionId: intent.execution.id, artifactId: artifact.id,
     effectDimension: 'workflow', consumption: { version: revised.visible_version, digest: revised.latest_digest } });
@@ -64,7 +65,8 @@ test('v0.3/14 independent supervised successes can promote a narrow candidate wi
     context.experiences.transitionStep(current.step.id, 'proposed', 'approved');
     const input = { ...current, provider: 'fixture', tool: 'send', actionFamily: 'email.send', resourceId: `mail-${index}`, key: `approved-${index}`, effect: { type: 'draft_format', format: 'table' }, payload: {}, planStepId: current.step.id };
     assert.throws(() => context.ledger.intent(input), /independent authorization/);
-    const intent = context.ledger.intent({ ...input, authorize: () => policy.authorize({ actionClass: 'execute_external', taskId: current.taskId, approval: { permission: 'user_approved', taskId: current.taskId } }) });
+    assert.throws(() => policy.authorize({ actionClass: 'execute_external', taskId: current.taskId, approval: { permission: 'user_approved', taskId: current.taskId } }), /requires explicit/);
+    const intent = context.ledger.intent({ ...input, authorize: () => authorizeForTests({ id: input.key, taskId: current.taskId }) });
     await context.ledger.dispatch(intent, { ...current, send: async () => ({ id: `receipt-${index}` }), verify: async receipt => ({ status: 'found', receipt }) });
     context.experiences.feedback({ kind: 'supervised_success', planStepId: current.step.id, executionId: intent.execution.id });
     context.experiences.feedback({ kind: 'supervised_success', planStepId: current.step.id, executionId: intent.execution.id });

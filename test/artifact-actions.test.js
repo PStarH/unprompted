@@ -192,21 +192,21 @@ test('mismatched readback never verifies an accepted write', async t => {
   assert.equal(context.connection.writes.length, 1);
 });
 
-test('a provider permission rejection is a known non-write and can be retried after individual review', async t => {
+test('a live provider rejection after dispatch stays unknown and is not sent again', async t => {
   const context = await fixture(t);
   const original = context.connection.connector.fetchImpl;
   context.connection.connector.fetchImpl = async (...args) => args[1].method === 'POST' ? new Response('{}', { status: 403 }) : original(...args);
   request(context);
   await context.engine.whenSettled();
   const blocked = context.runtime.tasks.get(context.taskId).artifactRequests[0];
-  assert.equal(blocked.status, 'blocked');
-  assert.equal(context.runtime.ledger.byKey(blocked.key).status, 'cancelled');
+  assert.equal(blocked.status, 'unknown');
+  assert.equal(context.runtime.ledger.byKey(blocked.key).status, 'unknown');
+  assert.ok(context.runtime.ledger.byKey(blocked.key).dispatched_at);
   context.connection.connector.fetchImpl = original;
   const retried = request(context);
-  assert.notEqual(retried.id, blocked.id);
+  assert.equal(retried.id, blocked.id);
   await context.engine.whenSettled();
-  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[1].status, 'verified');
-  assert.equal(context.connection.writes.length, 1);
+  assert.equal(context.connection.writes.length, 0);
 });
 
 test('Gmail draft permission does not enable sending or Google Docs editing', t => {
@@ -562,7 +562,7 @@ test('an automatic draft retry stays non-explicit', async t => {
   const approvals = [];
   const authorize = context.engine.policy.authorize.bind(context.engine.policy);
   context.engine.policy.authorize = input => {
-    if (input.actionClass === 'execute_external') approvals.push(input.approval?.permission);
+    if (input.actionClass === 'execute_external') approvals.push(input.approval?.kind);
     return authorize(input);
   };
   let releaseToken;
@@ -585,7 +585,7 @@ test('an automatic draft retry stays non-explicit', async t => {
   assert.equal(requests[0].status, 'blocked');
   assert.equal(requests[1].explicit, false);
   assert.equal(requests[1].status, 'verified');
-  assert.deepEqual([...new Set(approvals)], ['pre_authorized']);
+  assert.deepEqual([...new Set(approvals)], ['standing']);
   assert.equal(context.connection.writes.length, 1);
 });
 

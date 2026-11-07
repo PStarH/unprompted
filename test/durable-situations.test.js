@@ -7,6 +7,7 @@ import { SqliteStore } from '../src/durable/store.js';
 import { DurableRuntime } from '../src/durable/runtime.js';
 import { WorkEngine } from '../src/engine.js';
 import { NullReasoner } from '../src/reasoning.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 const email = (id, body = 'Please update the Cedar proposal with the experiment results and send it by Friday.') => ({
   id: `event:${id}`, type: 'email.received', payload: { id, threadId: 'cedar-thread', from: 'alex@example.test', to: 'reader@example.test', subject: 'Cedar proposal', body, receivedAt: id === 'withdrawal' ? '2026-10-26T11:00:00Z' : '2026-10-26T10:00:00Z' }
@@ -132,7 +133,7 @@ test('Forget reconciles an independent in-flight write when its shared Situation
   const queued = runtime.jobs.list({ taskId: task.taskId }).find(job => job.job_type === 'task_initial');
   const job = runtime.jobs.claim('test-worker', { id: queued.id }), run = runtime.tasks.beginRun(job);
   runtime.tasks.checkpoint(run, job, { expectedInputVersion: runtime.tasks.get(task.taskId).inputVersion, plan: {}, sources: [{ kind: 'event', id: 'event:independent' }] });
-  const intent = runtime.ledger.intent({ taskId: task.taskId, run, job, provider: 'fixture', tool: 'write', actionFamily: 'fixture.write', resourceId: 'legal-document', key: 'legal-write-key', effect: { type: 'write' }, payload: {}, authorize: () => ({ allowed: true }) });
+  const intent = runtime.ledger.intent({ taskId: task.taskId, run, job, provider: 'fixture', tool: 'write', actionFamily: 'fixture.write', resourceId: 'legal-document', key: 'legal-write-key', effect: { type: 'write' }, payload: {}, authorize: () => authorizeForTests() });
   let release, started;
   const entered = new Promise(resolve => { started = resolve; });
   const blocked = new Promise(resolve => { release = resolve; });

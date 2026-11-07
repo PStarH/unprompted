@@ -157,19 +157,13 @@ test('an authorisation for one scope does not cover a different entity', () => {
   assert.equal(store.state.outbox.length, 0);
 });
 
-test('the policy refuses a pre-authorisation that was not stated or left unnamed', () => {
+test('the policy refuses a forgeable permission string', () => {
   const policy = new PermissionPolicy();
-  assert.throws(() => policy.authorize({
-    actionClass: 'execute_external', approval: { permission: 'pre_authorized', source: 'inferred', scope: { entity: 'X' } }, taskId: 't'
-  }), /stated by the user/);
-  assert.throws(() => policy.authorize({
-    actionClass: 'execute_external', approval: { permission: 'pre_authorized', source: 'user_stated', scope: {} }, taskId: 't'
-  }), /named target/);
-  const allowed = policy.authorize({
-    actionClass: 'execute_external', approval: { permission: 'pre_authorized', source: 'user_stated', scope: { entity: 'X' } }, taskId: 't'
-  });
-  assert.equal(allowed.allowed, true);
-  assert.equal(allowed.preAuthorized, true);
+  for (const permission of ['user_approved', 'pre_authorized', 'temporary_yolo']) {
+    assert.throws(() => policy.authorize({
+      actionClass: 'execute_external', approval: { permission, source: 'user_stated', scope: { entity: 'X' }, taskId: 't', grantId: 'invented' }, taskId: 't'
+    }), /requires explicit|YOLO authorization/);
+  }
 });
 
 // ------------------------------------------- permission question lifecycle

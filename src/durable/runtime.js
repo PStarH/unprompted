@@ -89,7 +89,18 @@ export class DurableRuntime {
       artifact_publish: job => this.artifacts.publish(job),
       external_dispatch: job => this.recoverPreparedDispatch(job),
       privacy_reconcile: (job, guard) => this.reconcileExecution(job.payload.executionId, guard),
-      reconcile_execution: (job, guard) => this.reconcileExecution(job.payload.executionId, guard)
+      reconcile_execution: async (job, guard) => {
+        try { await this.reconcileExecution(job.payload.executionId, guard); }
+        catch (error) {
+          if (job.attempts >= Math.min(4, job.max_attempts || 4)) {
+            this.ledger.markInconclusive(job.payload.executionId);
+            const execution = this.ledger.get(job.payload.executionId);
+            if (execution) this.#noteInconclusive(execution);
+            return;
+          }
+          throw error;
+        }
+      }
     }, recovery: job => this.recover(job) });
     this.privacyWorker = new DurableWorker({ jobs: this.jobs, queue: 'privacy', id: `${this.owner}:privacy`, handlers: {
       finish_forget: async job => { const result = await this.privacy.finish(job.payload.requestId); if (result?.state === 'pending') throw Object.assign(new Error('Deletion still has unresolved retention.'), { status: 503 }); }
@@ -1313,7 +1324,7 @@ export class DurableRuntime {
         step = selectedStep ? this.db.prepare('SELECT * FROM plan_steps WHERE id=?').get(selectedStep) : this.experiences.step({ taskRunId: run.id, logicalStepId: key, stepKind: 'external_action', actionFamily, expectedEffect: effect });
         if (!step || selectedStep && effectDigest(parse(step.expected_effect_json)) !== effectDigest(effect)) throw durableError('PLAN_CHANGED', 'The approved Experience trial no longer matches this action.');
         if (step.status === 'proposed') this.experiences.transitionStep(step.id, 'proposed', 'approved');
-        const authorize = () => this.gateway.authorize({ taskId: task.id, provider, tool, actionFamily, resourceId, key, payload, effect, conditionalVersion, patchAuthorization: task.patchAuthorization });
+        const authorize = (call = {}) => this.gateway.decide({ taskId: task.id, provider, tool, actionFamily, resourceId, key, payload, effect, conditionalVersion, patchAuthorization: task.patchAuthorization, phase: call.phase || 'intent' });
         intent = this.ledger.intent({ taskId: task.id, run, job, provider: provider.kind || provider.id || provider, tool, actionFamily, resourceId, key, effect, payload,
           conditionalVersion, providerIdempotent: provider.live === false || provider.nativeIdempotency === true, planStepId: step.id,
           expectedInputVersion, authorize });
@@ -1321,7 +1332,7 @@ export class DurableRuntime {
       });
       claimsCommitted = true;
       this.noteObservation('external');
-      const result = await this.ledger.dispatch(intent, { run, job, send, verify, deferDispatch });
+      const result = await this.ledger.dispatch(intent, { run, job, send, verify, deferDispatch, live: provider.live === true });
       this.database.atomic(() => {
         if (verify) {
           this.experiences.transitionStep(step.id, 'executing', 'completed');
@@ -1378,18 +1389,23 @@ export class DurableRuntime {
   }
   normalizeLookup(key, provider, result) {
     const execution = this.ledger.byKey(key);
+    if (execution?.status === 'verified') {
+      const evidence = parse(execution.evidence_json);
+      return { status: 'found', receipt: parse(execution.result_json), evidence, detail: 'Stored verification stands. A later search miss does not demote it.' };
+    }
     if (execution && ['dispatched', 'accepted', 'unknown'].includes(execution.status) && result.status === 'not_found' && provider.live !== false && !provider.reliableAbsence && !provider.nativeIdempotency) return { status: 'unknown', receipt: null, detail: 'A search miss cannot prove the earlier write stopped. Manual reconciliation is required.' };
     return result;
   }
   verifiedAction(taskId, receipt) {
     const task = this.store.state.tasks[taskId], key = task?.action?.idempotencyKey;
     const execution = key && this.ledger.byKey(key);
-    if (execution && !execution.privacy_redacted) {
+    if (!execution || execution.status !== 'verified') return;
+    if (receipt?.idempotencyKey && receipt.idempotencyKey !== execution.idempotency_key) return;
+    if (!execution.privacy_redacted) {
       // Verification may be replayed after a crash before the task itself was
       // marked complete. Persist its attribution as one unit and reuse the
       // evidence already recorded for this exact external execution.
       this.database.atomic(() => {
-        this.ledger.verified(execution.id, receipt);
         const step = execution.plan_step_id && this.db.prepare('SELECT * FROM plan_steps WHERE id=?').get(execution.plan_step_id);
         if (step?.status === 'executing') this.experiences.transitionStep(step.id, 'executing', 'completed');
         if (step && !this.db.prepare("SELECT 1 FROM feedback_events WHERE execution_id=? AND kind='supervised_success' AND plan_step_id=?").get(execution.id, step.id))
@@ -1499,7 +1515,18 @@ export class DurableRuntime {
       else {
         const result = await this.ledger.reconcile(execution.id, this.providerFor(execution));
         if (result.status === 'not_found') this.releaseTaskCoordination(execution.task_id);
-        if (result.status === 'unknown') { this.jobs.deferRecovery(job.id, job.lease_token); return; }
+        if (result.status === 'unknown') {
+          const count = Number(job.payload?.recoveryCount || 0) + 1;
+          if (count >= 4) {
+            this.ledger.markInconclusive(execution.id);
+            this.#noteInconclusive(execution);
+            this.jobs.recover(job.id, () => ({ state: 'completed', safeToRepeat: true, reconciliationClosed: true }));
+            return;
+          }
+          this.database.atomic(() => this.db.prepare('UPDATE jobs SET payload_json=? WHERE id=?').run(json({ ...job.payload, recoveryCount: count }), job.id));
+          this.jobs.deferRecovery(job.id, job.lease_token);
+          return;
+        }
       }
     }
     this.jobs.recover(job.id, () => ({ state: ['external_dispatch', 'privacy_reconcile', 'reconcile_execution'].includes(job.job_type) ? 'completed' : 'queued', safeToRepeat: true }));
@@ -1634,7 +1661,14 @@ export class DurableRuntime {
       }
     });
   }
+  #noteInconclusive(execution) {
+    if (execution.action_family !== 'email.send') return;
+    const task = this.store.state.tasks[execution.task_id];
+    if (!task?.action || task.action.idempotencyKey !== execution.idempotency_key) return;
+    this.engine.uncertain(task.id, 'Automatic checks still cannot tell whether this message was sent.');
+  }
   start() {
+    this.ledger.cancelMissingAuthority();
     this.repairStandingIntentWork();
     this.importUncertainActions();
     this.ledger.recoverUnfinished();

@@ -3,6 +3,7 @@ import { ArtifactProvider, ARTIFACT_ACTIONS, artifactObservationText } from '../
 import { digest, explicitTasks } from '../connectors/local-snapshot.js';
 import { durableError, iso, json, parse } from './database.js';
 import { effectDigest } from './experience.js';
+import { issueCredential } from '../authority-credential.js';
 import { draftReviewToken } from '../draft-review.js';
 import { reminderListId } from '../connectors/apple-reminders.js';
 
@@ -68,12 +69,15 @@ export class ArtifactActions {
     });
   }
   revoke(id) {
-    return this.database.atomic(() => {
-      const grants = this.grants(), grant = grants.find(item => item.id === id);
-      if (!grant) throw fail('Artifact authorization not found.', 'MISSING_ARTIFACT_GRANT', 404);
-      if (grant.status === 'active') { grant.status = 'revoked'; grant.version++; this.database.set('artifact_grants', json(grants)); this.database.bump('context_version'); }
-      return grant;
+    const grant = this.database.atomic(() => {
+      const grants = this.grants(), current = grants.find(item => item.id === id);
+      if (!current) throw fail('Artifact authorization not found.', 'MISSING_ARTIFACT_GRANT', 404);
+      if (current.status === 'active') { current.status = 'revoked'; current.version++; this.database.set('artifact_grants', json(grants)); this.database.bump('context_version'); }
+      this.runtime.ledger.cancelUndispatched({ kind: 'standing', id: current.id });
+      return current;
     });
+    this.engine.store.refresh?.();
+    return grant;
   }
   covers(grant, task) {
     if (grant.status !== 'active' || grant.createdBy !== 'user' || !grant.confirmedAt || grant.taskId && grant.taskId !== task.id
@@ -128,7 +132,7 @@ export class ArtifactActions {
   }
   effect(request) { return { type: 'artifact_create', requestId: request.id, grantId: request.grantId, accountId: request.accountId,
     targetId: request.targetId, contentDigest: effectDigest(request.payload) }; }
-  authorize({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect }) {
+  credential({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect }) {
     const task = this.runtime.tasks.get(taskId), request = task?.artifactRequests?.find(item => item.key === key);
     const grant = request && this.grants().find(item => item.id === request.grantId);
     if (request && grant && grant.status === 'active' && grant.version === request.grantVersion && request.status === 'executing'
@@ -143,8 +147,9 @@ export class ArtifactActions {
       || this.provider(grant)?.connector !== provider.connector || provider.targetId !== grant.targetId
       || grant.family === 'email.draft' && (request.draftToken !== draftReviewToken(task) || task.action || task.draft?.userEdited)) throw fail('The artifact differs from the authorized task or target.');
     this.check(task, grant, { explicit: request.explicit });
-    return request.explicit ? { permission: 'user_approved', taskId }
-      : { permission: 'pre_authorized', source: 'user_stated', scope: { entity: grant.targetId }, grantId: grant.id };
+    const effectDigestValue = effectDigest(effect);
+    if (request.explicit) return issueCredential({ kind: 'approval', id: key, version: Number(grant.version) || 1, taskId, effectDigest: effectDigestValue });
+    return issueCredential({ kind: 'standing', id: grant.id, version: Number(grant.version) || 1, taskId, effectDigest: effectDigestValue });
   }
   record(taskId, requestId, fields) {
     this.engine.store.mutateIfChanged(state => {
@@ -236,7 +241,7 @@ export class ArtifactActions {
     const grant = this.grants().find(item => item.id === request.grantId), provider = grant && this.provider(grant);
     if (!provider || provider.kind !== execution.provider) throw fail('Reconnect the artifact account to undo it.', 'UNDO_UNAVAILABLE', 409);
     if (!['google', 'microsoft', 'notion'].includes(grant.connectorId)) throw fail('This target cannot remove artifacts automatically. Delete it in the app where it was created.', 'UNDO_UNSUPPORTED', 409);
-    this.engine.policy.authorize({ actionClass: 'execute_external', approval: { permission: 'user_approved', taskId }, taskId });
+    this.engine.toolGateway.decide({ taskId, actionFamily: 'artifact.undo', tool: 'remove_artifact', key: `undo:${request.id}`, origin: 'approval', effect: { type: 'artifact_undo', requestId: request.id }, phase: 'issue' });
     this.record(taskId, requestId, { undo: { status: 'running', at: iso(this.database.now()) } });
     let removed = false;
     try {

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { API_METHODS, PLATFORM_APIS, platformRequest } from '../connectors/platform-api.js';
 import { draftReviewToken } from '../draft-review.js';
 import { durableError, iso, json, parse } from './database.js';
+import { issueCredential } from '../authority-credential.js';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex');
 const deny = (message, code = 'CONNECTOR_AUTHORIZATION_REQUIRED', status = 403) => durableError(code, message, status);
@@ -49,10 +50,14 @@ export class ConnectorActions {
     });
   }
   revoke(id) {
-    return this.database.atomic(() => { const grants = this.grants(), grant = grants.find(item => item.id === id);
-      if (!grant) throw deny('Platform authorization not found.', 'CONNECTOR_GRANT_NOT_FOUND', 404);
-      grant.status = 'revoked'; grant.version++; this.database.set('connector_action_grants', json(grants)); this.database.bump('context_version'); return publicGrant(grant);
+    const grant = this.database.atomic(() => { const grants = this.grants(), current = grants.find(item => item.id === id);
+      if (!current) throw deny('Platform authorization not found.', 'CONNECTOR_GRANT_NOT_FOUND', 404);
+      current.status = 'revoked'; current.version++; this.database.set('connector_action_grants', json(grants)); this.database.bump('context_version');
+      this.runtime.ledger.cancelUndispatched({ kind: 'standing', id: current.id });
+      return publicGrant(current);
     });
+    this.engine.store.refresh?.();
+    return grant;
   }
   covers(grant, task, spec, accountId) {
     // %2F and %2E decode into slashes and dots, so a prefix check after decoding
@@ -84,11 +89,11 @@ export class ConnectorActions {
     if (!record.verification || this.account(connector) !== record.accountId) return { status: 'unknown' };
     const spec = record.verification; let read;
     try { read = await connector.requestApi(spec.request, { signal, beforeDispatch: () => { if (connector !== this.connector(record.connectorId) || this.account(connector) !== record.accountId) throw deny('The connected account changed during verification.'); } }); }
-    catch (error) { if (spec.status === 404 && error.status === 404) return { status: 'found', receipt: { id: receiptId || record.key, status: 'verified', idempotencyKey: record.key } }; throw error; }
+    catch (error) { if (error.status === 404) return { status: 'not_found', receipt: null, detail: 'The provider read returned 404. That is not evidence the write is present.' }; throw error; }
     if (read.status !== (spec.status || 200) || (spec.matches || []).some(match => !equal(pointer(read.body, match.pointer), match.value))) return { status: 'unknown' };
     return { status: 'found', receipt: { id: receiptId || record.key, status: 'verified', idempotencyKey: record.key } };
   }
-  authorize({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect }) {
+  credential({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect }) {
     const task = this.runtime.tasks.get(taskId), request = task?.platformRequests?.find(item => item.key === key);
     if (!active(task) || !request || this.engine.policy.shadow || this.runtime.closed || this.runtime.suspended || request.inputVersion !== task.inputVersion
       || request.privacyEpoch !== task.privacyEpoch || !equal(request.payload, payload) || !equal(request.effect, effect) || request.resourceId !== resourceId || request.provider !== provider.kind || tool !== request.tool) throw deny('The platform action no longer matches its current authorization.');
@@ -100,7 +105,11 @@ export class ConnectorActions {
     } else if (actionFamily === 'mcp.tool') {
       if (this.mcpChecks.get(key)?.() !== true) throw deny('The MCP tool permission or connection changed.');
     } else throw deny('Unknown platform action.');
-    return request.explicit ? { permission: 'user_approved', taskId } : { permission: 'pre_authorized', source: 'user_stated', scope: { entity: request.accountId || request.provider }, taskId };
+    const version = Number(request.grantVersion) || 1;
+    if (request.explicit) return issueCredential({ kind: 'approval', id: key, version, taskId, effectDigest: effect?.requestDigest || effect?.argumentsDigest || null });
+    if (actionFamily === 'mcp.tool') return issueCredential({ kind: 'standing', id: `mcp:${request.accountId}:${tool}`, version: 1, taskId, effectDigest: effect?.argumentsDigest || null });
+    const grant = this.grants().find(item => item.id === request.grantId);
+    return issueCredential({ kind: 'standing', id: grant.id, version: Number(grant.version) || version, taskId, effectDigest: effect?.requestDigest || null });
   }
   async dispatch(task, request, provider, send, verify) {
     const previous = this.runtime.ledger.byKey(request.key);
@@ -126,7 +135,8 @@ export class ConnectorActions {
     const accountId = this.account(connector), grant = this.grants().find(item => this.covers(item, task, spec, accountId));
     if (!grant) throw deny('Allow actions for this account and target before executing.');
     if (input.operationId != null && (typeof input.operationId !== 'string' || input.operationId.length > 100)) throw deny('Invalid operation identity.', 'INVALID_PLATFORM_ACTION', 400);
-    const verification = this.verification(connector, input.verification);
+    const supplied = this.verification(connector, input.verification);
+    const verification = context.actor === 'user' && supplied && supplied.status !== 404 ? supplied : null;
     const payload = { request: input.request }, effect = { connectorId: connector.id, accountId, requestDigest: digest(payload), verification: verification || null };
     const key = `platform:${digest([task.id,task.inputVersion,connector.id,accountId,payload,verification,input.operationId || null])}`;
     const provider = { kind: `platform:${connector.id}`, connector, live: true, dispatchGuard: true };
@@ -156,7 +166,7 @@ export class ConnectorActions {
   }
   recoveryProvider(execution) {
     const record = this.runtime.tasks.get(execution.task_id)?.platformRequests?.find(item => item.key === execution.idempotency_key);
-    return record?.family === 'connector.request' && record.verification ? { lookup: (_key, options) => this.lookup(record, options.receiptId, options.signal) } : null;
+    return record?.family === 'connector.request' && record.verification && record.explicit ? { lookup: (_key, options) => this.lookup(record, options.receiptId, options.signal) } : null;
   }
   tools({ taskId, isCurrent = () => false } = {}) {
     const platforms = this.describe().platforms;

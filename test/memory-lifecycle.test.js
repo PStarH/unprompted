@@ -49,7 +49,7 @@ test('v5 workspaces gain Memory Space columns and tables additively without losi
   downgradeToV5(context.database);
   context.reopen();
   assert.equal(context.database.db.pragma('user_version', { simple: true }), SQLITE_RUNTIME.schemaVersion);
-  assert.equal(SQLITE_RUNTIME.schemaVersion, 7);
+  assert.equal(SQLITE_RUNTIME.schemaVersion, 8);
   const columns = new Map(context.database.db.pragma('table_info(user_memories)').map(column => [column.name, column]));
   assert.equal(columns.get('memory_kind').dflt_value, "'fact'");
   assert.equal(columns.get('lifecycle_state').dflt_value, "'active'");
