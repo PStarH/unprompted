@@ -2,6 +2,7 @@ import { DurableDatabase, iso } from '../../src/durable/database.js';
 import { DurableJobs } from '../../src/durable/jobs.js';
 import { DurableTasks } from '../../src/durable/tasks.js';
 import { ToolExecutionLedger } from '../../src/durable/execution.js';
+import { authorizeForTests } from '../../src/authority-credential.js';
 
 const [mode, filename, endpoint] = process.argv.slice(2);
 const database = new DurableDatabase(filename), jobs = new DurableJobs(database), tasks = new DurableTasks(database, jobs);
@@ -29,7 +30,7 @@ if (mode === 'claim') {
   tasks.checkpoint(run, job, { expectedInputVersion: 0, plan: {} });
   const ledger = new ToolExecutionLedger(database, { jobs, tasks });
   const intent = ledger.intent({ taskId: created.taskId, run, job, provider: 'fixture', tool: 'send', actionFamily: 'fixture.send', resourceId: 'shared', key: 'crash-write',
-    payload: {}, effect: { type: 'fixture' }, authorize: () => ({ allowed: true }) });
+    payload: {}, effect: { type: 'fixture' }, authorize: () => authorizeForTests() });
   await ledger.dispatch(intent, { run, job, send: async () => {
     await fetch(endpoint, { method: 'POST' });
     process.exit(23);

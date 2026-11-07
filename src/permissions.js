@@ -12,6 +12,8 @@
  *   execute_external   - anything a third party can observe
  */
 
+import { isAuthorityCredential } from './authority-credential.js';
+
 export const ACTION_CLASSES = ['observe', 'prepare', 'execute_external'];
 
 const DEFAULT_POLICY = {
@@ -55,31 +57,21 @@ export class PermissionPolicy {
     // Shadow mode is read-only at the policy boundary. Approval and
     // pre-authorisation cannot promote an external write.
     if (this.shadow && actionClass === 'execute_external') {
-      throw new PermissionDeniedError('Shadow mode is read-only. External writes are refused.');
+      throw Object.assign(new PermissionDeniedError('Shadow mode is read-only. External writes are refused.'), { code: 'SHADOW_READ_ONLY', status: 403, definitiveNoEffect: true });
     }
     if (!rule.requiresApproval) return { allowed: true, actionClass, reason: 'No approval required for this class.' };
-    if (approval?.permission === 'temporary_yolo') {
-      if (!this.temporaryAuthorization?.(approval, taskId)) throw Object.assign(
-        new PermissionDeniedError('The YOLO authorization expired, was revoked, or belongs to a different task.'),
-        { code: 'AUTHORIZATION_REQUIRED', status: 403, definitiveNoEffect: true });
-      return { allowed: true, actionClass, reason: 'Active temporary user authorization.', grantId: approval.grantId };
+    const credential = isAuthorityCredential(approval) ? approval : null;
+    if (!credential) {
+      const forged = approval?.permission;
+      const message = forged === 'temporary_yolo'
+        ? 'A permission string is not a YOLO authorization. The stored lease was not accepted.'
+        : `Action class "${actionClass}" requires explicit user approval before execution.`;
+      throw Object.assign(new PermissionDeniedError(message), { code: 'AUTHORIZATION_REQUIRED', status: 403, definitiveNoEffect: true });
     }
-    if (approval?.permission === 'user_approved') {
-      if (taskId && approval.taskId && approval.taskId !== taskId) {
-        throw new PermissionDeniedError('Approval was granted for a different task.');
-      }
-      return { allowed: true, actionClass, reason: 'Explicit user approval present.', approvedAt: approval.approvedAt || null };
+    if (taskId && credential.taskId && credential.taskId !== taskId) {
+      throw Object.assign(new PermissionDeniedError('Approval was granted for a different task.'), { code: 'EFFECT_MISMATCH', status: 403, definitiveNoEffect: true });
     }
-    // A previously authorised, clearly scoped, repeated process may run
-    // without a fresh click. The scope must come from the user and must name what
-    // it covers, so a bare permission flag can never satisfy this branch.
-    if (approval?.permission === 'pre_authorized') {
-      if (approval.source !== 'user_stated' || !approval.scope?.entity) {
-        throw new PermissionDeniedError('A pre-authorisation must be stated by the user and scoped to a named target.');
-      }
-      return { allowed: true, actionClass, reason: 'Pre-authorised scope from the user.', preAuthorized: true, grantId: approval.grantId || null };
-    }
-    throw new PermissionDeniedError(`Action class "${actionClass}" requires explicit user approval before execution.`);
+    return { allowed: true, actionClass, reason: 'Stored authorization credential.', credential };
   }
 
   describe() {

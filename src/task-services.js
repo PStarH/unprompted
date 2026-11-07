@@ -8,6 +8,7 @@ import { rankCandidates } from './correlation.js';
 import { assessPlan } from './probes/assess.js';
 import { buildDeterministicPlan } from './probes/plan.js';
 import { interpretRequest } from './requests.js';
+import { PermissionDeniedError } from './permissions.js';
 
 const stamp = () => new Date().toISOString();
 const normalise = value => String(value ?? '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
@@ -533,8 +534,8 @@ export class TaskServices {
     const durable = this.engine?.durableRuntime;
     const durableFence = durable?.capture(taskId);
     if (autonomyGrantId) {
-      this.policy.authorize({ actionClass: 'execute_external', taskId,
-        approval: { permission: 'temporary_yolo', taskId, grantId: autonomyGrantId } });
+      const lease = this.engine?.autonomy?.grants().find(item => item.id === autonomyGrantId);
+      if (!this.engine?.autonomy?.valid(lease, taskId)) throw new PermissionDeniedError('The YOLO authorization expired, was revoked, or belongs to a different task.');
       authorization = { kind: 'temporary_yolo', confirmed: true, taskId, patchId, baseDocumentVersion: patch?.baseDocument.version };
     }
     if (task.control?.paused) throw new Error('This task is paused. Resume it before applying a document patch.');
@@ -654,7 +655,14 @@ export class TaskServices {
       applied = durable ? await durable.external({ ...task, patchAuthorization }, {
         ...writeSpec, deferDispatch: true,
         send: (signal, guard) => provider.apply({ ...input, signal, beforeWrite: () => { guard(); beforeWrite(); } }),
-        verify: result => result?.readbackVerified || result?.simulated ? { status: 'found', receipt: { id: result.revisionId || patch.id, provider: patch.provider, status: 'verified' } } : { status: 'unknown' }
+        verify: async () => {
+          if (typeof provider.read !== 'function') return { status: 'unknown', detail: 'The document provider has no independent read.' };
+          const readback = await provider.read(currentDocument);
+          const actual = String(readback?.content || '').replace(/\r\n?/g, '\n');
+          const actualDigest = crypto.createHash('sha256').update(actual).digest('hex');
+          if (actualDigest !== writeSpec.effect.expectedContentDigest) return { status: 'unknown', detail: 'The independent document read did not match the patch digest.' };
+          return { status: 'found', receipt: { id: readback.revisionId || patch.id, provider: patch.provider, status: 'verified', idempotencyKey: writeSpec.key } };
+        }
       }) : await provider.apply(input);
     } catch (error) {
       if (durable && !durable.isCurrent(taskId, durableFence, { allowDirty: true })) throw Object.assign(new Error('The task was invalidated while the document operation was in flight. Its result requires reconciliation.'), { writeOutcomeUnknown: true });

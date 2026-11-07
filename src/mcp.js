@@ -313,10 +313,14 @@ export class McpManager {
     if (typeof remove !== 'boolean' || typeof reconnect !== 'boolean') throw fail('Invalid MCP update value.');
     if (!Object.hasOwn(this.configs, id)) throw fail('Unknown MCP server.', 404);
     return this.exclusive(async () => {
+      const previousTools = [...(this.configs[id]?.writeTools || [])];
       const merged = { ...this.configs };
       if (remove) delete merged[id];
       else merged[id] = normalizeMcpConfig(id, { ...merged[id], ...(enabled != null ? { enabled } : {}), ...(readTools != null ? { readTools } : {}), ...(writeTools != null ? { writeTools } : {}), ...(readResources != null ? { readResources } : {}), ...(allowDeclaredRead != null ? { allowDeclaredRead } : {}) });
       this.configStore.write(merged); this.configs = merged;
+      const nextTools = new Set(merged[id]?.writeTools || []);
+      const removedTools = previousTools.filter(tool => !nextTools.has(tool));
+      if (removedTools.length) this.onWriteToolsChanged?.({ id, removed: removedTools });
       const permissionsChanged = readTools != null || writeTools != null || readResources != null || allowDeclaredRead != null;
       if (remove || !merged[id].enabled || reconnect || permissionsChanged) await this.disconnect(id);
       if (merged[id]?.enabled && (reconnect || enabled === true || permissionsChanged)) await this.connect(id);

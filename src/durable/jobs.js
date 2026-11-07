@@ -83,7 +83,7 @@ export class DurableJobs {
       const unresolved = this.db.prepare("SELECT id FROM tool_executions WHERE (job_id=? OR task_run_id IN (SELECT id FROM task_runs WHERE job_id=?)) AND is_write=1 AND status IN ('intent','dispatched','accepted','unknown')").all(id, id);
       const decision = inspect({ job, unresolved });
       if (decision?.then) throw new TypeError('Recovery inspection must not await external operations. Reconcile first.');
-      if (unresolved.length && decision?.state !== 'cancelled') return { ...job, reconciliationRequired: true };
+      if (unresolved.length && decision?.state !== 'cancelled' && decision?.reconciliationClosed !== true) return { ...job, reconciliationRequired: true };
       if (!['queued', 'completed', 'cancelled', 'dead'].includes(decision?.state)) throw durableError('INVALID_RECOVERY', 'Recovery must explicitly confirm a safe next state.');
       if (decision.state === 'queued' && !decision.safeToRepeat) throw durableError('INVALID_RECOVERY', 'Recovery has not confirmed safe re-execution.');
       const nextState = decision.state === 'queued' && job.attempts >= job.max_attempts ? 'dead' : decision.state;

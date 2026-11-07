@@ -2,10 +2,17 @@
 
 [← Documentation](README.md)
 
-Design for review. This document does not change runtime behavior. It specifies
-how outbound send must be verified before a later change may claim success.
-Authority rules for the same executions are in
-[Authority enforcement](AUTHORITY_ENFORCEMENT.md).
+> **Superseded where it conflicts.** Runtime behavior is defined by
+> [Send authority locked](SEND_AUTHORITY_LOCKED.md). This file is the earlier
+> draft. Where the two disagree, including attestation, standing grants, and
+> unverifiable MCP or platform writes, follow the locked document. The
+> independent lock review is
+> [SEND_AUTHORITY_LOCKED_REVIEW.md](reviews/SEND_AUTHORITY_LOCKED_REVIEW.md).
+
+Historical draft. It specifies how outbound send must be verified. Authority
+rules for the same executions are in
+[Authority enforcement](AUTHORITY_ENFORCEMENT.md), also superseded where it
+conflicts with the locked document.
 
 The product already refuses to treat a model sentence as delivery. The gap is
 that a live send can still be recorded as accepted before an independent

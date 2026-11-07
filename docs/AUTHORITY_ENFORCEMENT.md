@@ -2,10 +2,19 @@
 
 [← Documentation](README.md)
 
-Design for review. This document does not change runtime behavior. It
-specifies the execution-layer check for outbound mutations. Read-back and
-retry rules for those mutations are in
-[Send read-back verification](SEND_VERIFICATION.md).
+> **Superseded where it conflicts.** Runtime behavior is defined by
+> [Send authority locked](SEND_AUTHORITY_LOCKED.md). This file is the earlier
+> draft. Standing connector, artifact, MCP `writeTools`, and calibration
+> `allow` records count as in-scope approval credentials at `AuthorityGate.decide`
+> (locked decision 3). They must not bypass that gate. Where this draft says
+> those records cannot authorize a mutation by themselves, follow the locked
+> document. The independent lock review is
+> [SEND_AUTHORITY_LOCKED_REVIEW.md](reviews/SEND_AUTHORITY_LOCKED_REVIEW.md).
+
+Historical draft. It specifies the execution-layer check for outbound
+mutations. Read-back and retry rules for those mutations are in
+[Send read-back verification](SEND_VERIFICATION.md), also superseded where it
+conflicts with the locked document.
 
 Observation and preparation stay quiet. An external mutation needs a
 persisted user credential that the execution layer reads again at dispatch.

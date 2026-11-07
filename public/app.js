@@ -306,7 +306,10 @@ function renderApproval(task) {
     return ui`<div class="approval-done"><span class="status-pill completed">Verified complete</span><h3>Action confirmed</h3><p>${verifiedLive ? copy('Gmail confirmed the message exists. The result came from the provider, not from a local record.') : copy('After approval the simulated provider accepted the reply. The result was verified by receipt lookup, not assumed from the send attempt.')}</p><div class="receipt">${copy('回执 {id} · {kind} · {time}', { id: escapeHtml(task.action?.receiptId || ''), kind: verifiedLive ? copy('真实提供方') : copy('模拟发送'), time: time(task.action?.verifiedAt) })}</div></div>`;
   }
   if (task.status === 'blocked' && task.action) {
-    return ui`<div class="approval-blocked"><span class="status-pill blocked">Outcome needs attention</span><h3>Delivery not confirmed</h3><p>${escapeHtml(task.reason)}</p><div class="receipt">No automatic retry. The provider is checked before any further attempt.</div><div class="approval-buttons"><button class="secondary-button" data-action="reconcile" data-id="${escapeHtml(task.id)}">Reconcile outcome</button>${task.action.status === 'confirmed_absent' && !runtime?.shadow ? ui`<button class="primary-button" data-action="retry" data-id="${escapeHtml(task.id)}">Retry after confirmed absence</button>` : ''}</div></div>`;
+    const liveAttempt = Boolean(task.action.live);
+    const showRetry = task.action.status === 'confirmed_absent' && !runtime?.shadow && !liveAttempt;
+    const showAttest = liveAttempt && ['uncertain', 'accepted_live'].includes(task.action.status);
+    return ui`<div class="approval-blocked"><span class="status-pill blocked">Outcome needs attention</span><h3>Delivery not confirmed</h3><p>${escapeHtml(task.reason)}</p><div class="receipt">No automatic retry. The provider is checked before any further attempt.</div><div class="approval-buttons"><button class="secondary-button" data-action="reconcile" data-id="${escapeHtml(task.id)}">Reconcile outcome</button>${showRetry ? ui`<button class="primary-button" data-action="retry" data-id="${escapeHtml(task.id)}">Retry after confirmed absence</button>` : ''}${showAttest ? ui`<button class="secondary-button" data-action="attest" data-id="${escapeHtml(task.id)}">${copy('我已查看，这次没有发出')}</button>` : ''}</div></div>`;
   }
   if (task.status === 'blocked') return ui`<div class="approval-blocked"><span class="status-pill blocked">Not sent</span><h3>Draft declined</h3><p>${escapeHtml(task.reason)}</p></div>`;
   if (task.status === 'cancelled') return ui`<div class="approval-blocked"><span class="status-pill cancelled">Closed</span><h3>Request closed</h3><p>${escapeHtml(task.reason)}</p></div>`;
@@ -766,7 +769,10 @@ function renderTaskAction(task) {
     ${errorHTML}</div>`;
   }
   if (task.status === 'blocked' && task.action) {
-    return ui`<div class="task-action"><h4>先确认上次行动的结果</h4><p>${escapeHtml(task.reason || copy('提供方尚未确认结果，我没有自动重试。'))}</p><div class="action-row"><button class="primary-button" data-action="reconcile" data-id="${id}">核实发送结果</button>${task.action.status === 'confirmed_absent' && !runtime?.shadow ? ui`<button class="secondary-button" data-action="retry" data-id="${id}">已确认未发送，重试</button>` : ''}</div>${errorHTML}</div>`;
+    const liveAttempt = Boolean(task.action.live);
+    const showRetry = task.action.status === 'confirmed_absent' && !runtime?.shadow && !liveAttempt;
+    const showAttest = liveAttempt && ['uncertain', 'accepted_live'].includes(task.action.status);
+    return ui`<div class="task-action"><h4>先确认上次行动的结果</h4><p>${escapeHtml(task.reason || copy('提供方尚未确认结果，我没有自动重试。'))}</p><div class="action-row"><button class="primary-button" data-action="reconcile" data-id="${id}">核实发送结果</button>${showRetry ? ui`<button class="secondary-button" data-action="retry" data-id="${id}">已确认未发送，重试</button>` : ''}${showAttest ? ui`<button class="secondary-button" data-action="attest" data-id="${id}">${copy('我已查看，这次没有发出')}</button>` : ''}</div>${errorHTML}</div>`;
   }
   return errorHTML;
 }
@@ -2100,6 +2106,7 @@ document.addEventListener('click', async event => {
       approve: result.status === 'completed' ? copy('回复已发送，结果已核验。') : copy('已发起发送，结果仍需核实。'),
       reject: copy('已搁下这次回复，没有发送。'),
       retry: copy('已重试并向提供方核实结果。'),
+      attest: copy('我已查看，这次没有发出'),
       reconcile: copy('已向提供方核实结果。'),
       cancel: copy('已关闭这件事，没有发送回复。'),
       reopen: copy('已恢复跟进，已重新核对当前证据。没有发送回复。')
