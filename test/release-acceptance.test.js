@@ -383,8 +383,8 @@ test('scene 3 failure: a mismatch or uncertain write is not treated as verified'
     engine.ingest(gmail('cedar-mail'));
     const taskId = 'request:cedar-mail';
     engine.waitForTask(taskId, { kind: 'document', dependsOn: { documentId: 'cedar-brief' } });
-    const formatted = INCOMPLETE.replace('Overview', 'Overview');
-    engine.ingest(documentEvent(`${formatted}\n`, { id: 'format-only', at: LATER }));
+    const formatted = INCOMPLETE.replace('## Overview', '## **Overview**');
+    engine.ingest(documentEvent(formatted, { id: 'format-only', at: LATER }));
     assert.equal(store.state.taskWaits[taskId].status, 'active');
     const patch = await engine.prepareDocumentPatch(taskId, {
       provider: 'local',
