@@ -2520,8 +2520,11 @@ export class WorkEngine {
    * message could not be read back: the action is not complete and not retried,
    * and reconciliation can still resolve it.
    */
-  uncertain(taskId, reason, { status = 'uncertain', receipt = null } = {}) {
+  uncertain(taskId, reason, { status = 'uncertain', receipt = null, close = null } = {}) {
     if (typeof reason !== 'string' || !reason.trim()) reason = 'The provider has not confirmed whether this action took effect. No automatic retry was attempted.';
+    // A durable runtime keeps reconciling until the cap writes an explicit close.
+    // Without that runtime, this call is the end of automatic reconciliation.
+    const recordedClose = close || (this.durableRuntime ? null : 'reconciliation_inconclusive');
     this.store.mutate(state => {
       const task = state.tasks[taskId];
       task.status = 'blocked';
@@ -2532,8 +2535,16 @@ export class WorkEngine {
         task.action.phase = 'uncertain';
         if (receipt?.id) task.action.receiptId = receipt.id;
       }
+      if (recordedClose === 'reconciliation_inconclusive') {
+        task.reconciliation_inconclusive = true;
+        if (task.action) task.action.close = 'reconciliation_inconclusive';
+      } else if (recordedClose === 'attestation_request') {
+        task.attestationRequest = true;
+        if (task.action) task.action.close = 'attestation_request';
+      }
       record(state, 'uncertain', reason, taskId);
-      // An unknown external outcome is exactly what the user must decide.
+      if (!recordedClose) return;
+      // Only a recorded close is a Needs you interruption. In-flight checks stay quiet.
       emitNotification(state.notifications, notification({
         kind: 'blocker', priority: 'high', dedupeKey: `blocker:${taskId}`, taskId, at: stamp(),
         headline: status === 'accepted_live'

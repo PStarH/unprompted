@@ -1,3 +1,5 @@
+import { needsUserAttention } from './workspace-model.js';
+
 // Device-local presentation preferences. These never grant execution permission.
 export function readLocal(key, fallback = null) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
@@ -46,11 +48,16 @@ export function evidenceDelta(task, before) {
     fromVersion: before.version, toVersion: after.version };
 }
 
-export function decisionQueue(tasks, notices = []) {
+export function decisionQueue(tasks, notices = [], context = {}) {
+  const admitted = new Set(tasks.filter(task => needsUserAttention(task, context)).map(task => task.id));
   const items = [
-    ...tasks.filter(task => task.status === 'ready_for_approval' || (task.status === 'blocked' && task.action))
+    ...tasks.filter(task => admitted.has(task.id))
       .map(task => ({ key: `task:${task.id}`, kind: 'task', value: task })),
-    ...notices.map(notice => ({ key: `notice:${notice.id}`, kind: 'notice', value: notice }))
+    ...notices.filter(notice => {
+      if (['pending', 'digest'].includes(notice.deliveryState)) return false;
+      if (notice.kind === 'blocker' && notice.taskId && tasks.some(task => task.id === notice.taskId) && !admitted.has(notice.taskId)) return false;
+      return true;
+    }).map(notice => ({ key: `notice:${notice.id}`, kind: 'notice', value: notice }))
   ];
   const rank = item => item.kind === 'task' ? (item.value.status === 'blocked' ? 0 : 1) : (item.value.priority === 'high' ? 0 : 2);
   const score = item => item.kind === 'task' ? Number(item.value.management?.priority?.score) || 0 : item.value.priority === 'high' ? 100 : 0;
@@ -73,7 +80,8 @@ export function visibleAttentionItems(state) {
   return (state.notifications || []).filter(item => {
     if (['pending', 'digest'].includes(item.deliveryState)) return false;
     const task = tasks.find(candidate => candidate.id === item.taskId);
-    if (item.kind === 'blocker' && task?.status === 'blocked' && task.action) return false;
+    if (item.kind === 'blocker' && task && !needsUserAttention(task, state)) return false;
+    if (item.kind === 'blocker' && task?.status === 'blocked' && task.action && needsUserAttention(task, state)) return false;
     // Stalled prompts are normal-priority reminders. Keep deadline, risk and
     // uncertain-execution notices intact; those use their own notification IDs.
     if (String(item.dedupeKey || '').startsWith('stalled:') && sharedWaitingTaskIds.has(item.taskId)) return false;

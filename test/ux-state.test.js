@@ -105,9 +105,15 @@ test('task order follows the explainable priority score while the selected decis
   assert.equal(decisionCursor(after, 'task:routine', 0), 'task:routine', 'the current item remains selected after a higher priority item arrives');
 });
 
-test('completed, closed and still-waiting tasks never become actionable relay cards', () => {
-  const queue = decisionQueue([{ id: 'a', status: 'completed' }, { id: 'b', status: 'cancelled' }, { id: 'c', status: 'waiting_for_information' }, { id: 'd', status: 'blocked' }, { id: 'e', status: 'blocked', action: { status: 'unknown' } }]);
-  assert.deepEqual(queue.map(item => item.key), ['task:e']);
+test('completed, closed, actively waiting and in-flight tasks never become actionable relay cards', () => {
+  const queue = decisionQueue([
+    { id: 'a', status: 'completed' },
+    { id: 'b', status: 'cancelled' },
+    { id: 'c', status: 'waiting_for_information', wait: { status: 'active', kind: 'document' } },
+    { id: 'd', status: 'blocked' },
+    { id: 'e', status: 'blocked', action: { status: 'unknown' } }
+  ]);
+  assert.deepEqual(queue.map(item => item.key), []);
 });
 
 test('a shared open dependency replaces duplicate stalled prompts without hiding risk or deadline notices', () => {
