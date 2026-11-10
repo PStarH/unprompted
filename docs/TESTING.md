@@ -256,10 +256,16 @@ the L0–L4 ceiling are recorded on the task by the same ceiling function
 WorkEngine consults before execute, approve, document-patch, and send. The
 ceiling is a turn cap. It does not replace task status or the four Field zones.
 
-These checks use scripted HTTP, simulated providers, and injected native
-responses. They are not production validation with real users, not live-account
-acceptance for Google, Outlook, Slack, GitHub, Notion, or Apple, and they do
-not exercise provider push delivery or macOS Automation. A real Notes, Mail,
+Recovery in that matrix is a later successful scripted pull on the same
+store after a failed 401, 429, 5xx, or timeout, and a reconnect after
+disconnect. It is not a replay of an already successful cursor. A revoked
+token is refreshed only by the next scripted token response. Withdrawn
+Notion source text is excluded with the same suppression policy the
+connector harness uses. These checks use scripted HTTP, simulated providers,
+and injected native responses. They are not production validation with real
+users, not live-account acceptance for Google, Outlook, Slack, GitHub,
+Notion, or Apple, and they do not exercise provider push delivery or macOS
+Automation. A real Notes, Mail,
 Reminders, Calendar, or Contacts Automation prompt still needs manual
 acceptance. `activationMetrics` may still report labeled rates as unknown.
 This proof does not add a metrics warehouse for Verified Completion Rate or
