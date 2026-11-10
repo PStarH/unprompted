@@ -51,6 +51,12 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   const drafts = new Map(), pending = new Set(), errors = new Map();
   let contextPanel = null, contextTrigger = null, restoreContextFocus = true;
   const byId = id => document.getElementById(id);
+  // Same admission context the decision queue uses. A persisted wait often
+  // lives on state.taskWaits rather than on the task itself.
+  function admissionContext() {
+    const view = context();
+    return { connections: view.connections, taskWaits: view.state?.taskWaits };
+  }
 
   function scopedMemories(task) {
     const normal = value => String(value || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
@@ -114,19 +120,29 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   function summary(task) {
     if (task.preparedWork?.acceptedAt) return t('你已接受这次准备的内容', 'You accepted this preparation');
     if (task.preparedWork) return task.preparedWork.kind === 'draft' ? t('草稿已备好 · 请按目标审阅', 'Draft ready · review against your goal') : t('来源简报已备好 · 请按目标审阅', 'Source brief ready · review against your goal');
-    const status = taskState(task, context().connections);
+    const status = taskState(task, admissionContext());
     if (status === 'paused_by_user') return t('由你暂停，恢复后继续核对', 'Paused by you. Resume to continue checks.');
     if (status === 'failed') return task.reasoning?.detail || task.reason || t('检查连接后重新核对', 'Check the connection, then recheck.');
     if (status === 'source_disconnected') return t('重新连接来源后继续', 'Reconnect the source to continue.');
     if (status === 'result_unverified') return t('行动已发起，提供方尚未确认结果', 'An action started; its result is not yet confirmed.');
     if (status === 'verified') return task.action?.status === 'verified_simulated' ? t('本地模拟回执已核验', 'Local simulated receipt verified') : t('提供方回执已核验', 'Provider receipt verified');
     if (status === 'closed') return t('保留记录，不再跟进', 'History retained. No further checks.');
-    if (status === 'needs_user') return task.draft ? t('回复草稿已备好 · 点击审阅', 'Draft ready · review reply') : task.reason || t('点击查看待确认事项', 'Open to review the next step');
+    if (status === 'needs_user' && (task.reconciliation_inconclusive || task.attestationRequest || task.action?.close === 'reconciliation_inconclusive' || task.action?.close === 'attestation_request')) return t('结果仍未确认 — 请说明它是否已经送达', 'Result still unconfirmed — say whether it arrived');
+    if (status === 'needs_user' && task.status === 'ready_for_approval') return task.draft ? t('草稿已备好', 'Draft ready') : t('准备好的结果需要审阅', 'Prepared result is ready for review');
+    if (status === 'needs_user' && task.management?.nextAction?.kind === 'provide_information') {
+      const missingFacts = (task.assessment?.missing || []).filter(Boolean);
+      return missingFacts.length ? t(`请补充：${missingFacts.join('、')}`, `Provide ${missingFacts.join(', ')}`) : t('请补充缺少的信息或来源', 'Provide the missing information or source');
+    }
+    if (status === 'needs_user' && (task.wait?.status === 'interrupted' || task.management?.wake?.status === 'interrupted')) return t('等待被打断，请决定下一步', 'The wait was interrupted. Choose what happens next.');
+    if (status === 'needs_user') return task.management?.nextAction?.label || task.reason || t('请决定下一步', 'Choose the next step');
     if (task.guidance) return task.guidance.text;
     if (status === 'working') return t('正在关联来源并核对要求', 'Linking sources and checking requirements');
+    const provider = task.sourceConnectorId || task.externalSource?.provider;
+    const sourceDown = Boolean(provider && context().connections?.[provider]?.connected === false);
+    if (status === 'observing' && sourceDown) return t('来源已断开，仍在观察', 'Source disconnected. Still watching.');
     if (status === 'observing' && task.mcpInvestigation?.nextStep) return `${t('建议：', 'Suggested: ')}${task.mcpInvestigation.nextStep}`;
     if (status === 'observing' && task.kind === 'external_issue') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进已分配的 issue', 'Following assigned issue')}`;
-    if (status === 'observing' && task.kind === 'external_review') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进需要你处理的 PR', 'Following a pull request that needs you')}`;
+    if (status === 'observing' && task.kind === 'external_review') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进待评审的 PR', 'Following a pull request')}`;
     if (status === 'observing' && task.kind === 'external_change') return `GitHub · ${task.externalSource.repository} · ${task.externalSource.marker} · ${t('跟进仓库内容变化', 'Following a repository change')}`;
     if (status === 'observing' && task.kind === 'external_check') return `GitHub · ${task.externalSource.repository} · ${task.externalSource.marker} · ${t('跟进 GitHub Actions', 'Following a GitHub Actions run')}`;
     if (status === 'observing') return t('只读跟进，不会修改来源', 'Read-only monitoring. Source unchanged.');
@@ -137,7 +153,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   }
 
   function badge(task) {
-    const state = taskState(task, context().connections);
+    const state = taskState(task, admissionContext());
     return `<span class="ws-state" data-state="${state}"><i aria-hidden="true"></i>${stateLabel(state)}</span>`;
   }
 
@@ -190,17 +206,18 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     const heading = compact
       ? `<header class="ws-inspector-heading ws-compact-heading"><span class="ws-compact-label">${t('任务详情', 'Task details')}</span><h2 class="sr-only" tabindex="-1">${esc(task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up'))}</h2>${controls(task, { close: !page, page })}</header>`
       : `<header class="ws-inspector-heading"><div>${badge(task)}<${page ? 'h1' : 'h2'} tabindex="-1">${esc(task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up'))}</${page ? 'h1' : 'h2'}></div>${controls(task, { close: !page, page })}</header><p class="ws-task-update">${esc(summary(task))}</p>`;
-    return `<section class="ws-inspector${inline ? ' inline' : ''}" data-inspector-task="${esc(task.id)}" aria-label="${t('任务详情', 'Task details')}">${heading}${task.guidance && summary(task) !== task.guidance.text ? `<blockquote class="ws-direction-quote">${esc(task.guidance.text)}</blockquote>` : ''}<div class="ws-inspector-body"><div class="ws-inspector-context">${steps(task)}<div class="ws-detail-columns"><div class="ws-detail-main">${stateNotice(task)}${task.control?.paused ? `<div class="ws-paused-note">${workspaceIcon('pause', 15)}<span>${task.action ? t('已停止后续动作，已经发出的请求仍需核验。', 'Further actions stopped. Already dispatched requests still need verification.') : task.control.pauseReason === 'state_delta_uncertain' ? t('新信息需要你核对。查看后可恢复跟进。', 'New evidence needs your review. Resume after checking it.') : t('你已暂停这件事。恢复后会重新核对最新来源。', 'You paused this task. Resume to check the latest sources.')}</span><button class="text-button" data-task-control="resume" data-task-id="${esc(task.id)}">${t('恢复', 'Resume')}</button></div>` : task.preparedWork ? preparedWork(task) : renderAction(task)}${receipt(task)}${composer(task, page)}</div><div class="ws-detail-side">${checklist(task, { collapseSatisfied: page && task.status !== 'ready_for_approval' && !task.preparedWork })}${sources(task)}${timeline(task)}${page ? `<details class="ws-execution-details" data-preserve="ws-management-${esc(task.id)}"><summary>${t('跟进设置', 'Follow-up settings')}</summary>${renderManagement(task)}</details><details class="ws-execution-details" data-preserve="full-evidence-${esc(task.id)}"><summary>${t('要求与来源依据', 'Requirements and source evidence')}</summary><p class="ws-evidence-explanation">${t('原始请求的要求，以及来源中的对应内容，用来解释 Agent 为什么准备或执行下一步。', 'The original requirements and matching source excerpts explain why the agent prepared or took the next step.')}</p>${renderDetails(task)}</details>` : ''}</div></div></div></div></section>`;
+    return `<section class="ws-inspector${inline ? ' inline' : ''}" data-inspector-task="${esc(task.id)}" aria-label="${t('任务详情', 'Task details')}">${heading}${task.guidance && summary(task) !== task.guidance.text ? `<blockquote class="ws-direction-quote">${esc(task.guidance.text)}</blockquote>` : ''}<div class="ws-inspector-body"><div class="ws-inspector-context">${steps(task)}<div class="ws-detail-columns"><div class="ws-detail-main">${stateNotice(task)}${task.control?.paused ? `<div class="ws-paused-note">${workspaceIcon('pause', 15)}<span>${task.action ? t('已停止后续动作，已经发出的请求仍需核验。', 'Further actions stopped. Already dispatched requests still need verification.') : task.control.pauseReason === 'state_delta_uncertain' ? t('有新信息需要核对。查看后可恢复跟进。', 'New evidence is waiting. Resume after checking it.') : t('你已暂停这件事。恢复后会重新核对最新来源。', 'You paused this task. Resume to check the latest sources.')}</span><button class="text-button" data-task-control="resume" data-task-id="${esc(task.id)}">${t('恢复', 'Resume')}</button></div>` : task.preparedWork ? preparedWork(task) : renderAction(task)}${receipt(task)}${composer(task, page)}</div><div class="ws-detail-side">${checklist(task, { collapseSatisfied: page && task.status !== 'ready_for_approval' && !task.preparedWork })}${sources(task)}${timeline(task)}${page ? `<details class="ws-execution-details" data-preserve="ws-management-${esc(task.id)}"><summary>${t('跟进设置', 'Follow-up settings')}</summary>${renderManagement(task)}</details><details class="ws-execution-details" data-preserve="full-evidence-${esc(task.id)}"><summary>${t('要求与来源依据', 'Requirements and source evidence')}</summary><p class="ws-evidence-explanation">${t('原始请求的要求，以及来源中的对应内容，用来解释 Agent 为什么准备或执行下一步。', 'The original requirements and matching source excerpts explain why the agent prepared or took the next step.')}</p>${renderDetails(task)}</details>` : ''}</div></div></div></div></section>`;
   }
 
   // States where the visible result is not final say so first, in words.
   function stateNotice(task) {
-    const status = taskState(task, context().connections);
+    const status = taskState(task, admissionContext());
     if (status === 'paused_by_policy') {
       const policyId = task.activationHold?.policyIds?.[0] || '';
       return `<div class="ws-state-notice" role="status"><span><strong>${t('因规则暂停', 'Paused by a rule')}</strong>${t('修改或停用对应规则后，会重新核对来源并继续准备。', 'Update or disable the matching rule to recheck sources and continue preparation.')}</span><button type="button" class="text-button" data-open-rules="${esc(policyId)}">${t('查看这条规则', 'Open this rule')}</button></div>`;
     }
-    if (status === 'result_unverified') return `<div class="ws-state-notice" role="status"><span><strong>${t('结果尚未确认', 'Result not confirmed')}</strong>${t('行动已发起，提供方还没确认结果。不会自动重试，也不会显示为完成。', 'The action started; the provider has not confirmed it. It will not be retried or shown as done until confirmed.')}</span></div>`;
+    if (status === 'needs_user' && (task.reconciliation_inconclusive || task.attestationRequest || ['reconciliation_inconclusive', 'attestation_request'].includes(task.action?.close))) return `<div class="ws-state-notice" role="status"><span><strong>${t('结果仍未确认', 'Result still unconfirmed')}</strong>${t('自动核对已经结束。请核对它是否送达，或确认这次没有发出。不会再次发送同一次尝试。', 'Automatic checks are finished. Say whether it arrived, or confirm this attempt was not sent. That attempt will not be posted again.')}</span></div>`;
+    if (status === 'result_unverified') return `<div class="ws-state-notice" role="status"><span><strong>${t('结果尚未确认', 'Result not confirmed')}</strong>${t('行动已发起，提供方还没确认结果。正在自动核对，不会显示为完成。', 'The action started; the provider has not confirmed it. Automatic checks are still running, and it is not shown as done.')}</span></div>`;
     if (status === 'failed') return `<div class="ws-state-notice" data-tone="error" role="status"><span><strong>${t('处理失败', 'Failed')}</strong>${esc(task.reason || t('没有执行任何对外操作。', 'No external action was taken.'))}</span>${task.kind === 'standing_intent' ? `<button class="secondary-button" data-retry-prepared="${esc(task.id)}" ${pending.has(task.id) ? 'disabled' : ''}>${t('重试准备', 'Retry preparation')}</button>` : ''}</div>`;
     if (status === 'source_disconnected') return `<div class="ws-state-notice" data-tone="error" role="status"><span><strong>${t('来源已断开', 'Source disconnected')}</strong>${t('重新连接前，这件事不会继续更新。', 'This task will not update until the source is reconnected.')}</span></div>`;
     if (status === 'unknown') return `<div class="ws-state-notice" role="status"><span><strong>${t('状态待确认', 'State unknown')}</strong>${t('记录不足以判断当前状态，未执行对外操作。', 'The record is not enough to determine the state. No external action was taken.')}</span></div>`;
@@ -257,7 +274,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   }
 
   function row(task, lanes = false) {
-    const status = taskState(task, context().connections);
+    const status = taskState(task, admissionContext());
     const title = task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up');
     const active = task.id === selected;
     const moment = shortMoment(task.updatedAt || task.createdAt || task.action?.at);
@@ -273,9 +290,9 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   // The order matches the field: needs you, in motion, waiting, then the quiet
   // end of the workspace. Arrow keys and page steppers use the same order.
   function orderedTasks(tasks) {
-    const connections = context().connections;
+    const admission = admissionContext();
     return ['attention', 'working', 'waiting', 'quiet'].flatMap(group =>
-      tasks.filter(task => stateGroup(taskState(task, connections)) === group));
+      tasks.filter(task => stateGroup(taskState(task, admission)) === group));
   }
 
   function taskPage(task, tasks) {
@@ -292,7 +309,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     // The actionable shared-wait card lives above the workspace. Task badges
     // retain the related-task highlighting without a second dependency panel.
     return ['attention', 'working', 'waiting', 'quiet'].map(group => {
-      const matches = tasks.filter(task => stateGroup(taskState(task, context().connections)) === group);
+      const matches = tasks.filter(task => stateGroup(taskState(task, admissionContext())) === group);
       if (!matches.length && mode !== 'field') return '';
       return `<section class="ws-task-group" data-group="${group}" data-empty="${!matches.length}"><h3><i aria-hidden="true"></i>${groupLabel(group)}<span>${matches.length}</span></h3><div>${matches.map(task => row(task)).join('') || '<p class="ws-group-empty" aria-label="' + t('暂无', 'None') + '">—</p>'}</div></section>`;
     }).join('');
@@ -369,8 +386,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     return true;
   }
 
-  const NEEDS_YOU = new Set(['needs_user', 'failed', 'source_disconnected', 'result_unverified', 'unknown']);
-  const needsIds = () => [...new Set([...byId('taskContent').querySelectorAll('[data-task-card]')].filter(row => NEEDS_YOU.has(row.dataset.state)).map(row => row.dataset.taskCard))];
+  const needsIds = () => [...new Set([...byId('taskContent').querySelectorAll('[data-task-card]')].filter(row => stateGroup(row.dataset.state) === 'attention').map(row => row.dataset.taskCard))];
   function queueIds() { return needsIds(); }
   function selection() { return selected; }
 

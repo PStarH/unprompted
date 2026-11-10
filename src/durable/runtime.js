@@ -1665,7 +1665,7 @@ export class DurableRuntime {
     if (execution.action_family !== 'email.send') return;
     const task = this.store.state.tasks[execution.task_id];
     if (!task?.action || task.action.idempotencyKey !== execution.idempotency_key) return;
-    this.engine.uncertain(task.id, 'Automatic checks still cannot tell whether this message was sent.');
+    this.engine.uncertain(task.id, 'Automatic checks still cannot tell whether this message was sent.', { close: 'reconciliation_inconclusive' });
   }
   start() {
     this.ledger.cancelMissingAuthority();

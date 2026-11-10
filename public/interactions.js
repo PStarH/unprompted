@@ -55,7 +55,8 @@ export function createInteractions({ context, renderTask, renderNotice, update, 
   }
 
   function renderQueue(tasks, notices) {
-    queue = decisionQueue(tasks, notices);
+    const view = context();
+    queue = decisionQueue(tasks, notices, { connections: view.connections, taskWaits: view.state?.taskWaits });
     const oldKey = selected;
     selected = decisionCursor(queue, selected, previousIndex);
     previousIndex = Math.max(0, queue.findIndex(item => item.key === selected));

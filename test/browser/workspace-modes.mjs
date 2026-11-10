@@ -250,7 +250,13 @@ try {
     make('needs', 'Reply to Mei', 'ready_for_approval', { draft: { to: 'mei@example.test', subject: 'Re: update', body: 'A source-backed fixture draft.', canSend: false }, reviewToken: 'a'.repeat(64) }),
     make('working-a', 'Compare renovation quotes', 'investigating'),
     make('working-b', 'Prepare Friday briefing', 'investigating'),
-    make('waiting', 'Follow up on the report', 'waiting_for_information'),
+    // An active persisted wait keeps this row in Waiting. Without it, missing
+    // information is Needs you and sits ahead of In motion in the page order.
+    make('waiting', 'Follow up on the report', 'waiting_for_information', {
+      preparedWork: null,
+      reasoningWork: null,
+      wait: { id: 'wait-report', status: 'active', kind: 'document', condition: { label: 'a new version of the report' } }
+    }),
     make('paused', 'Review October expenses', 'waiting_for_information', { control: { paused: true } }),
     make('verified', 'Send the revised proposal', 'completed', { action: { status: 'verified_simulated' } })
   ];

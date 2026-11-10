@@ -142,7 +142,7 @@ export class ConnectorActions {
     const provider = { kind: `platform:${connector.id}`, connector, live: true, dispatchGuard: true };
     const record = { key, provider: provider.kind, tool: 'request_api', family: 'connector.request', connectorId: connector.id, accountId,
       grantId: grant.id, grantVersion: grant.version, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch, payload, effect, verification,
-      resourceId: `${connector.id}:${accountId}:${digest(payload)}`, explicit: context.actor === 'user', createdAt: iso(this.database.now()) };
+      resourceId: `${connector.id}:${accountId}:${digest(payload)}`, explicit: context.actor === 'user', ledgerOnlyUnverified: !verification, verified: verification ? null : false, createdAt: iso(this.database.now()) };
     if (this.inFlight.has(key)) return { state: 'unknown', alreadyDispatched: true, detail: 'This operation is already in progress.' };
     this.inFlight.add(key);
     if (context.actor !== 'user') this.currentChecks.set(key, context.isCurrent);
@@ -157,7 +157,7 @@ export class ConnectorActions {
     if (check() !== true) throw deny('The MCP write tool is not currently authorized.');
     const key = `mcp-write:${digest([task.id,task.inputVersion,payload])}`, provider = { kind: `mcp:${serverId}`, live: true, dispatchGuard: true };
     const record = { key, provider: provider.kind, tool, family: 'mcp.tool', accountId: serverId, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch,
-      resourceId: `${provider.kind}:${digest(payload)}`, payload, effect: { serverId, tool, argumentsDigest: digest(args) }, explicit: false, createdAt: iso(this.database.now()) };
+      resourceId: `${provider.kind}:${digest(payload)}`, payload, effect: { serverId, tool, argumentsDigest: digest(args) }, explicit: false, ledgerOnlyUnverified: true, verified: false, createdAt: iso(this.database.now()) };
     if (this.inFlight.has(key)) return { state: 'unknown', alreadyDispatched: true, detail: 'This operation is already in progress.' };
     this.inFlight.add(key);
     this.mcpChecks.set(key, () => isCurrent() && check());
