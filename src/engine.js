@@ -16,6 +16,9 @@ import { STRATEGY_IDS } from './probes/strategies.js';
 import { determineFreshness, runRecord, relevantRuns } from './freshness.js';
 import { evidenceSignature, claim, unknownItem, sourceRef, evidenceItem } from './evidence.js';
 import { PermissionPolicy, PermissionDeniedError } from './permissions.js';
+import {
+  autonomyCeiling, ceilingAllows, recordFollowThrough, ledgeredSendEcho, userFinishedTask, applyUserFinished
+} from './follow-through.js';
 import { Autonomy } from './autonomy.js';
 import { ToolSafetyGateway, validReceipt } from './tool-gateway.js';
 import { SimulatedMailProvider, UncertainDeliveryError } from './providers.js';
@@ -363,6 +366,7 @@ export class WorkEngine {
       event.disposition = 'timer_due'; event.summary = 'Scheduled Situation reevaluation';
       this.store.mutate(state => state.events.push(event));
       result = { duplicate: false, id: event.id, disposition: event.disposition, relations: [] };
+      this.#evaluateDueTimer(event);
       this.changed();
     }
     else throw new Error(`Unhandled event type: ${event.type}`);
@@ -380,6 +384,178 @@ export class WorkEngine {
       if (!task || isSettled(task)) continue;
       this.assess(wait.taskId, event.id, { force: true, allowAutomation: false });
     }
+  }
+
+  /**
+   * A pinned timer reevaluates one Situation. An empty check does not call the
+   * model, notify, send, or open a draft. A promised quote check may prepare
+   * one nudge and still does not send.
+   */
+  #evaluateDueTimer(event) {
+    const situationId = event.payload?.situationId || null;
+    const taskId = event.payload?.taskId || null;
+    const named = Object.values(this.store.state.tasks).filter(task => {
+      if (taskId) return task.id === taskId;
+      if (situationId) return task.situationId === situationId;
+      return false;
+    });
+    const open = named.filter(task => !isSettled(task));
+    if (!open.length) return;
+    const promised = open.filter(task => this.#promisedCheck(task));
+    if (!promised.length) {
+      this.store.mutate(state => {
+        for (const task of open) {
+          const current = state.tasks[task.id];
+          if (!current || isSettled(current)) continue;
+          current.lastEvaluatedAt = event.at || stamp();
+        }
+      });
+      return;
+    }
+    for (const task of promised) this.#preparePromisedNudge(task.id, event);
+  }
+
+  #promisedCheck(task) {
+    const wait = this.store.state.taskWaits?.[task.id];
+    if (wait?.status !== 'active' || wait.kind !== 'reply' || !wait.condition?.quote) return false;
+    return !(task.resumedEvidence || []).some(item => item.quote === wait.condition.quote);
+  }
+
+  #preparePromisedNudge(taskId, event) {
+    const task = this.store.state.tasks[taskId];
+    if (!task || isSettled(task) || !this.#promisedCheck(task)) return;
+    const ceiling = autonomyCeiling({
+      evidenceComplete: false,
+      evidenceMissing: true,
+      promisedNudge: true,
+      nextStep: 'prepare',
+      reversibleDraft: true,
+      proposedLevel: task.reasoning?.proposedCeiling || null
+    });
+    if (!ceilingAllows(ceiling, 'L2')) return;
+    const at = event.at || stamp();
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      const wait = state.taskWaits?.[taskId];
+      if (!current || isSettled(current) || wait?.status !== 'active') return;
+      if (current.draft?.userEdited) return;
+      const provider = this.#providerForTask(current);
+      current.draft = {
+        kind: 'nudge',
+        to: current.sender,
+        subject: `Re: ${current.subject || 'follow-up'}`,
+        body: `Hi,\n\nChecking in on ${current.request?.subjectEntity || 'this request'}: ${wait.condition?.label || 'the promised check'} is still open. Nothing has been sent.\n`,
+        requestVersion: Number(current.commitment?.revision || 1),
+        providerKind: provider.kind,
+        live: Boolean(provider.live),
+        canSend: false,
+        preparedAt: at,
+        simulationOnly: provider.kind === 'simulated' || provider.live !== true
+      };
+      current.status = 'ready_for_approval';
+      current.reason = 'A nudge is prepared for approval. It was not sent.';
+      current.updatedAt = at;
+      recordFollowThrough(current, {
+        decision: 'ask',
+        reason: current.reason,
+        ceiling,
+        at
+      });
+      record(state, 'preparation', 'Prepared a nudge for the promised check. Nothing was sent.', taskId, event.id);
+    });
+  }
+
+  #assertCeiling(task, required, facts) {
+    const ceiling = autonomyCeiling({ ...this.#ceilingFacts(task), ...facts });
+    if (ceilingAllows(ceiling, required)) return ceiling;
+    const error = new Error(ceiling.reason);
+    error.ceiling = ceiling;
+    error.status = 403;
+    if (facts.requiresReview) {
+      error.code = 'REVIEW_REQUIRED';
+      error.message = 'An explicit user policy requires review before this task may act.';
+    } else if (facts.forgedGrant || facts.grantExpired || facts.grantRevoked) {
+      error.code = 'AUTHORIZATION_REQUIRED';
+    } else if (this.policy.shadow && required === 'L4') {
+      error.code = 'SHADOW_READ_ONLY';
+    } else {
+      error.code = 'CEILING';
+    }
+    throw error;
+  }
+
+  #ceilingFacts(task) {
+    const contradictory = (task?.evidence?.conflicts || []).some(item => String(item?.id || '').startsWith('conflicting:'))
+      || task?.evidence?.freshness?.status === 'contradictory';
+    const unavailable = Boolean(task?.documentId && this.store.state.documents?.[task.documentId]?.available === false);
+    const withdrawn = Boolean(task?.sourceUnavailable) || unavailable;
+    const complete = task?.assessment?.complete === true && !contradictory && !withdrawn;
+    return {
+      evidenceComplete: complete,
+      evidenceMissing: !complete,
+      contradictory,
+      sourceWithdrawn: withdrawn,
+      proposedLevel: task?.reasoning?.proposedCeiling || null,
+      paused: task?.control?.paused === true
+    };
+  }
+
+  /** Record the decision and the ceiling this turn actually obeyed. */
+  #stampFollowThrough(task, state, at = stamp(), hints = {}) {
+    if (!task) return;
+    const wait = state?.taskWaits?.[task.id];
+    const contradictory = (task.evidence?.conflicts || []).some(item => String(item.id || '').startsWith('conflicting:'))
+      || task.evidence?.freshness?.status === 'contradictory';
+    const unavailable = hints.unavailableDocument === true || Boolean(task.documentId && state?.documents?.[task.documentId]?.available === false);
+    const withdrawn = Boolean(task.sourceUnavailable) || unavailable;
+    const cannot = contradictory || withdrawn;
+    const asking = task.status === 'ready_for_approval' && !cannot;
+    let decision = 'continue';
+    let closeKind = null;
+    let reason = task.reason || null;
+    if (task.status === 'completed') {
+      decision = 'close';
+      closeKind = task.completion?.kind === 'user_finished' ? 'user_finished' : 'verified';
+      reason = reason || (closeKind === 'user_finished'
+        ? 'The user finished this work. Nothing was sent.'
+        : 'The closure condition was verified.');
+    } else if (task.status === 'cancelled') {
+      decision = 'close';
+      closeKind = 'cancelled';
+      reason = reason || 'The user cancelled this work. Nothing was sent.';
+    } else if (cannot) {
+      decision = 'blocked';
+      reason = reason || (task.sourceUnavailable
+        ? 'The required source is unavailable. The work was not closed.'
+        : unavailable
+          ? 'The required document is unavailable. The work was not closed.'
+          : 'Evidence is contradictory. The work was not closed.');
+      task.reason = reason;
+    } else if (asking) {
+      decision = 'ask';
+      reason = reason || 'A draft is ready and send is not authorized.';
+    } else if (wait?.status === 'active') {
+      decision = 'wait';
+      reason = reason || 'Progress depends on an external event. The situation stays open.';
+    } else {
+      decision = 'continue';
+      reason = reason || 'Evidence is still missing. The agent keeps responsibility and has not closed the work.';
+    }
+    const promised = wait?.status === 'active' && wait.kind === 'reply' && Boolean(wait.condition?.quote);
+    const ceiling = autonomyCeiling({
+      evidenceComplete: task.assessment?.complete === true && !cannot,
+      evidenceMissing: task.assessment?.complete !== true || cannot,
+      contradictory,
+      sourceWithdrawn: withdrawn,
+      nextStep: asking ? 'consequential' : promised || task.draft ? 'prepare' : 'investigate',
+      promisedNudge: promised || task.draft?.kind === 'nudge',
+      reversibleDraft: Boolean(task.draft) && !asking,
+      approval: false,
+      consequential: asking,
+      proposedLevel: task.reasoning?.proposedCeiling || null,
+      paused: task.control?.paused === true
+    });
+    recordFollowThrough(task, { decision, reason, ceiling, at, closeKind });
   }
 
   #requestHistoryEntry(request, message, event, kind, revision, at = sourceTimestamp(message, event)) {
@@ -671,6 +847,28 @@ export class WorkEngine {
       if (messageIndex < 0) current.inbox.push(observedMessage);
       else current.inbox[messageIndex] = observedMessage;
       event.summary = `Email received · ${message.subject}`;
+
+      if (ledgeredSendEcho(message, current)) {
+        event.disposition = 'self_echo';
+        event.summary = 'A ledgered agent send echoed back and did not start new work.';
+        record(current, 'observation', event.summary, null, event.id);
+        return;
+      }
+
+      const finished = userFinishedTask(message, current, { requestFound: Boolean(request) });
+      if (finished) {
+        const target = current.tasks[finished.id];
+        const at = sourceAt || stamp();
+        applyUserFinished(target, {
+          at,
+          reason: 'The user already finished this deliverable in the thread. Nothing was sent.'
+        });
+        event.disposition = 'user_finished';
+        event.relations = [target.id];
+        event.summary = `User finished · ${target.request?.subjectEntity || message.subject}`;
+        record(current, 'user_finished', target.reason, target.id, event.id);
+        return;
+      }
 
       if (event.meta.originClass === 'AUTOMATION') {
         event.disposition = 'context_only';
@@ -1155,6 +1353,13 @@ export class WorkEngine {
       for (const id of relations) {
         state.tasks[id].sourceUnavailable = { reason, at: event.at || stamp(), eventId: event.id };
         state.tasks[id].updatedAt = stamp();
+        state.tasks[id].reason = `The source message is no longer available (${reason}). The work was not closed.`;
+        recordFollowThrough(state.tasks[id], {
+          decision: 'blocked',
+          reason: state.tasks[id].reason,
+          ceiling: autonomyCeiling({ sourceWithdrawn: true, evidenceComplete: false, evidenceMissing: true, nextStep: 'observe' }),
+          at: state.tasks[id].updatedAt
+        });
       }
       event.relations = relations;
       event.disposition = relations.length ? 'evidence_invalidated' : 'unrelated_change';
@@ -1904,6 +2109,7 @@ export class WorkEngine {
         ].filter(Boolean).join(' · ');
         record(current, 'assessment', `Checked ${task.request.subjectEntity}: ${why || completion.reason}`, taskId, eventId);
       }
+      this.#stampFollowThrough(target, current, stamp(), { unavailableDocument: Boolean(unavailable) });
     });
 
     this.#addTrace(traceEntry({
@@ -2108,6 +2314,23 @@ export class WorkEngine {
     let decision;
     try {
       if (this.policy.shadow) this.policy.authorize({ actionClass: 'execute_external', taskId });
+      const automatic = Boolean(options.autonomyGrantId);
+      const lease = automatic ? this.autonomy.grants().find(item => item.id === options.autonomyGrantId) : null;
+      const activation = this.durableRuntime?.activationFor?.(task);
+      this.#assertCeiling(task, 'L4', {
+        evidenceComplete: true,
+        evidenceMissing: false,
+        sourceWithdrawn: false,
+        contradictory: false,
+        approval: !automatic,
+        validGrant: automatic && this.autonomy.valid(lease, taskId),
+        requiresReview: automatic && Boolean(task.guidanceReviewRequired || (activation && (!activation.activate || activation.requiresReview))),
+        forgedGrant: automatic && !this.autonomy.valid(lease, taskId),
+        consequential: true,
+        nextStep: 'consequential',
+        proposedLevel: options.proposedLevel || task.reasoning?.proposedCeiling || null,
+        paused: false
+      });
       decision = this.toolGateway.decide({ phase: 'issue', origin: options.autonomyGrantId ? 'yolo' : 'approval', grantId: options.autonomyGrantId || null, taskId, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: idempotencyKey, payload, effect });
     } catch (error) {
       if (error instanceof PermissionDeniedError) {
@@ -2151,6 +2374,12 @@ export class WorkEngine {
       state.tasks[taskId].action = action;
       delete state.tasks[taskId].autonomyError;
       record(state, 'approval', `${options.autonomyGrantId ? 'Temporary YOLO authorized' : 'User approved'} the reply. Checking the ${provider.kind} provider before and after sending.`, taskId);
+      recordFollowThrough(state.tasks[taskId], {
+        decision: 'continue',
+        reason: 'The approved send is in verification. It is not closed until read-back succeeds.',
+        ceiling: autonomyCeiling({ evidenceComplete: true, approval: !options.autonomyGrantId, validGrant: Boolean(options.autonomyGrantId), consequential: true, nextStep: 'consequential' }),
+        at: stamp()
+      });
       state.tasks[taskId].sendAttempt = sendAttempt;
       if (!options.autonomyGrantId) delete state.tasks[taskId].lastLiveAttemptClass;
     });
@@ -2313,6 +2542,23 @@ export class WorkEngine {
     };
     const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(String(payload.body || '')).digest('hex') };
     const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
+    if (!this.policy.shadow) {
+      const yolo = task.action?.permission === 'temporary_yolo';
+      const lease = yolo ? this.autonomy.grants().find(item => item.id === task.action?.grantId) : null;
+      const standing = task.action?.permission === 'pre_authorized'
+        ? grantFor(this.store.state.calibrations || {}, { entity: task.request?.subjectEntity, deliverable: task.request?.deliverable })
+        : null;
+      this.#assertCeiling(task, 'L4', {
+        evidenceComplete: task.assessment?.complete === true,
+        evidenceMissing: task.assessment?.complete !== true,
+        approval: task.action?.permission === 'user_approved',
+        validGrant: (yolo && this.autonomy.valid(lease, taskId)) || standing?.value === 'allow',
+        forgedGrant: yolo && !this.autonomy.valid(lease, taskId),
+        consequential: true,
+        nextStep: 'consequential',
+        proposedLevel: options.proposedLevel || task.reasoning?.proposedCeiling || null
+      });
+    }
     this.toolGateway.decide({ phase: 'beforeDispatch', taskId, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: task.action.idempotencyKey, payload, effect });
     if (provider.live === true && !this.durableRuntime) {
       this.store.mutate(state => {
@@ -2580,6 +2826,15 @@ export class WorkEngine {
         task.status = 'completed';
         task.reason = null;
       }
+      recordFollowThrough(task, {
+        decision: 'close',
+        closeKind: task.status === 'cancelled' ? 'cancelled' : task.completion?.kind === 'user_finished' ? 'user_finished' : 'verified',
+        reason: task.status === 'cancelled'
+          ? task.reason
+          : 'The closure condition was read back and verified.',
+        ceiling: autonomyCeiling({ evidenceComplete: true, approval: true, consequential: true, nextStep: 'consequential' }),
+        at: stamp()
+      });
       const how = reconciled
         ? 'by idempotency-key lookup'
         : 'by reading the accepted message back';
@@ -2628,6 +2883,18 @@ export class WorkEngine {
         if (task.action) task.action.close = 'attestation_request';
       }
       record(state, 'uncertain', reason, taskId);
+      recordFollowThrough(task, {
+        decision: 'blocked',
+        reason,
+        ceiling: autonomyCeiling({
+          evidenceComplete: true,
+          consequential: true,
+          nextStep: 'consequential',
+          approval: false,
+          validGrant: false
+        }),
+        at: stamp()
+      });
       if (!recordedClose) return;
       // Only a recorded close is a Needs you interruption. In-flight checks stay quiet.
       emitNotification(state.notifications, notification({
@@ -2774,13 +3041,15 @@ export class WorkEngine {
     if (task.kind === 'external_issue' && (!task.externalSource.assigned || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This issue is no longer actively assigned to the connected account.');
     if (['external_review', 'external_change', 'external_check'].includes(task.kind) && (task.externalSource.active === false || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This GitHub work is no longer open for the connected account.');
     if (task.kind === 'observed_task' && (task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.[task.sourceConnectorId] !== task.externalSource.accountId)) throw new Error('This local to-do is no longer open in the connected source.');
-    if (task.action || !['blocked', 'cancelled'].includes(task.status)) {
+    const userFinished = task.status === 'completed' && task.completion?.kind === 'user_finished' && !task.action;
+    if (task.action || (!['blocked', 'cancelled'].includes(task.status) && !userFinished)) {
       throw new Error('Only a declined or closed request without an action can be reopened');
     }
     this.store.mutate(state => {
       const target = state.tasks[taskId];
       target.status = 'waiting_for_information';
       target.userDismissed = false;
+      if (target.completion?.kind === 'user_finished') delete target.completion;
       if (target.control?.paused) target.control = { ...target.control, paused: false, updatedAt: stamp() };
       if (target.draft?.userEdited) target.userDraftStale = true;
       else target.draft = null;
@@ -2924,6 +3193,30 @@ export class WorkEngine {
     return this.taskServices.createFollowUpForOpportunity(opportunityId);
   }
 
+  /** Explicit user completion. This is not an agent-verified send. */
+  markUserFinished(taskId) {
+    const task = this.#requireTask(taskId);
+    if (['executing', 'accepted_live', 'uncertain', 'unknown'].includes(task.action?.status)) {
+      throw new Error('An in-flight send cannot be marked finished.');
+    }
+    if (task.status === 'completed' && task.completion?.kind !== 'user_finished') {
+      throw new Error('Verified work is already closed.');
+    }
+    if (task.status === 'cancelled') throw new Error('A cancelled request cannot be marked finished.');
+    const at = stamp();
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      applyUserFinished(current, {
+        at,
+        reason: 'The user marked this work finished. Nothing was sent.'
+      });
+      record(state, 'user_finished', current.reason, taskId);
+    });
+    this.#refreshAttention();
+    this.changed();
+    return this.store.state.tasks[taskId];
+  }
+
   cancel(taskId) {
     const task = this.#requireTask(taskId);
     if (task.status !== 'waiting_for_information') {
@@ -2938,6 +3231,13 @@ export class WorkEngine {
       current.draft = null;
       this.#supersedeReasoning(current, 'user_closed');
       record(state, 'cancellation', 'The user closed this request while it was waiting for information. Nothing was sent.', taskId);
+      recordFollowThrough(current, {
+        decision: 'close',
+        closeKind: 'cancelled',
+        reason: current.reason,
+        ceiling: autonomyCeiling({ evidenceComplete: false, evidenceMissing: true, nextStep: 'observe' }),
+        at: current.updatedAt
+      });
     });
     this.#refreshAttention();
     this.changed();
@@ -3421,7 +3721,18 @@ export class WorkEngine {
     if (!this.#roleAllowsAutomaticWrite(task)) throw Object.assign(new Error('The user\'s responsibility for this message is not established; individual approval is required.'), { code: 'REVIEW_REQUIRED' });
     const activation = this.durableRuntime?.activationFor(task);
     if (activation && (!activation.activate || activation.requiresReview)) throw Object.assign(new Error('An explicit user policy requires review before this task may act.'), { code: 'REVIEW_REQUIRED' });
-    if (task.control?.paused || task.guidanceReviewRequired) throw new Error('The task was paused or corrected by the user. Review the updated task before sending.');
+    if (task.control?.paused || task.guidanceReviewRequired) {
+      const blocked = autonomyCeiling({
+        evidenceComplete: true,
+        approval: false,
+        validGrant: true,
+        requiresReview: Boolean(task.guidanceReviewRequired),
+        paused: task.control?.paused === true,
+        consequential: true,
+        nextStep: 'consequential'
+      });
+      if (!ceilingAllows(blocked, 'L4')) throw new Error('The task was paused or corrected by the user. Review the updated task before sending.');
+    }
     const provider = this.#providerForTask(task);
     if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
@@ -3480,6 +3791,19 @@ export class WorkEngine {
     const payload = { idempotencyKey, to: task.draft.to, subject: task.draft.subject, body: task.draft.body, documentUrl: task.draft.documentUrl, threadId: this.store.state.inbox.find(item => item.id === task.sourceEmailId)?.threadId || null };
     const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(payload.body).digest('hex') };
     const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
+    this.#assertCeiling(task, 'L4', {
+      evidenceComplete: true,
+      evidenceMissing: false,
+      sourceWithdrawn: false,
+      contradictory: false,
+      approval: false,
+      validGrant: resolved?.value === 'allow',
+      requiresReview: Boolean(task.guidanceReviewRequired || (activation && (!activation.activate || activation.requiresReview))),
+      consequential: true,
+      nextStep: 'consequential',
+      proposedLevel: task.reasoning?.proposedCeiling || null,
+      paused: false
+    });
     const decision = this.toolGateway.decide({ phase: 'issue', origin: 'standing', taskId, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: idempotencyKey, payload, effect });
     const action = {
       id: idempotencyKey,
