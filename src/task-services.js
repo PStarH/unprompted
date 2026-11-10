@@ -9,6 +9,7 @@ import { assessPlan } from './probes/assess.js';
 import { buildDeterministicPlan } from './probes/plan.js';
 import { interpretRequest } from './requests.js';
 import { PermissionDeniedError } from './permissions.js';
+import { autonomyCeiling, ceilingAllows, recordFollowThrough } from './follow-through.js';
 
 const stamp = () => new Date().toISOString();
 const normalise = value => String(value ?? '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
@@ -377,6 +378,21 @@ export class TaskServices {
       };
       state.taskWaits[taskId] = wait;
       insertHistory(state, 'wait_requested', `User set a persistent ${kind} wait for task ${taskId}.`, taskId, at);
+      const waiting = state.tasks[taskId];
+      if (waiting) {
+        waiting.reason = 'Progress depends on an external event. The situation stays open.';
+        recordFollowThrough(waiting, {
+          decision: 'wait',
+          reason: waiting.reason,
+          ceiling: autonomyCeiling({
+            evidenceComplete: waiting.assessment?.complete === true,
+            evidenceMissing: waiting.assessment?.complete !== true,
+            nextStep: 'observe',
+            promisedNudge: Boolean(condition.quote)
+          }),
+          at
+        });
+      }
     });
     this.#changed();
     return wait;
@@ -566,6 +582,28 @@ export class TaskServices {
       throw new Error('Applying a document patch requires explicit consent bound to this task, patch ID, and base document version.');
     }
     if (shadowReviewed && authorization.kind === 'shadow_read_only') return { patch, task, result: patch.result };
+    if (authorization?.kind !== 'shadow_read_only') {
+      const automatic = Boolean(autonomyGrantId);
+      const activation = this.engine?.durableRuntime?.activationFor?.(task);
+      const reviewRequired = automatic && Boolean(task.guidanceReviewRequired || (activation && (!activation.activate || activation.requiresReview)));
+      const ceiling = autonomyCeiling({
+        evidenceComplete: true,
+        evidenceMissing: false,
+        approval: !automatic && authorization?.kind === 'explicit',
+        validGrant: automatic,
+        requiresReview: reviewRequired,
+        consequential: true,
+        nextStep: 'consequential',
+        proposedLevel: task.reasoning?.proposedCeiling || null,
+        paused: task.control?.paused === true
+      });
+      if (!ceilingAllows(ceiling, 'L4')) {
+        const error = new PermissionDeniedError(ceiling.reason);
+        error.code = reviewRequired ? 'REVIEW_REQUIRED' : 'CEILING';
+        error.ceiling = ceiling;
+        throw error;
+      }
+    }
     const consentAt = this.clock();
     this.store.mutate(state => {
       const current = state.documentPatches[patchId];

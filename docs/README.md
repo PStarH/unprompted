@@ -22,6 +22,9 @@ developers as `npm run demo`.
 | Read the lock review of those rules | [Needs you accuracy review](reviews/NEEDS_YOU_ACCURACY_SPEC_REVIEW.md) |
 | Read the locked release-acceptance proof | [Release acceptance locked](RELEASE_ACCEPTANCE_LOCKED.md) |
 | Read the independent review of that proof | [Release acceptance review](reviews/RELEASE_ACCEPTANCE_SPEC_REVIEW.md) |
+| Read the accepted product contract | [Product contract](PRODUCT_CONTRACT.md) |
+| Read the locked product-clause proof | [Product clauses locked](PRODUCT_CLAUSES_LOCKED.md) |
+| Read the independent review of that proof | [Product clauses review](reviews/PRODUCT_CLAUSES_SPEC_REVIEW.md) |
 | Read the earlier send draft (superseded where it conflicts) | [Send verification](SEND_VERIFICATION.md) |
 | Read the earlier authority draft (superseded where it conflicts) | [Authority enforcement](AUTHORITY_ENFORCEMENT.md) |
 | Read the earlier spec review (historical) | [Spec review](reviews/SEND_AUTHORITY_SPEC_REVIEW.md) |

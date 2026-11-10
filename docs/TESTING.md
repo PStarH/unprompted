@@ -239,6 +239,32 @@ Miss, false-interrupt, and verified-completion counters beyond the existing
 `recordMiss` helper, notification resolution, and verified ledger status are a
 P1 gap. This proof does not add a metrics pipeline for them.
 
+## Product clauses
+
+`test/product-clauses.test.js` proves the four clauses in
+[Product clauses locked](PRODUCT_CLAUSES_LOCKED.md) on the existing WorkEngine
+lifecycle. The independent review is
+[Product clauses review](reviews/PRODUCT_CLAUSES_SPEC_REVIEW.md). The accepted
+contract is [Product contract](PRODUCT_CONTRACT.md). `test/connector-regression.test.js`
+runs the scripted connector matrix from that lock. Both files are part of
+`npm test`. They do not replace send-authority, Needs you, release-acceptance,
+autonomy, notification, or connector-harness suites.
+
+Each clause story asserts a happy path, a failure path, and a recovery path.
+Follow-through decisions (`continue`, `wait`, `ask`, `close`, `blocked`) and
+the L0–L4 ceiling are recorded on the task by the same ceiling function
+WorkEngine consults before execute, approve, document-patch, and send. The
+ceiling is a turn cap. It does not replace task status or the four Field zones.
+
+These checks use scripted HTTP, simulated providers, and injected native
+responses. They are not production validation with real users, not live-account
+acceptance for Google, Outlook, Slack, GitHub, Notion, or Apple, and they do
+not exercise provider push delivery or macOS Automation. A real Notes, Mail,
+Reminders, Calendar, or Contacts Automation prompt still needs manual
+acceptance. `activationMetrics` may still report labeled rates as unknown.
+This proof does not add a metrics warehouse for Verified Completion Rate or
+the other named product metrics.
+
 ## Where to add a test
 
 | Change | Start here |
