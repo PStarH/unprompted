@@ -150,6 +150,19 @@ function conditionMet(wait, state, now, event = null) {
     return Boolean(current && current.available !== false && current.version > Number(wait.base?.documentVersion || 0) && eventMatch && (semanticChanged || requestChanged));
   }
   if (wait.kind === 'reply') {
+    const task = state.tasks?.[wait.taskId];
+    // An unknown or uncertain send is not evidence that the waited-for quote arrived.
+    if (['uncertain', 'unknown'].includes(task?.action?.status)) return false;
+    const quote = wait.condition?.quote;
+    if (quote) {
+      if (event?.type !== 'email.received' || !event.relations?.includes(wait.taskId)) return false;
+      const payload = event.payload || {};
+      if (payload.id && payload.id === wait.base?.messageId) return false;
+      const text = `${payload.subject || ''}\n${payload.body || ''}`.toLowerCase();
+      if (!text.includes(String(quote).toLowerCase())) return false;
+      const entity = String(wait.condition.subjectEntity || '').toLowerCase();
+      return !entity || text.includes(entity);
+    }
     const threadId = wait.condition.threadId;
     if (event && (event.type !== 'email.received' || event.payload?.threadId !== threadId || event.payload?.id === wait.base?.messageId)) return false;
     return (state.inbox || []).some(message => message.threadId === threadId && message.id !== wait.base?.messageId && Date.parse(message.receivedAt || '') > Date.parse(wait.createdAt));
@@ -313,10 +326,16 @@ export class TaskServices {
       base.documentContentSignature = hash(String(document.content || '').replace(/\s+/g, ' ').trim());
       base.requestSignature = requestSignature(task);
     } else if (kind === 'reply') {
+      const quote = safeId(dependsOn.quote);
       const threadId = safeId(dependsOn.threadId || message?.threadId || task.request?.source?.threadId);
-      if (!threadId) throw new Error('A reply wait requires the exact email thread ID.');
-      condition.threadId = threadId;
-      condition.label = `a reply in thread ${threadId}`;
+      if (!quote && !threadId) throw new Error('A reply wait requires the exact email thread ID or the missing quote.');
+      if (quote) {
+        condition.quote = quote;
+        condition.subjectEntity = safeId(dependsOn.subjectEntity || task.request?.subjectEntity);
+        condition.label = `the missing quote “${quote}”`;
+      }
+      if (threadId) condition.threadId = threadId;
+      if (!quote) condition.label = `a reply in thread ${threadId}`;
       base.messageId = message?.id || task.sourceEmailId || null;
       base.provider = this.store.state.events?.find(event => event.type === 'email.received' && event.payload?.id === base.messageId)?.source || null;
     } else {

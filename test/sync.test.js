@@ -311,6 +311,25 @@ test('revocation during a pull or a permission_revoked ingest does not commit th
   assert.deepEqual(ingested.cursors.get('google'), { page: 1 });
 });
 
+test('a connector pull 429 does not advance the cursor, is not a simulated success, and other connectors proceed', async () => {
+  const { store, engine, cursors } = setup();
+  cursors.set('slack', { oldest: '100' });
+  const limited = new ScriptedConnector('slack', [Object.assign(new Error('Slack is rate limited. Try again later.'), { status: 429, retryable: true })]);
+  const other = new ScriptedConnector('microsoft', [{ events: [], cursor: { page: 1 }, errors: [], partial: false }]);
+  const sync = new ConnectorSync({ connectors: [limited, other], cursors, engine });
+  const outcome = await sync.run();
+  assert.equal(outcome.results[0].failed, true);
+  assert.equal(outcome.results[0].ingested, 0);
+  assert.equal(outcome.results[1].failed, false);
+  assert.equal(store.state.connectorStatus.slack.ok, false);
+  assert.match(store.state.connectorStatus.slack.lastError, /rate limited/);
+  assert.deepEqual(cursors.get('slack'), { oldest: '100' });
+  assert.deepEqual(cursors.get('microsoft'), { page: 1 });
+  assert.equal(store.state.connectorStatus.microsoft.ok, true);
+  assert.equal(store.state.events.length, 0);
+  assert.equal(store.state.outbox.length, 0);
+});
+
 test('a sync caps page bursts and refuses a non-advancing continuation', async () => {
   const { engine, cursors } = setup();
   const connector = new ScriptedConnector('google', Array.from({ length: 6 }, (_, index) => ({ events: [], cursor: { page: index + 1 }, hasMore: true })));

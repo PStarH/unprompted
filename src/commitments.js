@@ -88,6 +88,51 @@ export function commitmentScope(request, message = null) {
   return scope;
 }
 
+/**
+ * Nouns that never identify a commitment on their own.
+ * A later message may attach to an open task only when it names the same
+ * subject and the same deliverable. "quotes" or "proposal" alone is not a
+ * subject, so two lives that share only that word stay separate.
+ */
+const GENERIC_COMMITMENT_NOUNS = new Set([
+  'quote', 'quotes', 'vendor', 'vendors',
+  'proposal', 'report', 'deck', 'plan', 'memo', 'brief', 'summary', 'write-up', 'writeup',
+  'spec', 'one-pager', 'presentation', 'analysis', 'document', 'doc', 'review', 'roadmap'
+]);
+
+/** True when the subject names something more specific than a generic noun. */
+export function specificCommitmentEntity(entity) {
+  const words = String(entity || '').split(' ').filter(Boolean);
+  return words.length > 0 && words.some(word => !GENERIC_COMMITMENT_NOUNS.has(word));
+}
+
+const CLOSED_COMMITMENT = new Set(['withdrawn', 'withdrawn_pending_reconciliation', 'withdrawn_after_delivery']);
+
+/**
+ * Open tasks whose commitment already names this request's subject and deliverable
+ * on a different connector.
+ *
+ * Thread, sender and participants stay on `sameCommitment`. A second message in
+ * the same mailbox keeps that boundary, including a different participant or a
+ * later thread. This lookup is only for another source — Gmail after Slack, or
+ * the reverse — that states the same subject and deliverable. The caller keeps
+ * the first task id and links the event. Zero or several matches mean no attachment.
+ */
+export function openCommitmentTargets(tasks, request, source = null) {
+  const incoming = commitmentScope(request, source);
+  const incomingConnector = source?.connectorId || request?.source?.connectorId || null;
+  if (!incomingConnector || !specificCommitmentEntity(incoming.entity) || !incoming.deliverable) return [];
+  return Object.values(tasks || {}).filter(task => {
+    if (!task?.request || task.userDismissed || task.control?.paused) return false;
+    if (task.status === 'completed' || task.status === 'cancelled') return false;
+    if (CLOSED_COMMITMENT.has(task.commitment?.status)) return false;
+    const existingConnector = task.sourceConnectorId || task.request?.source?.connectorId || null;
+    if (!existingConnector || existingConnector === incomingConnector) return false;
+    const scope = commitmentScope(task.request, task.request.source);
+    return scope.entity === incoming.entity && scope.deliverable === incoming.deliverable;
+  });
+}
+
 /** True only when two requests name the same stable commitment boundary. */
 export function sameCommitment(left, right, leftMessage = null, rightMessage = null) {
   const a = commitmentScope(left, leftMessage);
@@ -183,6 +228,7 @@ export function isTrustedThreadSender(task, message) {
 }
 
 export const commitmentsApi = {
-  normalizeAddress, commitmentScope, sameCommitment, requestRevisionSignature, unquotedMessageFields,
+  normalizeAddress, commitmentScope, sameCommitment, openCommitmentTargets, specificCommitmentEntity,
+  requestRevisionSignature, unquotedMessageFields,
   isWithdrawalMessage, isRescheduleMessage, messageNamesCommitment, narrowCommitmentsByMessage, isTrustedThreadSender
 };

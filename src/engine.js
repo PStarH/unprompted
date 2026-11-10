@@ -4,7 +4,7 @@ import {
 } from './requests.js';
 import { createHash } from 'node:crypto';
 import {
-  commitmentScope, sameCommitment, requestRevisionSignature, isWithdrawalMessage,
+  commitmentScope, sameCommitment, openCommitmentTargets, requestRevisionSignature, isWithdrawalMessage,
   isRescheduleMessage, narrowCommitmentsByMessage, isTrustedThreadSender, unquotedMessageFields
 } from './commitments.js';
 import { rankCandidates } from './correlation.js';
@@ -367,7 +367,19 @@ export class WorkEngine {
     }
     else throw new Error(`Unhandled event type: ${event.type}`);
     if (!event.suppressForwardActivation || event.disposition === 'request_withdrawn') this.taskServices.processObservedEvent(event);
+    this.#resumePreparedWork(event);
     return result;
+  }
+
+  /** After a saved quote wait clears, keep preparing the same task. Never send from the reply itself. */
+  #resumePreparedWork(event) {
+    if (event?.type !== 'email.received') return;
+    for (const wait of Object.values(this.store.state.taskWaits || {})) {
+      if (wait.status !== 'resolved' || wait.kind !== 'reply' || wait.resolution?.eventId !== event.id) continue;
+      const task = this.store.state.tasks[wait.taskId];
+      if (!task || isSettled(task)) continue;
+      this.assess(wait.taskId, event.id, { force: true, allowAutomation: false });
+    }
   }
 
   #requestHistoryEntry(request, message, event, kind, revision, at = sourceTimestamp(message, event)) {
@@ -396,6 +408,38 @@ export class WorkEngine {
       task.requestHistory.push(this.#requestHistoryEntry(request || task.request, message, event, kind, revision, at));
       if (task.requestHistory.length > 100) task.requestHistory.splice(0, task.requestHistory.length - 100);
     }
+  }
+
+  /**
+   * Attach a later source that names an already open subject and deliverable.
+   * Returns 1 when linked, 0 when nothing matches, and more than 1 when the
+   * match is ambiguous. The first task id is kept either way.
+   */
+  #attachLinkedCommitment(state, request, message, event) {
+    const matches = openCommitmentTargets(state.tasks, request, event);
+    if (matches.length !== 1) return matches.length;
+    const task = state.tasks[matches[0].id];
+    this.#appendCommitmentSource(task, request, message, event, 'linked_source');
+    event.relations = [task.id];
+    event.disposition = 'linked_commitment';
+    record(state, 'linked_commitment',
+      'A later message names the same subject and deliverable as an open commitment; it was attached to that task. No second task was created and nothing was sent.',
+      task.id, event.id);
+    return 1;
+  }
+
+  #matchingQuoteWait(state, message) {
+    const text = `${message?.subject || ''}\n${message?.body || ''}`.toLowerCase();
+    const matches = Object.values(state.taskWaits || {}).filter(wait => {
+      if (wait?.status !== 'active' || wait.kind !== 'reply' || !wait.condition?.quote) return false;
+      const task = state.tasks?.[wait.taskId];
+      if (!task || ['uncertain', 'unknown'].includes(task.action?.status)) return false;
+      if (message?.id && message.id === wait.base?.messageId) return false;
+      if (!text.includes(String(wait.condition.quote).toLowerCase())) return false;
+      const entity = String(wait.condition.subjectEntity || '').toLowerCase();
+      return !entity || text.includes(entity);
+    });
+    return matches.length === 1 ? matches[0] : null;
   }
 
   #makeRequestTask(state, request, message, event) {
@@ -742,6 +786,21 @@ export class WorkEngine {
           }
           event.relations = editedTargets.map(task => task.id);
         }
+        const quoteWait = !previousMessage && this.#matchingQuoteWait(current, message);
+        if (quoteWait) {
+          const waiting = current.tasks[quoteWait.taskId];
+          const quote = quoteWait.condition.quote;
+          waiting.resumedEvidence = [...(waiting.resumedEvidence || []), {
+            quote, eventId: event.id, messageId: message.id, at: sourceAt
+          }].slice(-20);
+          event.disposition = 'wait_resumed';
+          event.relations = [waiting.id];
+          event.summary = `Reply supplied the missing quote · ${waiting.request?.subjectEntity || message.subject}`;
+          record(current, 'evidence',
+            `A later message supplied the missing quote “${quote}”. The saved wait can clear and preparation continues. Nothing was sent.`,
+            waiting.id, event.id);
+          return;
+        }
         event.disposition = 'context_only';
         event.rejection = rejection || { code: 'unknown', detail: 'No request was identified.' };
         if (trusted.length > 1 && (isWithdrawalMessage(message) || isRescheduleMessage(message))) {
@@ -786,6 +845,17 @@ export class WorkEngine {
         allowAutomation = false;
         event.disposition = 'request_revision';
         return;
+      }
+
+      if (matchCandidates.length === 0) {
+        const linked = this.#attachLinkedCommitment(current, request, message, event);
+        if (linked > 1) {
+          event.disposition = 'context_only';
+          event.rejection = { code: 'ambiguous_commitment', detail: 'This request names a subject and deliverable already shared by more than one open commitment; no task was merged or created.' };
+          record(current, 'observation', event.rejection.detail, null, event.id);
+          return;
+        }
+        if (linked === 1) return;
       }
 
       const task = this.#makeRequestTask(current, request, message, event);
@@ -901,6 +971,14 @@ export class WorkEngine {
             taskId = assess ? task.id : null;
             targetEvent.disposition = 'request_revision';
           }
+        } else if (this.#attachLinkedCommitment(state, request, message, event) === 1) {
+          taskId = null;
+          assess = false;
+        } else if (openCommitmentTargets(state.tasks, request, event).length > 1) {
+          targetEvent.disposition = 'context_only';
+          targetEvent.rejection = { code: 'ambiguous_commitment', detail: 'The grounded request names a subject and deliverable already shared by more than one open commitment; no task was merged or created.' };
+          targetEvent.reasoning = { ...targetEvent.reasoning, status: 'no_candidate', finishedAt: stamp(), detail: targetEvent.rejection.detail };
+          return;
         } else {
           const task = this.#makeRequestTask(state, request, message, event);
           taskId = task.id;
@@ -1541,6 +1619,12 @@ export class WorkEngine {
       : null;
     const observations = [
       ...scan.observations,
+      ...(task.resumedEvidence || []).map(item => ({
+        id: `resumed_quote:${item.messageId || item.eventId}`,
+        detail: `The missing quote arrived: ${item.quote}`,
+        quote: item.quote,
+        eventId: item.eventId || null
+      })),
       ...(unavailable ? [{
         id: `unavailable_document:${unavailable.id}`,
         detail: `Document ${unavailable.id} is no longer available (${unavailable.unavailableReason || 'unknown reason'}); it is not used as current evidence.`
@@ -1586,6 +1670,7 @@ export class WorkEngine {
       unverifiable: plan.unverifiable.map(item => ({ text: item.text, reason: item.reason })),
       feedbackExcluded: feedbackExcluded.sort(),
       ...(plan.restoreBlocked ? { planValidity: 'blocked' } : {}),
+      ...(task.resumedEvidence?.length ? { resumedQuotes: task.resumedEvidence.map(item => [item.messageId || null, item.quote || null]) } : {}),
       // The competing sources and their versions are part of what this
       // assessment depends on: a revision of a runner-up can change the
       // verification outcome even when the chosen document is untouched.
