@@ -208,6 +208,37 @@ set to one because HTTP servers and scenario runs can otherwise starve each
 other. A passing evaluation is evidence about its fixtures and invariants, not
 proof of production reliability, time savings, or an overall false-positive rate.
 
+## Release acceptance
+
+`test/release-acceptance.test.js` is the cross-module proof for the six scenes in
+[Release acceptance locked](RELEASE_ACCEPTANCE_LOCKED.md). Each scene asserts a
+happy path, a failure path, and a recovery path. The file is part of `npm test`.
+It uses the existing engine, SQLite store, waits, document patches, and simulated
+mail provider. It does not replace the companion suites below, and it does not
+copy them.
+
+| Scene | What the release file shows | Companion proof that stays separate |
+| --- | --- | --- |
+| 1. One commitment from mail and Slack | Gmail `email.received` and the Slack connector's own `email.received` direct-message event attach to one open Situation and the first task | `test/sync.test.js` for replayed provider events |
+| 2. Wait for the vendor, then resume | An active external wait stays in Waiting, a matching reply clears it and records the quote, and the existing prepare path continues without sending | `test/commitment-lifecycle.test.js` for restart that does not rewrite an unchanged wait |
+| 3. Do not overwrite a user's edit | A prepared patch is refused after the document changes; a revision mismatch does not write; an uncertain patch is not retried | `test/task-services.test.js` for the interrupted applying patch that recovers as uncertain |
+| 4. Approve, read back, do not send twice | One reviewed Cedar send is verified once | `test/send-authority-locked.test.js`, `test/workflow.test.js` for ledger, attestation, 429, and hung POST |
+| 5. Undo stops the mistake immediately | A scoped correction persists and the next matching event does not repeat it; a provider-accepted send is not unsent | `test/commitment-lifecycle.test.js` for withdrawal after acceptance |
+| 6. Crash and restart | Restart after acceptance does not send the Cedar reply again. Unknown lookup does not enable a second send | `test/full-chain-recovery.test.js` is the durable crash proof and is not duplicated here |
+
+Connector rows that already have proof stay in `test/connector-harness.test.js`,
+`test/connectors-slack-notion.test.js`, `test/sync.test.js`, and the Google and
+Outlook fixtures. `test/sync.test.js` also covers a scripted connector-pull 429:
+the cursor does not advance, the connector is not marked healthy, and another
+connector still proceeds. These checks are scripted HTTP and simulated providers.
+They are not production validation of live Google, Outlook, Slack, GitHub, or
+Notion accounts, and they do not exercise provider push delivery or macOS
+Automation.
+
+Miss, false-interrupt, and verified-completion counters beyond the existing
+`recordMiss` helper, notification resolution, and verified ledger status are a
+P1 gap. This proof does not add a metrics pipeline for them.
+
 ## Where to add a test
 
 | Change | Start here |
