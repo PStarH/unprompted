@@ -51,6 +51,12 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   const drafts = new Map(), pending = new Set(), errors = new Map();
   let contextPanel = null, contextTrigger = null, restoreContextFocus = true;
   const byId = id => document.getElementById(id);
+  // Same admission context the decision queue uses. A persisted wait often
+  // lives on state.taskWaits rather than on the task itself.
+  function admissionContext() {
+    const view = context();
+    return { connections: view.connections, taskWaits: view.state?.taskWaits };
+  }
 
   function scopedMemories(task) {
     const normal = value => String(value || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
@@ -114,7 +120,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   function summary(task) {
     if (task.preparedWork?.acceptedAt) return t('你已接受这次准备的内容', 'You accepted this preparation');
     if (task.preparedWork) return task.preparedWork.kind === 'draft' ? t('草稿已备好 · 请按目标审阅', 'Draft ready · review against your goal') : t('来源简报已备好 · 请按目标审阅', 'Source brief ready · review against your goal');
-    const status = taskState(task, context().connections);
+    const status = taskState(task, admissionContext());
     if (status === 'paused_by_user') return t('由你暂停，恢复后继续核对', 'Paused by you. Resume to continue checks.');
     if (status === 'failed') return task.reasoning?.detail || task.reason || t('检查连接后重新核对', 'Check the connection, then recheck.');
     if (status === 'source_disconnected') return t('重新连接来源后继续', 'Reconnect the source to continue.');
@@ -147,7 +153,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   }
 
   function badge(task) {
-    const state = taskState(task, context().connections);
+    const state = taskState(task, admissionContext());
     return `<span class="ws-state" data-state="${state}"><i aria-hidden="true"></i>${stateLabel(state)}</span>`;
   }
 
@@ -205,7 +211,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
 
   // States where the visible result is not final say so first, in words.
   function stateNotice(task) {
-    const status = taskState(task, context().connections);
+    const status = taskState(task, admissionContext());
     if (status === 'paused_by_policy') {
       const policyId = task.activationHold?.policyIds?.[0] || '';
       return `<div class="ws-state-notice" role="status"><span><strong>${t('因规则暂停', 'Paused by a rule')}</strong>${t('修改或停用对应规则后，会重新核对来源并继续准备。', 'Update or disable the matching rule to recheck sources and continue preparation.')}</span><button type="button" class="text-button" data-open-rules="${esc(policyId)}">${t('查看这条规则', 'Open this rule')}</button></div>`;
@@ -268,7 +274,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   }
 
   function row(task, lanes = false) {
-    const status = taskState(task, context().connections);
+    const status = taskState(task, admissionContext());
     const title = task.subject || task.request?.subjectEntity || t('待跟进的事', 'Work to follow up');
     const active = task.id === selected;
     const moment = shortMoment(task.updatedAt || task.createdAt || task.action?.at);
@@ -284,9 +290,9 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
   // The order matches the field: needs you, in motion, waiting, then the quiet
   // end of the workspace. Arrow keys and page steppers use the same order.
   function orderedTasks(tasks) {
-    const connections = context().connections;
+    const admission = admissionContext();
     return ['attention', 'working', 'waiting', 'quiet'].flatMap(group =>
-      tasks.filter(task => stateGroup(taskState(task, connections)) === group));
+      tasks.filter(task => stateGroup(taskState(task, admission)) === group));
   }
 
   function taskPage(task, tasks) {
@@ -303,7 +309,7 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     // The actionable shared-wait card lives above the workspace. Task badges
     // retain the related-task highlighting without a second dependency panel.
     return ['attention', 'working', 'waiting', 'quiet'].map(group => {
-      const matches = tasks.filter(task => stateGroup(taskState(task, context().connections)) === group);
+      const matches = tasks.filter(task => stateGroup(taskState(task, admissionContext())) === group);
       if (!matches.length && mode !== 'field') return '';
       return `<section class="ws-task-group" data-group="${group}" data-empty="${!matches.length}"><h3><i aria-hidden="true"></i>${groupLabel(group)}<span>${matches.length}</span></h3><div>${matches.map(task => row(task)).join('') || '<p class="ws-group-empty" aria-label="' + t('暂无', 'None') + '">—</p>'}</div></section>`;
     }).join('');

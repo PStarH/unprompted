@@ -267,7 +267,9 @@ test('recovery checks unfinished work without rewriting an unchanged state or ac
   const filename = path.join(dir, 'state.json');
   let store = new JsonStore(filename);
   let engine = new WorkEngine(store, { reasoner: new NullReasoner(), stallAfterMs: 86_400_000 });
-  engine.ingest(requestMail('stable-request'));
+  engine.ingest(requestMail('stable-request', {
+    body: 'Please update the Northstar proposal with the experiment results and send it by 2099-01-01.'
+  }));
   engine.waitForTask('request:stable-request', { kind: 'time', until: '2099-01-01T00:00:00.000Z' });
   const before = fs.readFileSync(filename, 'utf8');
   const revision = store.state.revision;

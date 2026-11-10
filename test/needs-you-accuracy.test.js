@@ -58,6 +58,21 @@ test('blocked unknown without a terminal close stays in motion, and an explicit 
   assertSameAdmission([open, inconclusive, attest]);
 });
 
+test('an active wait stored only on context.taskWaits stays out of Needs you', () => {
+  const task = {
+    id: 'watched', status: 'waiting_for_information',
+    management: {
+      nextAction: { kind: 'provide_information', owner: 'unknown' },
+      wake: { kind: 'event', status: 'waiting', condition: 'When related evidence or a reply arrives' }
+    }
+  };
+  const context = { connections: {}, taskWaits: { watched: { taskId: 'watched', status: 'active', kind: 'document' } } };
+  assert.equal(needsUserAttention(task), true);
+  assert.equal(needsUserAttention(task, context), false);
+  assert.equal(stateGroup(taskState(task, context)), 'waiting');
+  assert.notEqual(stateGroup(taskState(task, context)), 'attention');
+});
+
 test('a synthetic wake does not hide user-owned missing information, and a persisted wait does', () => {
   const synthetic = {
     id: 'ask', status: 'waiting_for_information', documentId: 'doc-1',
