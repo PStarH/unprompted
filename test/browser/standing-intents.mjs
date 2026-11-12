@@ -12,7 +12,21 @@ try {
   browser = await chromium.launch({ channel: process.env.UNPROMPTED_BROWSER_CHANNEL || undefined, headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.on('pageerror', error => errors.push(error.message));
+  // The standing-goal controls live in Memory's "Rules & experience" section,
+  // which starts collapsed. Use the same section tab a user selects.
+  async function openStandingGoals() {
+    const memory = page.locator('#viewMemory');
+    if (!(await memory.isVisible())) await page.locator('.navigation [data-view="memory"]').click();
+    const advanced = memory.locator('details.memory-advanced');
+    if (!(await advanced.evaluate(node => node.open))) {
+      const tab = memory.locator('.page-focus-nav [role="tab"]').filter({ hasText: /Rules & experience|规则与经验/ });
+      if (await tab.count()) await tab.click();
+      else await advanced.locator(':scope > summary').click();
+    }
+    await memory.locator('[data-durable-add="intent"]').waitFor({ state: 'visible' });
+  }
   await page.goto(fixture.base + '/#memory');
+  await openStandingGoals();
   await page.locator('[data-durable-add="intent"]').click();
   const form = page.locator('[data-durable-form="intent"]');
   await form.locator('[name=description]').fill('Watch supplier quotations');
@@ -34,6 +48,7 @@ try {
   await page.locator('[data-intent-transition][data-operation=pause]').click();
   await page.locator('[data-intent-transition][data-operation=resume]').waitFor();
   await page.reload();
+  await openStandingGoals();
   await page.locator('[data-intent-transition][data-operation=resume]').click();
   await page.locator('[data-intent-transition][data-operation=pause]').waitFor();
   checks.push('pause survives reload and resume is explicit');

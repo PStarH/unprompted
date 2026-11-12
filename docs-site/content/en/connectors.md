@@ -9,7 +9,7 @@ Connectors let Unprompted read selected work and, when you allow it, use actions
 
 A **work source** checks your selected content on connection and continues observing while the app runs, normally every five minutes. You can pause it or choose **Check now**. **MCP** supplies tools used during a task; it does not automatically poll for changes or create tasks. A provider's native source and its MCP connection are separate and require separate authorization.
 
-With publisher-provisioned clients, users do not need to register Google, GitHub, Outlook, Slack or Notion developer apps. Hosted Notion, Linear, Jira/Confluence and Todoist MCP presets use the vendor's sign-in page.
+A publisher can provision public OAuth clients for Google, GitHub, Outlook and Slack, so users do not register their own developer apps. Native Notion observation uses a public integration whose OAuth client must be configured by the publisher; when it is absent, the app shows the one-time setup fields and does not claim automatic observation. Notion, Linear, Jira/Confluence and Todoist MCP presets use the vendor's sign-in page; MCP sign-in does not start native observation.
 
 ## Google: mail, documents and calendar
 
@@ -105,5 +105,5 @@ A provider accepting an action is distinct from independent readback verificatio
 - Missing account or repository: check the signed-in account, GitHub installation, Slack workspace or Notion page selection.
 - Reads work but writes fail: consent to the provider's write scopes again and check the local action or MCP tool grant.
 - Slack or Notion callback fails: check whether local port 53682 is in use.
-- Client ID requested, app not approved or organization policy blocks access: contact the publisher or your administrator; users do not need to register developer apps.
+- Client ID requested, app not approved or organization policy blocks access: contact the publisher or your administrator. A self-hosted copy may require one-time application setup; publisher provisioning and provider review cannot guarantee that every user can sign in directly.
 - Partial read or timeout: narrow the selected scope and check access. Check the actual provider state before repeating an uncertain write.

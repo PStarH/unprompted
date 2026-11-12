@@ -302,6 +302,35 @@ connector suite also checks Gmail `messagesAdded`, malformed baselines, Drive
 listing continuation, incomplete search and body timeouts. These fixtures do not
 establish compatibility with a real account or provider-side push delivery.
 
+## Real first-use connector timing
+
+Scripted onboarding checks measure fixture time, not a real first use. The
+connection and Google onboarding browser checks use scripted provider responses
+without a real account, so their duration cannot support a real-user claim such
+as a first read in under five minutes. Only a timed real connection on a clean
+installation can support that claim.
+
+Use the same procedure for each provider being accepted: start when
+installation is complete and the user opens that provider's setup in
+Connections; stop when the first real read is visible, meaning the account
+card's actual read count, a sourced finding, or an honest empty result. A
+loading state, an authorization redirect or a scripted fixture result is not
+the end point.
+
+| Record | Value |
+| --- | --- |
+| Provider and account type | For example a consumer Gmail account or an organization GitHub account |
+| Prerequisites | Registered distribution client, administrator approval, preinstalled app or project setup |
+| Duration | Wall-clock time from the start to the first real read |
+| Outcome | Success or failure, the observed error and the repair step |
+| Excluded | Message or document content, account identifiers and credentials |
+
+A required provider registration, administrator grant or platform review is a
+prerequisite of the distribution or self-hosted operator, reported separately
+rather than counted in the fast path. The application cannot create that status
+locally. Do not count a fixture run or a resumed connection as a first use, and
+do not present a scripted duration as a real-user measurement.
+
 ## Tool safety and orchestration regression
 
 Run `npm run test:integration` for the complete connector-to-feedback path.

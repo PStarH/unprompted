@@ -1,5 +1,5 @@
 import { MEMORY_TOOL_INSTRUCTIONS } from './durable/memory-tools.js';
-import { readTextBounded } from './bounded.js';
+import { requestModelJson, requireAccountingContext } from './model-request.js';
 import { retryAfterMs } from './reasoning-recovery.js';
 import {
   appendToolTurn, modelEndpoint, modelHeaders, modelProtocol, readToolTurn, responseUsage, toolConversation, toolRequest
@@ -9,7 +9,11 @@ export const TOOL_LOOP_LIMITS = Object.freeze({ turns: 4, calls: 8, contextChars
 
 /** Standard harness uses the same scoped MCP adapters as Pi. Every model
  * request charges the shared rate/concurrency budget, including follow-ups. */
-export async function completeWithTools({ reasoner, requestId, system, user, tools }) {
+export async function completeWithTools({ reasoner, requestId, system, user, tools, accounting = null, accountingContext = null }) {
+  // The explicit trusted context is required as soon as accounting is enabled;
+  // it is validated before the first request so a missing value costs no
+  // network call and no reservation.
+  const context = accounting ? requireAccountingContext(accountingContext) : null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), reasoner.timeoutMs);
   const protocol = modelProtocol(reasoner.protocol);
@@ -28,16 +32,23 @@ export async function completeWithTools({ reasoner, requestId, system, user, too
       if (!permit.ok) throw Object.assign(new Error(`Reasoning skipped: ${permit.reason}`), { code: 'REASONING_BUDGET' });
       let parsed;
       try {
-        controller.signal.throwIfAborted(); reasoner.calls++;
-        const response = await reasoner.fetchImpl(modelEndpoint(reasoner.baseUrl, protocol), {
-          method: 'POST', headers: modelHeaders(protocol, reasoner.apiKey),
-          body: JSON.stringify(payload), signal: controller.signal
+        controller.signal.throwIfAborted();
+        const body = await requestModelJson({
+          accounting,
+          context,
+          onDispatch: () => { reasoner.calls += 1; },
+          protocol,
+          payload,
+          fetchImpl: reasoner.fetchImpl,
+          url: modelEndpoint(reasoner.baseUrl, protocol),
+          headers: modelHeaders(protocol, reasoner.apiKey),
+          signal: controller.signal,
+          maxResponseChars: reasoner.budget.limits.maxResponseChars,
+          label: 'Reasoning response',
+          httpError: (status, response) => Object.assign(new Error([400, 422].includes(status)
+            ? `Model provider rejected the tool-enabled request (${status}). Check function-calling support.`
+            : `Model provider returned ${status}`), { status, retryAfterMs: retryAfterMs(response?.headers?.get?.('retry-after')) })
         });
-        if (!response.ok) throw Object.assign(new Error([400, 422].includes(response.status)
-          ? `Model provider rejected the tool-enabled request (${response.status}). Check function-calling support.`
-          : `Model provider returned ${response.status}`), { status: response.status, retryAfterMs: retryAfterMs(response.headers?.get?.('retry-after')) });
-        const readable = typeof response.text === 'function' || response.body?.getReader;
-        const body = readable ? JSON.parse(await readTextBounded(response, reasoner.budget.limits.maxResponseChars, 'Reasoning response')) : await response.json();
         reasoner.reportUsage?.(responseUsage(protocol, body), requestId);
         parsed = readToolTurn(protocol, body);
       } finally { reasoner.budget.release(requestId); }

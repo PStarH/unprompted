@@ -172,12 +172,17 @@ export class ExperienceService {
         if (kind === 'verified_consumption' && artifact.edit_ratio >= this.policy.highEditRatio && (['wording', 'style'].includes(effectDimension) || parse(experience.effect_signature_json).type === 'draft_format')) continue;
         if (kind === 'implicit_override' && !['draft_format', 'advisory'].includes(parse(experience.effect_signature_json).type)) continue;
         const verified = ['supervised_success', 'verified_consumption'].includes(kind);
+        const attributedRevision = experience.attributed_revision ?? experience.revision;
         const inserted = this.db.prepare(`INSERT OR IGNORE INTO experience_evidence(id,experience_id,experience_revision,task_id,task_run_id,plan_step_id,execution_id,evidence_kind,effect_dimension,independent_key,verified,created_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), experience.id, experience.attributed_revision ?? experience.revision, taskId, run?.id || null, step?.id || null, executionId, kind, effectDimension, taskId || id, Number(verified), at).changes;
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), experience.id, attributedRevision, taskId, run?.id || null, step?.id || null, executionId, kind, effectDimension, taskId || id, Number(verified), at).changes;
         if (!inserted) continue;
         this.database.lineage('feedback', id, 'experience', experience.id);
-        if (kind === 'supervised_success') this.db.prepare('UPDATE experiences SET verified_success_count=verified_success_count+1,positive_evidence_count=positive_evidence_count+1,last_verified_at=?,updated_at=? WHERE id=?').run(at, at, experience.id);
-        else if (['explicit_acceptance', 'verified_consumption', 'similar_content_consumption'].includes(kind)) this.db.prepare('UPDATE experiences SET positive_evidence_count=positive_evidence_count+1,updated_at=? WHERE id=?').run(at, experience.id);
+        // Positive evidence is promotion evidence only for the revision that
+        // actually influenced the step. Late feedback for an earlier revision
+        // stays in the evidence history, but it cannot refill the counts the
+        // user cleared by revalidating, nor refresh last_verified_at.
+        if (kind === 'supervised_success') this.db.prepare('UPDATE experiences SET verified_success_count=verified_success_count+1,positive_evidence_count=positive_evidence_count+1,last_verified_at=?,updated_at=? WHERE id=? AND revision=?').run(at, at, experience.id, attributedRevision);
+        else if (['explicit_acceptance', 'verified_consumption', 'similar_content_consumption'].includes(kind)) this.db.prepare('UPDATE experiences SET positive_evidence_count=positive_evidence_count+1,updated_at=? WHERE id=? AND revision=?').run(at, experience.id, attributedRevision);
         if (kind === 'implicit_override') {
           const count = this.db.prepare("SELECT COUNT(DISTINCT independent_key) n FROM experience_evidence WHERE experience_id=? AND experience_revision=? AND evidence_kind='implicit_override'").get(experience.id, experience.revision).n;
           if (count >= this.policy.repeatedOverrides) this.db.prepare("UPDATE experiences SET status='needs_revalidation',last_negative_at=?,updated_at=? WHERE id=?").run(at, at, experience.id);
@@ -188,6 +193,9 @@ export class ExperienceService {
         this.database.lineage('feedback', id, 'job', job.id);
       }
       if (kind === 'supervised_success' && this.policy.autoPromote) for (const experience of credible) {
+        // A late success attributed to an older revision must not trigger a
+        // promotion decision about the current, separately revalidated revision.
+        if ((experience.attributed_revision ?? experience.revision) !== experience.revision) continue;
         const current = this.get(experience.id);
         if (current.status === 'candidate' && current.verified_success_count >= this.policy.mechanicalSuccesses) {
           try { this.promote(current.id, { expectedRevision: current.revision }); } catch (error) { if (error.code !== 'PROMOTION_INELIGIBLE') throw error; }

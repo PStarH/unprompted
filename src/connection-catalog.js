@@ -66,6 +66,30 @@ export function validClientSecret(value) {
     && !/^(?:xox[abprs]-|ntn_|gh[opusr]_|github_pat_|ya29\.|eyJ)/i.test(value);
 }
 
+/** Classify each OAuth provider entry as configured, missing or invalid without
+ * returning application identifiers or secrets. */
+export function clientConfigurationStates(input) {
+  const providers = Object.entries(CONNECTION_PROVIDERS).filter(([, provider]) => provider.flow !== 'token');
+  const states = {};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    for (const [id] of providers) states[id] = 'invalid';
+    return states;
+  }
+  for (const [id, provider] of providers) {
+    const entry = input[id];
+    if (entry == null) { states[id] = 'missing'; continue; }
+    states[id] = validClientEntry(id, provider, entry) ? 'configured' : 'invalid';
+  }
+  return states;
+}
+
+function validClientEntry(id, provider, entry) {
+  if (typeof entry !== 'object' || Array.isArray(entry) || !validPublicClientId(entry.clientId)) return false;
+  if (provider.flow !== 'code') return true;
+  if ((id !== 'slack' || entry.clientSecret != null) && !validClientSecret(entry.clientSecret)) return false;
+  return id !== 'slack' || entry.redirectUri == null || validSlackRedirectUri(entry.redirectUri);
+}
+
 export function publicClientConfiguration(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid connector client configuration.');
   const result = {};

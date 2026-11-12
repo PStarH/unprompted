@@ -629,7 +629,7 @@ function renderAutonomyControls(task = null) {
   const grants = (current.autonomy.grants || []).filter(grant => grant.mode === 'time'
     ? Date.parse(grant.expiresAt) > Date.now() : !task || grant.taskId === task.id);
   return `<details class="management-explanation" data-preserve="yolo-${escapeHtml(task?.id || 'workspace')}"><summary>${nativeCopy('限时自动跟进', 'Timed automatic follow-up')}${grants.length ? ` · ${nativeCopy('已开启', 'On')}` : ''}</summary>
-    <p>${nativeCopy('只跟进已授权的事，不会因此发送或修改。限时范围是整个工作区；单件范围在这件事完成或取消后结束。', 'Follows only what you already allowed. It does not enable sending or editing. A time limit covers the workspace; a single task ends when that task is done or cancelled.')}</p>
+    <p>${nativeCopy('授权存续期间会自动批准已准备的回复发送和来源文档修改，不扩充来源权限；仍受来源权限与结果核验限制。限时范围是整个工作区；单件范围在这件事完成或取消后结束。已发出的操作不能通过停止自动跟进撤回。', 'While the authorization lasts, prepared replies may be sent and source documents patched automatically; this does not expand source permissions and still follows source limits and result checks. A time limit covers the workspace; a single task ends when that task is done or cancelled. Stopping automatic follow-up cannot recall an operation the provider already accepted.')}</p>
     ${grants.map(grant => `<div class="grant-row"><span>${grant.mode === 'time' ? nativeCopy('自动跟进至', 'Automatic follow-up until') + ' ' + escapeHtml(time(grant.expiresAt)) : nativeCopy('这件自动跟进', 'Following this task') + ' · ' + escapeHtml(current.tasks?.find(item => item.id === grant.taskId)?.request?.subjectEntity || grant.taskId)}</span><button type="button" class="secondary-button" data-yolo-revoke="${escapeHtml(grant.id)}">${nativeCopy('停止自动跟进', 'Stop automatic follow-up')}</button></div>`).join('')}
     <div class="action-row">${task ? `<button type="button" class="secondary-button" data-yolo-task="${escapeHtml(task.id)}">${nativeCopy('这件自动跟进', 'Follow this automatically')}</button>` : ''}</div>
     <form data-yolo-time data-preserve="yolo-duration-${escapeHtml(task?.id || 'workspace')}"><label>${nativeCopy('时长（分钟）', 'Minutes')} <input type="number" name="durationMinutes" min="1" max="1440" value="30" required></label><button type="submit" class="secondary-button">${nativeCopy('开启限时自动跟进', 'Start timed follow-up')}</button></form>
@@ -2166,7 +2166,7 @@ async function saveAutonomy(button, endpoint, body) {
   try {
     const result = await postJSON(endpoint, body);
     render(result.state);
-    toast(nativeCopy('自动跟进已更新。不会因此发送或修改。', 'Automatic follow-up updated. Sending and editing stay off.'));
+    toast(nativeCopy('自动跟进设置已更新。已准备的发送和文档修改是否自动执行，由当前有效授权决定。', 'Automatic follow-up settings updated. Whether prepared sends and document patches run automatically depends on the current effective authorization.'));
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; }
 }

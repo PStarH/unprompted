@@ -61,6 +61,11 @@ export function createMemorySpace({ context, update, post, applyState, notify, g
     if (loading) { if (force) browseSequence++; return; }
     const revision = String(state.revision ?? 0);
     if (!force && loadedRevision === revision) return;
+    // This load already reads the latest query, kind, scope and status. A search
+    // debounce still pending from the same input would only repeat it, and
+    // letting it fire after this load starts would force its stale response to
+    // schedule yet another request for the same query.
+    clearTimeout(searchTimer);
     loading = true; render();
     const sequence = ++browseSequence;
     const parameters = new URLSearchParams({ q: query, kind, status, limit: '500' });
@@ -74,7 +79,13 @@ export function createMemorySpace({ context, update, post, applyState, notify, g
       // Selection and exploration are independent of the search result window.
       render();
       if (focusId) void loadDetail(focusId);
-    } catch (error) { loadError = error.message; loadedRevision = revision; render(); }
+    } catch (error) {
+      // A stale failure belongs to a query the user already replaced. It must
+      // not project an error over the newer query; finally still schedules the
+      // latest successor.
+      if (sequence !== browseSequence) return;
+      loadError = error.message; loadedRevision = revision; render();
+    }
     finally { loading = false; if (sequence !== browseSequence) void load({ force: true }); else render(); }
   }
 

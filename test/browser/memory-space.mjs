@@ -29,6 +29,92 @@ try {
   await page.screenshot({ path: `${output}/desktop-find.png`, fullPage: true });
   check('default-screen-is-search-and-recent-results-without-a-graph-or-category-grid');
 
+  const inspectorSection = { overview: /^(Overview|概览)$/, related: /^(Related|关联)$/, history: /^(History|历史)$/ };
+  const sectionTimeout = 15000;
+
+  // Serialized into the browser by waitForFunction. It must not close over Node
+  // state: every tab, aria-controls id and panel is read from the current DOM in
+  // this one evaluation. page-focus assigns a fresh detail-focus-N serial on
+  // every detail re-render, so an id captured in an earlier turn can already be
+  // gone; here a re-render can only make the predicate return false, after which
+  // Playwright re-evaluates against the replacement DOM.
+  function sectionReady(pattern) {
+    const visible = element => {
+      if (!element) return false;
+      if (getComputedStyle(element).visibility === 'hidden') return false;
+      return element.getClientRects().length > 0;
+    };
+    const inspectors = [...document.querySelectorAll('.memory-inspector')].filter(element =>
+      !element.classList.contains('memory-reference-inspector') &&
+      !element.classList.contains('memory-relationship-inspector') &&
+      visible(element));
+    if (inspectors.length !== 1) return false;
+    const tablists = [...inspectors[0].querySelectorAll('.detail-focus-navigation [role="tablist"]')].filter(visible);
+    if (tablists.length !== 1) return false;
+    const tabs = [...tablists[0].querySelectorAll('[role="tab"]')];
+    if (tabs.length !== 3) return false;
+    if (tabs.filter(tab => tab.getAttribute('aria-selected') === 'true').length !== 1) return false;
+    const target = tabs.find(tab => new RegExp(pattern).test(tab.textContent.trim()));
+    if (!target || target.getAttribute('aria-selected') !== 'true') return false;
+    const controlled = tabs.flatMap(tab => (tab.getAttribute('aria-controls') || '').split(/\s+/).filter(Boolean));
+    if (!controlled.length) return false;
+    if (!controlled.every(id => document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length === 1)) return false;
+    return (target.getAttribute('aria-controls') || '').split(/\s+/).filter(Boolean).every(id => {
+      const panel = document.getElementById(id);
+      if (!panel || panel.getAttribute('role') !== 'tabpanel') return false;
+      if (panel.classList.contains('detail-focus-inactive')) return false;
+      if (panel.tagName === 'DETAILS') return visible(panel.querySelector(':scope > summary'));
+      if (!panel.hidden && panel.textContent.trim()) return visible(panel);
+      return true;
+    });
+  }
+
+  function sectionDiagnostics(pattern) {
+    const visible = element => {
+      if (!element) return false;
+      if (getComputedStyle(element).visibility === 'hidden') return false;
+      return element.getClientRects().length > 0;
+    };
+    return [...document.querySelectorAll('.memory-inspector')]
+      .filter(element => !element.classList.contains('memory-reference-inspector') && !element.classList.contains('memory-relationship-inspector'))
+      .map(inspector => ({
+        visible: visible(inspector),
+        tablists: [...inspector.querySelectorAll('.detail-focus-navigation [role="tablist"]')].filter(visible).length,
+        tabs: [...inspector.querySelectorAll('[role="tab"]')].map(tab => ({
+          text: tab.textContent.trim(),
+          selected: tab.getAttribute('aria-selected'),
+          target: new RegExp(pattern).test(tab.textContent.trim()),
+          controls: (tab.getAttribute('aria-controls') || '').split(/\s+/).filter(Boolean).map(id => {
+            const panel = document.getElementById(id);
+            return { id, count: document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length, role: panel ? panel.getAttribute('role') : null, inactive: panel ? panel.classList.contains('detail-focus-inactive') : null, hidden: panel ? panel.hidden : null, visible: visible(panel) };
+          })
+        }))
+      }));
+  }
+
+  async function selectInspectorSection(name, target = page) {
+    const label = inspectorSection[name];
+    assert.ok(label, `Unknown inspector section: ${name}`);
+    const inspector = target.locator('.memory-inspector:not(.memory-reference-inspector):not(.memory-relationship-inspector):visible');
+    const tab = inspector.locator('.detail-focus-navigation [role="tablist"]:visible').getByRole('tab', { name: label });
+    await tab.waitFor({ state: 'visible', timeout: sectionTimeout });
+    // One real click, only when the current DOM says the target is not selected.
+    // If the product drops that selection afterwards we fail rather than re-click.
+    if (await tab.getAttribute('aria-selected') !== 'true') await tab.click();
+    try {
+      await target.waitForFunction(sectionReady, label.source, { timeout: sectionTimeout, polling: 50 });
+    } catch (error) {
+      const diagnostics = await target.evaluate(sectionDiagnostics, label.source).catch(diagnosticError => ({ diagnosticError: diagnosticError.message }));
+      throw new Error(`Inspector ${name} section did not settle: ${JSON.stringify(diagnostics)}`, { cause: error });
+    }
+    return inspector;
+  }
+
+  async function waitForMemoryDetail(expected) {
+    await page.locator(`.memory-inspector:not(.memory-reference-inspector):not(.memory-relationship-inspector):visible [data-preserve="memory-versions-${expected}"]`).waitFor({ state: 'attached' });
+    await page.waitForFunction(() => !document.querySelector('.memory-inspector .memory-inspector-context [role=status]'));
+  }
+
   async function find(query, expected, task) {
     const started = performance.now();
     await page.locator('[data-memory-search]').fill(query);
@@ -36,18 +122,25 @@ try {
     assert.ok(await page.locator('.memory-search-result').first().locator('.memory-match-reasons').innerText());
     assert.ok(await page.locator('.memory-search-result').first().locator('.memory-result-source').innerText());
     const latencyMs = Math.round(performance.now() - started);
+    const activeInspector = page.locator('.memory-inspector:not(.memory-reference-inspector):not(.memory-relationship-inspector):visible');
+    const priorInspector = await activeInspector.count() ? await activeInspector.first().elementHandle() : null;
     await page.locator(`.memory-search-result[data-memory-id="${expected}"] [data-memory-focus]`).click();
-    await page.locator('.memory-inspector-context').waitFor();
-    await page.waitForFunction(() => !document.querySelector('.memory-inspector-context [role=status]'));
+    if (priorInspector) await page.waitForFunction(element => !element.isConnected, priorInspector);
+    await waitForMemoryDetail(expected);
+    await selectInspectorSection('overview');
     tasks.push({ task, query, expected, rank: 1, queries: 1, openActions: 1, graphNavigation: 0, latencyMs });
   }
   await find('What is the budget for Cedar?', 'budget-current', 'Find a previously stated budget');
+  await selectInspectorSection('history');
+  assert.match(await page.locator('.memory-inspector-section[data-preserve="memory-versions-budget-current"]').innerText(), /62,000/);
+  await selectInspectorSection('overview');
   assert.match(await page.locator('.memory-inspector').innerText(), /62,000/);
   assert.match(await page.locator('.memory-human-context').innerText(), /Cedar review/);
   await page.screenshot({ path: `${output}/desktop-budget-context.png`, fullPage: true });
   await find('Find the preference 林晨 expressed several weeks ago', 'old-preference', 'Find a preference expressed several weeks ago');
   assert.match(await page.locator('.memory-search-result').first().innerText(), /9\/18\/2026/);
   await find('Find the correction from the previous Cedar task', 'budget-current', 'Find a correction made during a previous task');
+  await selectInspectorSection('related');
   assert.match(await page.locator('.memory-inspector-context').innerText(), /replaces|Replaces/);
 
   const startProject = performance.now();
@@ -57,24 +150,34 @@ try {
   assert.ok((await page.locator('.memory-result-content').allTextContents()).every(text => text.includes('Cedar')));
   tasks.push({ task: 'Find everything relevant to a project', query: 'Everything relevant to Cedar', queries: 1, graphNavigation: 0, latencyMs: Math.round(performance.now() - startProject) });
   await find('studio blue drawer', 'isolated-key', 'Find a memory with no graph relationships');
+  await selectInspectorSection('related');
   assert.match(await page.locator('.memory-inspector-context').innerText(), /No evidenced connections/);
   assert.equal(await page.locator('.memory-space-graph').count(), 0);
   check('budget-old-preference-project-correction-and-isolated-memory-are-found-through-search');
 
   await find('What is the budget for Cedar?', 'budget-current', 'Determine which newer memory supersedes an older one');
+  await selectInspectorSection('related');
   await page.locator('.memory-inspector-context [data-memory-focus="budget-old"]').click();
+  await waitForMemoryDetail('budget-old');
+  await selectInspectorSection('overview');
   await page.waitForFunction(() => document.querySelector('.memory-inspector-content')?.textContent.includes('48,000'));
+  await selectInspectorSection('related');
   await page.locator('.memory-inspector-context [data-memory-focus="budget-current"]').waitFor();
   assert.match(await page.locator('.memory-inspector-context').innerText(), /Replaced by.*62,000/s);
   tasks.push({ task: 'Understand why memories are connected', selected: 'budget-old', explanation: 'Explicit user correction', extraContextActions: 1, graphNavigation: 0 });
   await page.locator('.memory-inspector-context [data-memory-focus="budget-current"]').click();
+  await waitForMemoryDetail('budget-current');
+  await selectInspectorSection('overview');
   await page.waitForFunction(() => document.querySelector('.memory-inspector-content')?.textContent.includes('62,000'));
+  await selectInspectorSection('related');
   await page.locator('[data-memory-explore="budget-current"]').click();
   await page.waitForFunction(() => document.querySelector('[data-memory-center]')?.dataset.memoryCenter === 'budget-current');
   assert.ok(await page.locator('[data-node-kind="project"]').count());
   assert.ok(await page.locator('[data-node-kind="task"]').count());
   const positions = await page.locator('.memory-space-node').evaluateAll(nodes => nodes.map(node => [node.dataset.memoryFocus || node.dataset.memoryReference, node.getAttribute('style')]));
   await page.locator('.memory-space-node[data-memory-focus="budget-old"]').click();
+  await waitForMemoryDetail('budget-old');
+  await selectInspectorSection('overview');
   await page.waitForFunction(() => document.querySelector('.memory-inspector-content')?.textContent.includes('48,000'));
   assert.equal(await page.locator('[data-memory-center]').getAttribute('data-memory-center'), 'budget-current');
   assert.deepEqual(await page.locator('.memory-space-node').evaluateAll(nodes => nodes.map(node => [node.dataset.memoryFocus || node.dataset.memoryReference, node.getAttribute('style')])), positions);
@@ -86,6 +189,7 @@ try {
   assert.match(await page.locator('.memory-relationship-inspector').innerText(), /explicitly corrected/);
   assert.equal(await page.locator('[data-memory-center]').getAttribute('data-memory-center'), 'budget-current');
   await page.locator('[data-memory-edge-close]').click();
+  await selectInspectorSection('related');
   await page.locator('[data-memory-explore="budget-old"]').click();
   await page.waitForFunction(() => document.querySelector('[data-memory-center]')?.dataset.memoryCenter === 'budget-old');
   assert.equal(await page.locator('[data-memory-back]').isDisabled(), false);
@@ -100,6 +204,8 @@ try {
   assert.match(await page.locator('.memory-reference-inspector').innerText(), /Project/);
   assert.equal(await page.locator('[data-memory-center]').getAttribute('data-memory-center'), 'budget-current');
   await page.locator('.memory-space-node[data-memory-focus="budget-current"]').click();
+  await waitForMemoryDetail('budget-current');
+  await selectInspectorSection('overview');
   await page.locator('.memory-inspector-content').waitFor();
   await page.screenshot({ path: `${output}/desktop-optional-explore.png`, fullPage: true });
   await page.locator('[data-memory-results]').click();
@@ -109,9 +215,20 @@ try {
 
   // Write real corrections and lifecycle changes through the persistent API.
   async function action(operation) {
-    const menu = page.locator('.memory-actions-menu');
-    if (!(await menu.evaluate(element => element.open))) await menu.locator('summary').click();
-    await page.locator(`.memory-inspector [data-memory-operation="${operation}"]`).click();
+    await selectInspectorSection('overview');
+    const menu = page.locator('.memory-inspector:not(.memory-reference-inspector):not(.memory-relationship-inspector):visible .memory-actions-menu');
+    const control = menu.locator(`[data-memory-operation="${operation}"]`);
+    // A detail re-render can replace the menu between opening it and clicking the
+    // operation. Re-open the menu at most twice; the section selection itself is
+    // never retried, so a genuinely lost selection still fails above.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!(await menu.evaluate(element => element.open))) await menu.locator('summary').click();
+      if (await control.isVisible()) {
+        await control.click();
+        return;
+      }
+    }
+    await control.click();
   }
   await action('edit');
   await page.locator('[data-memory-edit] textarea').fill('Cedar’s approved budget is ¥63,500, including tax.');
@@ -161,9 +278,25 @@ try {
   await phone.locator('.memory-search-result').first().waitFor();
   await phone.locator('.memory-result-open').first().tap();
   await phone.locator('.memory-inspector').waitFor();
-  const panelBox = await phone.locator('.memory-inspector').boundingBox();
-  const navBox = await phone.locator('.sidebar').boundingBox();
-  assert.ok(panelBox.y + panelBox.height <= navBox.y + 1);
+  // One browser snapshot supplies both boxes, so a transient re-render returns
+  // false and is polled again instead of yielding a null box (or a null.y read).
+  const layout = await phone.waitForFunction(() => {
+    const visible = element => {
+      if (!element) return false;
+      if (getComputedStyle(element).visibility === 'hidden') return false;
+      return element.getClientRects().length > 0;
+    };
+    const inspectors = [...document.querySelectorAll('.memory-inspector')].filter(visible);
+    const sidebars = [...document.querySelectorAll('.sidebar')].filter(visible);
+    if (inspectors.length !== 1 || sidebars.length !== 1) return false;
+    const panel = inspectors[0].getBoundingClientRect();
+    const nav = sidebars[0].getBoundingClientRect();
+    if (!(panel.width > 0 && panel.height > 0 && nav.width > 0 && nav.height > 0)) return false;
+    return { panelBottom: panel.bottom, navTop: nav.top };
+  }, null, { timeout: sectionTimeout, polling: 50 });
+  const { panelBottom, navTop } = await layout.jsonValue();
+  await layout.dispose();
+  assert.ok(panelBottom <= navTop + 1, `Phone inspector bottom ${panelBottom} must stay above navigation top ${navTop}`);
   await phone.locator('[data-memory-close]').tap();
   await touch.close();
   check('touch-opens-and-closes-details-above-navigation');
@@ -217,7 +350,9 @@ try {
   demoPage.on('pageerror', error => errors.push(error.message));
   await demoPage.goto(demo.base + '/#memory');
   await demoPage.locator('.memory-result-open').first().click();
+  await demoPage.locator('.memory-inspector [data-preserve^="memory-versions-"]').waitFor({ state: 'attached' });
   await demoPage.waitForFunction(() => !document.querySelector('.memory-inspector-context [role=status]'));
+  await selectInspectorSection('related', demoPage);
   assert.equal(await demoPage.locator('[data-memory-explore]').count(), 0);
   assert.equal(await demoPage.locator('.memory-space-node').count(), 0);
   assert.equal(await demoPage.locator('.memory-space-link').count(), 0);
@@ -228,7 +363,7 @@ try {
   checks.push({ id: 'failure', passed: false, message: error.message, stack: error.stack });
   process.exitCode = 1;
 } finally {
-  fs.writeFileSync(`${output}/browser-verification.json`, JSON.stringify({ collection: 500, measurement: 'Automated scripted tasks, not a human usability study', checks, tasks, errors }, null, 2));
+  fs.writeFileSync(`${output}/browser-verification.json`, JSON.stringify({ collection: 500, measurement: 'Automated scripted tasks, not a human usability study. openActions counts one open-memory click per find task and excludes Overview/Related/History tab navigation. latencyMs is query-to-results readiness, not full task duration.', checks, tasks, errors }, null, 2));
   console.log(JSON.stringify({ checks, tasks, errors }, null, 2));
   await browser?.close(); await fixture?.close(); await demo?.close();
   fs.rmSync(directory, { recursive: true, force: true });
