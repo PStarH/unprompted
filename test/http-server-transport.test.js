@@ -81,6 +81,7 @@ test('HTTP server bounds request bodies, keeps the event stream compatible, and 
       PORT: String(port),
       UNPROMPTED_CONFIG_DIR: path.join(directory, 'config'),
       UNPROMPTED_STATE_FILE: path.join(directory, 'state.json'),
+      UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(directory, 'no-google-client.json'),
       UNPROMPTED_ATTENTION_SWEEP_MS: '3600000',
       UNPROMPTED_HTTP_MAX_BODY_BYTES: '1024',
       UNPROMPTED_HTTP_BODY_TIMEOUT_MS: '2000',

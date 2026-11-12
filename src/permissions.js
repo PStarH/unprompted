@@ -58,8 +58,16 @@ export class PermissionPolicy {
       throw new PermissionDeniedError('Shadow mode is read-only. External writes are refused.');
     }
     if (!rule.requiresApproval) return { allowed: true, actionClass, reason: 'No approval required for this class.' };
+    if (approval?.permission === 'temporary_yolo') {
+      if (!this.temporaryAuthorization?.(approval, taskId)) throw Object.assign(
+        new PermissionDeniedError('The YOLO authorization expired, was revoked, or belongs to a different task.'),
+        { code: 'AUTHORIZATION_REQUIRED', status: 403, definitiveNoEffect: true });
+      return { allowed: true, actionClass, reason: 'Active temporary user authorization.', grantId: approval.grantId };
+    }
     if (approval?.permission === 'user_approved') {
-      if (taskId && approval.taskId && approval.taskId !== taskId) {
+      // Fail closed. An approval that does not name its task cannot be shown to
+      // belong to this one, so it must not authorise this write.
+      if (!approval.taskId || approval.taskId !== taskId) {
         throw new PermissionDeniedError('Approval was granted for a different task.');
       }
       return { allowed: true, actionClass, reason: 'Explicit user approval present.', approvedAt: approval.approvedAt || null };
@@ -83,4 +91,19 @@ export class PermissionPolicy {
 
 export const defaultPolicy = new PermissionPolicy();
 
-export const permissionsApi = { ACTION_CLASSES, PermissionPolicy, PermissionDeniedError, defaultPolicy };
+/** A failed disconnect or scope removal stays read-only. A failed widening grant restores the prior flag. */
+export function shadowAfterFailedSourceRefresh({ widening, previousShadow }) {
+  return widening ? previousShadow === true : true;
+}
+
+/**
+ * After the grant response's bounded wait, do not start a tool investigation
+ * while a draft is still dispatching. One extra wait is enough; then skip.
+ */
+export function grantInvestigationDecision({ draftExecuting, round, maxRounds = 1 } = {}) {
+  if (draftExecuting && round < maxRounds) return 'defer';
+  if (draftExecuting) return 'skip';
+  return 'investigate';
+}
+
+export const permissionsApi = { ACTION_CLASSES, PermissionPolicy, PermissionDeniedError, defaultPolicy, shadowAfterFailedSourceRefresh, grantInvestigationDecision };

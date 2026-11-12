@@ -55,6 +55,31 @@ test('an unresolved critical notification defers unrelated interruptions until i
   assert.equal(attention.releaseDue().length, 1);
 });
 
+test('high priority skips the spacing between interruptions but not the hourly ceiling', t => {
+  const context = setup(t), attention = new AttentionBudget(context.database, { minIntervalMs: 60000, maxInteractivePerHour: 2, digestWindowMs: 0 });
+  assert.equal(attention.offer({ id: 'first', dedupeKey: 'first' }).state, 'delivered');
+  assert.equal(attention.offer({ id: 'normal', dedupeKey: 'normal' }).state, 'pending', 'normal still waits for the interval');
+  assert.equal(attention.offer({ id: 'high', dedupeKey: 'high', priority: 'high' }).state, 'delivered', 'high may interrupt inside the interval');
+  assert.equal(attention.offer({ id: 'high-2', dedupeKey: 'high-2', priority: 'high' }).state, 'pending', 'high cannot exceed the hourly budget');
+});
+
+test('high priority still yields to an unresolved critical notification', t => {
+  const context = setup(t), attention = new AttentionBudget(context.database, { minIntervalMs: 0, digestWindowMs: 0 });
+  assert.equal(attention.offer({ id: 'critical', dedupeKey: 'critical' }, { class: 'critical', criticalConfigured: true }).state, 'delivered');
+  assert.equal(attention.offer({ id: 'high', dedupeKey: 'high', priority: 'high' }).state, 'pending');
+});
+
+test('released notifications prefer high priority without starving low priority', t => {
+  const context = setup(t), attention = new AttentionBudget(context.database, { minIntervalMs: 60000, maxInteractivePerHour: 1, digestWindowMs: 0 });
+  assert.equal(attention.offer({ id: 'slot', dedupeKey: 'slot' }).state, 'delivered');
+  assert.equal(attention.offer({ id: 'low', dedupeKey: 'low', priority: 'low' }).state, 'pending');
+  assert.equal(attention.offer({ id: 'high', dedupeKey: 'high', priority: 'high' }).state, 'pending');
+  context.advance(3700000);
+  assert.deepEqual(attention.releaseDue().map(row => row.dedupe_key), ['high'], 'the freed slot goes to the higher priority');
+  context.advance(3700001);
+  assert.deepEqual(attention.releaseDue().map(row => row.dedupe_key), ['low'], 'low priority still gets a later slot');
+});
+
 test('the portfolio view derives deadlines, critical attention and current claims without writing', t => {
   const { database } = setup(t), attention = new AttentionBudget(database);
   const now = database.now(), at = iso(now), date = at.slice(0, 10);
@@ -105,4 +130,74 @@ test('unknown restrictive policy conditions stay unmatched and cannot silently r
   const decision = policies.evaluate({});
   assert.deepEqual(decision.policyIds, []); assert.deepEqual(decision.unresolvedPolicyIds, [policy.id]);
   assert.equal(decision.requiresReview, true); assert.equal(decision.activate, true, 'unknown restrictions can permit preparation, never unattended writes');
+});
+
+test('a zero-length quiet window is rejected on write and read as no window', t => {
+  const rejected = setup(t), strict = new AttentionBudget(rejected.database);
+  assert.throws(() => strict.configure({ quietHours: { startHour: 9, endHour: 9 } }), error => error.code === 'INVALID_ATTENTION_POLICY');
+
+  const context = setup(t);
+  context.database.set('attention_policy', JSON.stringify({ quietHours: { startHour: 9, endHour: 9, timeZone: 'UTC' } }));
+  const attention = new AttentionBudget(context.database);
+  assert.equal(attention.quiet(context.database.now()), false, 'a stored start === end must not silence every hour');
+  attention.configure({ maxInteractivePerHour: 7 });
+  assert.equal(attention.quiet(context.database.now()), false);
+  assert.equal(attention.describe().policy.maxInteractivePerHour, 7, 'an unrelated setting must still be editable');
+});
+
+test('a zero interactive budget sends notifications to the digest instead of waiting forever', t => {
+  const context = setup(t), attention = new AttentionBudget(context.database, { maxInteractivePerHour: 0 });
+  const offered = attention.offer({ id: 'quiet-1', dedupeKey: 'quiet-1', headline: 'Approval required', taskId: 'quiet-1' });
+  assert.equal(offered.state, 'digest');
+  assert.equal(offered.not_before, null);
+  assert.equal(attention.offer({ id: 'downgraded', dedupeKey: 'downgraded' }, { class: 'critical' }).state, 'digest', 'an unconfigured critical is downgraded before the budget applies');
+  assert.equal(attention.offer({ id: 'urgent', dedupeKey: 'urgent' }, { class: 'critical', criticalConfigured: true }).state, 'delivered');
+  context.advance(60 * 60_000);
+  assert.deepEqual(attention.releaseDue(), []);
+  assert.equal(context.database.db.prepare("SELECT state FROM notification_deliveries WHERE dedupe_key='quiet-1'").get().state, 'digest');
+  assert.ok(attention.digest().flatMap(group => group.ids).includes(context.database.db.prepare("SELECT id FROM notification_deliveries WHERE dedupe_key='quiet-1'").get().id), 'the undeliverable decision must still be listed in the digest');
+});
+
+test('a legacy zero-length quiet window stays resaveable so the settings form is not locked out', t => {
+  const context = setup(t);
+  context.database.set('attention_policy', JSON.stringify({ quietHours: { startHour: 9, endHour: 9, timeZone: 'UTC' } }));
+  const attention = new AttentionBudget(context.database);
+  // The settings form always resends the stored quietHours; resaving the value
+  // that is already inert must succeed or the user can never change a limit.
+  const saved = attention.configure({ maxInteractivePerHour: 5, minIntervalMs: 60000, quietHours: { startHour: 9, endHour: 9, timeZone: 'UTC' } });
+  assert.equal(saved.policy.maxInteractivePerHour, 5);
+  assert.equal(saved.policy.minIntervalMs, 60000);
+  assert.equal(attention.quiet(context.database.now()), false);
+  // Introducing a different zero-length window is still refused.
+  assert.throws(() => attention.configure({ quietHours: { startHour: 10, endHour: 10 } }), error => error.code === 'INVALID_ATTENTION_POLICY');
+  // Moving the same zero-length window to another time zone is a new window, not a resave.
+  assert.throws(() => attention.configure({ quietHours: { startHour: 9, endHour: 9, timeZone: 'Asia/Tokyo' } }), error => error.code === 'INVALID_ATTENTION_POLICY');
+});
+
+test('a prepared draft waiting for approval is eventually raised instead of waiting forever', async t => {
+  const { WorkEngine } = await import('../src/engine.js');
+  const { JsonStore } = await import('../src/store.js');
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-approval-reminder-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(dir, 'state.json'));
+  const engine = new WorkEngine(store, { stallAfterMs: 3 * 86400000 });
+  store.mutate(state => {
+    state.tasks['request:awaiting'] = {
+      id: 'request:awaiting', status: 'ready_for_approval', createdAt: '2026-01-01T00:00:00.000Z',
+      request: { subjectEntity: 'Vega', deliverable: 'status report' },
+      assessment: { complete: true, missing: [] },
+      progress: { at: '2026-01-01T00:00:00.000Z' }
+    };
+  });
+  // Not yet stale: six hours of waiting is well inside the approval window.
+  engine.sweepAttention(new Date('2026-01-01T06:00:00.000Z'));
+  assert.equal(store.state.notifications.filter(item => item.dedupeKey === 'stalled:request:awaiting').length, 0);
+  // Past the window: the approval becomes a real decision.
+  engine.sweepAttention(new Date('2026-01-06T00:00:00.000Z'));
+  const raised = store.state.notifications.find(item => item.dedupeKey === 'stalled:request:awaiting');
+  assert.ok(raised, 'a stale pending approval must be raised');
+  assert.match(raised.headline, /ready for your approval/i);
+  assert.match(raised.decision, /Approve/i);
+  assert.deepEqual(raised.options.map(option => option.value), ['approve', 'close']);
 });

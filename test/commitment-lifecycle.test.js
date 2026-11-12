@@ -267,7 +267,12 @@ test('recovery checks unfinished work without rewriting an unchanged state or ac
   const filename = path.join(dir, 'state.json');
   let store = new JsonStore(filename);
   let engine = new WorkEngine(store, { reasoner: new NullReasoner(), stallAfterMs: 86_400_000 });
-  engine.ingest(requestMail('stable-request'));
+  engine.ingest(requestMail('stable-request', {
+    // A deadline that is already near or past would legitimately interrupt the
+    // saved wait on restart, which is a different behaviour from the one this
+    // test measures. Keep it far enough away that recovery has nothing to do.
+    body: 'Please update the Northstar proposal with the experiment results and send it by 2099-01-01.'
+  }));
   engine.waitForTask('request:stable-request', { kind: 'time', until: '2099-01-01T00:00:00.000Z' });
   const before = fs.readFileSync(filename, 'utf8');
   const revision = store.state.revision;

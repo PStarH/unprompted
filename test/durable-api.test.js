@@ -13,6 +13,8 @@ test('persistent HTTP workspace exposes real SQLite, explicit policies, version 
   const fixture = await startFixtureServer({ ruleDemo: false }); t.after(fixture.close);
   const durable = await get(fixture, '/api/durable');
   assert.deepEqual(await get(fixture, '/api/situations'), { situations: [], available: true });
+  const usage = await get(fixture, '/api/model-usage');
+  assert.equal(usage.available, true); assert.equal(usage.total.calls, 0); assert.equal(usage.total.input, 0);
   assert.equal(durable.storage.sqliteVersion, '3.53.2'); assert.equal(durable.storage.synchronous, 'FULL');
   assert.equal(durable.activationContract, '1.5.0'); assert.equal(durable.activityTelemetry, 'unavailable');
   assert.equal(durable.learning.autoPromote, false); assert.equal(durable.memory.semantic, false);

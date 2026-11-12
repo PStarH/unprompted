@@ -31,7 +31,7 @@ export class ToolSafetyGateway {
     if (!task || task.privacyInvalidated || task.control?.paused || ['completed', 'cancelled'].includes(task.status)) throw deny('The task is no longer active.');
     if (this.engine.durableRuntime?.tasks.hasPendingSemantic(taskId)) throw deny('A new source update must be interpreted before an external write.');
     let approval;
-    if (['email.draft', 'notion.page.create', 'notes.note.create'].includes(actionFamily)) {
+    if (['email.draft', 'notion.page.create', 'notes.note.create', 'reminders.reminder.create'].includes(actionFamily)) {
       if (!this.engine.durableRuntime?.artifacts) throw deny('Artifact writes need the durable workspace.');
       approval = this.engine.durableRuntime.artifacts.authorize({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect });
     } else if (actionFamily === 'email.send') {
@@ -42,7 +42,10 @@ export class ToolSafetyGateway {
         || payload.documentUrl !== draft.documentUrl || effect.to !== draft.to || effect.documentId !== task.documentId || effect.bodyDigest !== digest(draft.body)) throw deny('The tool parameters differ from the reviewed reply.');
       const threadId = state.inbox.find(message => message.id === task.sourceEmailId)?.threadId || null;
       if ((payload.threadId || null) !== threadId || resourceId !== (threadId || `${draft.to}:${draft.subject}`)) throw deny('The reply targets a different resource.');
-      approval = action;
+      // The action was read from this task's own record, so bind the task it
+      // belongs to: an action stored by an older workspace carries no taskId,
+      // and the policy must not read that as an approval granted elsewhere.
+      approval = { ...action, taskId: action.taskId ?? taskId };
       if (action.permission === 'pre_authorized') {
         const currentGrant = grantFor(state.calibrations || {}, { entity: task.request?.subjectEntity, deliverable: task.request?.deliverable });
         if (permissionAnswerFor(state.calibrations || {}, { entity: task.request?.subjectEntity, deliverable: task.request?.deliverable }) || !currentGrant || currentGrant.id !== action.grantId || !scopeCovers(currentGrant.scope, { entity: task.request?.subjectEntity, deliverable: task.request?.deliverable })) throw deny('The standing authorization was revoked or changed.');
@@ -52,15 +55,21 @@ export class ToolSafetyGateway {
       const patch = state.documentPatches?.[patchAuthorization?.patchId], document = patch && state.documents[patch.baseDocument.id];
       const expectedProvider = patch?.provider === 'local' ? this.engine.taskServices.localDocumentProvider : this.engine.documentProvider;
       if (tool !== 'apply_patch' || provider !== expectedProvider || !provider?.supports?.(document) || provider.validate && !provider.validate({ forWrite: true }).ok) throw deny('The document provider is no longer authorized.');
-      if (!patch || patch.taskId !== taskId || patch.status !== 'applying' || patch.authorization?.kind !== 'explicit'
+      if (!patch || patch.taskId !== taskId || patch.status !== 'applying' || !['explicit', 'temporary_yolo'].includes(patch.authorization?.kind)
         || patchAuthorization.taskId !== taskId || patchAuthorization.baseDocumentVersion !== patch.baseDocument.version
         || document.version !== patch.baseDocument.version || effect.documentId !== document.id || effect.baseVersion !== patch.baseDocument.version
         || resourceId !== (document.externalId || document.id) || key !== `patch:${patch.id}:${patch.baseDocument.version}`
         || String(conditionalVersion) !== String(patch.baseDocument.revisionId || patch.baseDocument.version)
         || JSON.stringify(payload) !== JSON.stringify(patch.changes) || effect.changesDigest !== digest(JSON.stringify(patch.changes))
         || effect.expectedContentDigest !== digest(applyTextChanges(document.content, patch.changes).replace(/\r\n?/g, '\n'))) throw deny('The tool parameters differ from the reviewed document patch.');
-      approval = { permission: 'user_approved', taskId };
+      approval = patch.authorization.kind === 'temporary_yolo'
+        ? { permission: 'temporary_yolo', taskId, grantId: patch.authorization.grantId }
+        : { permission: 'user_approved', taskId };
+    } else if (['connector.request', 'mcp.tool'].includes(actionFamily)) {
+      if (!this.engine.durableRuntime?.connectorActions) throw deny('Platform writes require the durable workspace.');
+      approval = this.engine.durableRuntime.connectorActions.authorize({ taskId, provider, tool, actionFamily, resourceId, key, payload, effect });
     } else throw deny('This tool has no authorized write adapter.');
+    if (approval.permission !== 'user_approved' && task.contextReadRequired) throw deny('Read or review the deferred task context before an automatic action.');
     const activation = this.engine.durableRuntime?.activationFor(task);
     if (approval.permission !== 'user_approved' && activation && (!activation.activate || activation.requiresReview)) throw deny('A current user policy requires individual review.');
     return this.engine.policy.authorize({ actionClass: 'execute_external', approval, taskId });

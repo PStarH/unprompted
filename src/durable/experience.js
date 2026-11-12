@@ -63,12 +63,25 @@ export class ExperienceService {
         (freshness_class='time_sensitive' AND (valid_until IS NULL OR valid_until<=?) OR
         freshness_class='operational' AND (last_verified_at IS NULL OR last_verified_at<=?))`).run(at, at, iso(now - this.policy.operationalRevalidateMs)).changes;
       const expired = this.db.prepare("UPDATE experiences SET status='needs_revalidation',revision=revision+1,updated_at=? WHERE status='cooldown' AND cooldown_until IS NOT NULL AND cooldown_until<=?").run(at, at).changes;
-      if (changed || expired) this.database.bump('context_version'); return changed + expired;
+      // A candidate that was never adopted and has not been touched within the
+      // operational window must stop influencing planning on its own. Stable
+      // guidance (for example a formatting preference) has no such clock.
+      const retired = this.db.prepare(`UPDATE experiences SET status='retired',revision=revision+1,updated_at=? WHERE status='candidate'
+        AND freshness_class='operational' AND verified_success_count=0 AND updated_at<=?`).run(at, iso(now - this.policy.operationalRevalidateMs)).changes;
+      if (changed || expired || retired) this.database.bump('context_version'); return changed + expired + retired;
     });
   }
   retrieve({ scopes = [], features = {}, contextVersion = Number(this.database.get('context_version')) } = {}) {
     this.refreshStaleness();
-    return this.list().filter(experience => ['active', 'candidate'].includes(experience.status) && scopeMatches(experience.scope_type, experience.scope_key, scopes)
+    // A source can be forgotten or its permission revoked after the
+    // Experience was compiled. Do not let derived guidance outlive the
+    // provenance that made it eligible.
+    const unavailable = new Set(this.db.prepare(`SELECT DISTINCT l.derived_id id FROM lineage l
+      WHERE l.derived_kind='experience' AND NOT EXISTS (
+        SELECT 1 FROM source_records s WHERE s.kind=l.source_kind AND s.id=l.source_id AND s.active=1
+      )`).all().map(row => row.id));
+    return this.list().filter(experience => ['active', 'candidate'].includes(experience.status) && !unavailable.has(experience.id)
+      && scopeMatches(experience.scope_type, experience.scope_key, scopes)
       && (!experience.valid_until || Date.parse(experience.valid_until) > this.database.now())
       && this.registry.evaluate(experience.predicate, features, { now: this.database.now(), contextVersion }).matched).slice(0, 24);
   }
@@ -81,7 +94,7 @@ export class ExperienceService {
       for (const influence of experiences) {
         if (!['planner_declared', 'predicate_matched', 'user_confirmed'].includes(influence.relation)) throw durableError('INVALID_ATTRIBUTION', 'Unknown plan-step attribution.', 400);
         const experience = this.get(influence.id); if (!experience || !['candidate', 'active'].includes(experience.status)) throw durableError('INVALID_ATTRIBUTION', 'The Experience is unavailable for this plan step.', 400);
-        this.db.prepare('INSERT OR IGNORE INTO plan_step_experiences VALUES(?,?,?,?)').run(step.id, influence.id, influence.relation, at);
+        this.db.prepare('INSERT OR IGNORE INTO plan_step_experiences(plan_step_id,experience_id,relation_kind,experience_revision,created_at) VALUES(?,?,?,?,?)').run(step.id, influence.id, influence.relation, experience.revision, at);
         this.database.lineage('experience', influence.id, 'plan_step', step.id);
       }
       this.database.lineage('task_run', taskRunId, 'plan_step', step.id); return step;
@@ -142,16 +155,16 @@ export class ExperienceService {
       this.db.prepare('INSERT OR IGNORE INTO source_records(kind,id,created_at) VALUES(\'feedback\',?,?)').run(id, at);
       if (taskId) this.database.lineage('task', taskId, 'feedback', id);
       if (planStepId) this.database.lineage('plan_step', planStepId, 'feedback', id);
-      const credible = step ? this.db.prepare(`SELECT e.* FROM experiences e JOIN plan_step_experiences p ON p.experience_id=e.id
+      const credible = step ? this.db.prepare(`SELECT e.*, p.experience_revision AS attributed_revision FROM experiences e JOIN plan_step_experiences p ON p.experience_id=e.id
         WHERE p.plan_step_id=? AND p.relation_kind IN ('planner_declared','user_confirmed')`).all(step.id) : [];
       if (['explicit_rejection', 'undo'].includes(kind)) {
         this.database.bump('context_version');
         const effect = step ? parse(step.expected_effect_json) : parse(execution.effect_signature_json);
-        const family = step?.action_family || execution.action_family || step.step_kind;
+        const family = step?.action_family || execution?.action_family || step?.step_kind;
         const context = this.contextKey(taskId);
         this.db.prepare('INSERT OR IGNORE INTO action_suppressions VALUES(?,?,?,?,?,?,?)').run(randomUUID(), taskId, context, family, effectDigest(effect), id, at);
         if (step && ['proposed', 'approved', 'skipped'].includes(step.status)) this.db.prepare("UPDATE plan_steps SET status='rejected',updated_at=? WHERE id=?").run(at, step.id);
-        for (const experience of credible) this.db.prepare("UPDATE experiences SET status='cooldown',cooldown_until=?,last_negative_at=?,negative_evidence_count=negative_evidence_count+1,updated_at=? WHERE id=? AND revision=?")
+        for (const experience of credible) this.db.prepare("UPDATE experiences SET status='cooldown',cooldown_until=?,last_negative_at=?,negative_evidence_count=negative_evidence_count+1,revision=revision+1,updated_at=? WHERE id=? AND revision=?")
           .run(iso(this.database.now() + this.policy.cooldownMs), at, at, experience.id, experience.revision);
       }
       for (const experience of credible) {
@@ -160,7 +173,7 @@ export class ExperienceService {
         if (kind === 'implicit_override' && !['draft_format', 'advisory'].includes(parse(experience.effect_signature_json).type)) continue;
         const verified = ['supervised_success', 'verified_consumption'].includes(kind);
         const inserted = this.db.prepare(`INSERT OR IGNORE INTO experience_evidence(id,experience_id,experience_revision,task_id,task_run_id,plan_step_id,execution_id,evidence_kind,effect_dimension,independent_key,verified,created_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), experience.id, experience.revision, taskId, run?.id || null, step?.id || null, executionId, kind, effectDimension, taskId || id, Number(verified), at).changes;
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), experience.id, experience.attributed_revision ?? experience.revision, taskId, run?.id || null, step?.id || null, executionId, kind, effectDimension, taskId || id, Number(verified), at).changes;
         if (!inserted) continue;
         this.database.lineage('feedback', id, 'experience', experience.id);
         if (kind === 'supervised_success') this.db.prepare('UPDATE experiences SET verified_success_count=verified_success_count+1,positive_evidence_count=positive_evidence_count+1,last_verified_at=?,updated_at=? WHERE id=?').run(at, at, experience.id);
@@ -199,6 +212,23 @@ export class ExperienceService {
         || experience.verified_success_count < this.policy.mechanicalSuccesses || experience.negative_evidence_count || experience.last_negative_at
         || experience.valid_until && Date.parse(experience.valid_until) <= this.database.now()) throw durableError('PROMOTION_INELIGIBLE', 'This Experience is not eligible for bounded low-risk promotion.');
       this.db.prepare("UPDATE experiences SET status='active',revision=revision+1,updated_at=? WHERE id=? AND revision=?").run(iso(this.database.now()), id, expectedRevision);
+      this.database.bump('context_version');
+      return this.get(id);
+    });
+  }
+  revalidate(id, { expectedRevision, userRequested = false } = {}) {
+    // Explicit confirmation only: autonomous callers must not move stale or
+    // negatively evidenced guidance back into use.
+    if (userRequested !== true) throw durableError('REVALIDATION_CONFIRMATION_REQUIRED', 'Only an explicit user confirmation can revalidate an Experience.', 403);
+    return this.database.atomic(() => {
+      const experience = this.get(id); if (!experience || experience.revision !== expectedRevision) throw durableError('EXPERIENCE_CHANGED', 'The Experience revision has changed.');
+      // `retired` stays terminal: it is not needs_revalidation, so it cannot pass.
+      if (experience.status !== 'needs_revalidation') throw durableError('REVALIDATION_INELIGIBLE', 'Only an Experience awaiting revalidation can return to candidate.');
+      if (experience.freshness_class === 'time_sensitive' && (!experience.valid_until || Date.parse(experience.valid_until) <= this.database.now())) throw durableError('REVALIDATION_EXPIRED', 'Time-sensitive guidance needs a new validity window before it can be revalidated.', 400);
+      // Return to candidate with a clean evidence slate: the user re-authorizes
+      // trying it again, not the old successes or the old negative evidence.
+      this.db.prepare(`UPDATE experiences SET status='candidate',verified_success_count=0,positive_evidence_count=0,negative_evidence_count=0,last_negative_at=NULL,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND status='needs_revalidation'`)
+        .run(iso(this.database.now()), id, expectedRevision);
       this.database.bump('context_version');
       return this.get(id);
     });

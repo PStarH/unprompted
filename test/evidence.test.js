@@ -199,6 +199,26 @@ test('run records are scoped by entity so another project cannot make a document
   assert.equal(newestRun(records, 'Northstar'), null);
 });
 
+test('a date-only document cannot claim a same-day run when the registry has several runs', () => {
+  const records = {
+    morning: runRecord({ id: 'morning', label: 'Morning run', subjectEntity: 'Northstar', completedAt: '2026-10-16T09:00:00.000Z', source: { kind: 'run_registry', id: 'reg' } }),
+    evening: runRecord({ id: 'evening', label: 'Evening run', subjectEntity: 'Northstar', completedAt: '2026-10-16T18:00:00.000Z', source: { kind: 'run_registry', id: 'reg' } })
+  };
+  const result = determineFreshness({ document: doc(), documentRunDate: '2026-10-16', runRecords: records, request: northstarRequest() });
+  assert.equal(result.status, 'unverified');
+  assert.ok(result.unknowns.some(item => item.id === 'ambiguous_same_day_run'));
+});
+
+test('a request that does not ask for freshness stays not_required even with a run registry', () => {
+  const records = { r1: runRecord({ id: 'r1', subjectEntity: 'Northstar', completedAt: '2026-10-16T09:00:00.000Z', source: { kind: 'run_registry', id: 'reg' } }) };
+  const request = interpretRequest({
+    id: 'm-flyer', from: 'maya@example.test', subject: 'Zephyr flyer update',
+    body: 'Please update the Zephyr Course Flyer report by Friday. I need the course code CS498.'
+  });
+  const result = determineFreshness({ document: doc({ title: 'Zephyr Course Flyer' }), documentRunDate: '2026-10-16', runRecords: records, request });
+  assert.equal(result.status, 'not_required');
+});
+
 test('a document with no run date cannot be compared, so freshness stays unverified', () => {
   const records = { r1: runRecord({ id: 'r1', subjectEntity: 'Northstar', completedAt: '2026-10-16T09:00:00.000Z', source: { kind: 'run_registry', id: 'reg' } }) };
   const result = determineFreshness({ document: doc(), documentRunDate: null, runRecords: records, request: northstarRequest() });

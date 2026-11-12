@@ -51,6 +51,8 @@ async function startServer(extraEnv = {}, { setupSeed = null, reuse = null } = {
       PORT: String(port),
       UNPROMPTED_STATE_FILE: stateFile,
       UNPROMPTED_CONFIG_DIR: configDir,
+      UNPROMPTED_GOOGLE_DESKTOP_CLIENT_FILE: path.join(configDir, 'unprovisioned-client.json'),
+      UNPROMPTED_CONNECTOR_CLIENTS_FILE: path.join(configDir, 'unprovisioned-connectors.json'),
       // The shipped server defaults to read-only shadow mode. These tests keep
       // the frozen approval path by opting out; shadow denial is covered in
       // test/shadow.test.js.
@@ -383,6 +385,18 @@ test('setup API, state and SSE redact saved OAuth credentials and persist observ
   } finally { fs.closeSync(descriptor); }
   assert.match(localFile, /api-private-client-secret/);
   assert.match(localFile, /api-private-refresh-token/);
+});
+
+test('a connector that has never synced reports unknown health, not failure', async () => {
+  const { base } = await startServer();
+  const setup = await fetch(`${base}/api/setup`).then(response => response.json());
+  assert.ok(Object.keys(setup.connections).length > 0);
+  for (const connection of Object.values(setup.connections)) {
+    assert.equal(connection.healthy, null, `${connection.id} has unknown health before its first observation`);
+    assert.equal(connection.lastSyncAt, null);
+    assert.equal(connection.lastSuccessAt, null);
+    assert.equal(connection.lastError, null);
+  }
 });
 
 test('forgetting Google stops this process, rejects new syncs, and keeps approval writes shadowed', async () => {

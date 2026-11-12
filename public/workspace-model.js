@@ -8,10 +8,12 @@ export function workspaceConnections(setup) {
 // Presentation states are derived from recorded work, never from a timer or a
 // decorative animation. Provider uncertainty remains distinct from failure.
 export function taskState(task, connections = {}) {
-  if (task.status === 'completed') return 'verified';
+  if (task.status === 'completed') return task.completion?.kind === 'user_accepted_preparation' ? 'user_accepted' : 'verified';
   if (task.status === 'cancelled' || task.userDismissed || task.status === 'blocked' && !task.action) return 'closed';
   if (task.control?.paused) return 'paused_by_user';
   if (task.status === 'verifying' || ['uncertain', 'executing', 'accepted_live'].includes(task.action?.status)) return 'result_unverified';
+  if (task.activationHold) return 'paused_by_policy';
+  if (task.kind === 'standing_intent' && ['pending', 'running'].includes(task.reasoning?.status)) return 'working';
   if (task.reasoning?.status === 'failed' || task.action?.status === 'failed') return 'failed';
   const provider = task.sourceConnectorId || task.externalSource?.provider;
   if (provider && connections[provider]?.connected === false) return 'source_disconnected';
@@ -33,14 +35,18 @@ export function stateGroup(state) {
 export function taskSources(task, state) {
   const sources = [];
   const push = source => { if (source && !sources.some(item => item.id === source.id)) sources.push(source); };
-  const message = state?.inbox?.find(item => item.id === task.sourceEmailId);
+  const message = state?.inbox?.find(item => item.id === (task.sourceEmailId || task.request?.source?.id));
   if (message) push({ id: message.id, label: message.subject || task.subject, provider: message.connectorId === 'microsoft' ? 'Outlook' : message.source === 'simulated' || state.mode === 'simulation' ? 'Simulation' : 'Gmail', url: message.url || null });
-  if (task.externalSource) push({ id: task.externalSource.externalId || task.id, label: task.subject, provider: ['external_issue', 'external_review', 'external_change', 'external_check'].includes(task.kind) ? 'GitHub' : task.sourceConnectorId === 'apple_notes' ? 'Apple Notes' : 'Local files', url: task.externalSource.url });
+  if (task.externalSource) push({ id: task.externalSource.externalId || task.id, label: task.subject, provider: ['external_issue', 'external_review', 'external_change', 'external_check'].includes(task.kind) ? 'GitHub' : task.sourceConnectorId === 'apple_notes' ? 'Apple Notes' : task.sourceConnectorId === 'apple_reminders' ? 'Apple Reminders' : task.sourceConnectorId === 'todoist' ? 'Todoist' : 'Local files', url: task.externalSource.url });
+  const directDocument = state?.documents?.find(item => item.id === task.documentId || task.request?.source?.kind === 'document' && item.id === task.request.source.id);
+  if (directDocument) push({ id: directDocument.id, label: directDocument.title, provider: directDocument.source || task.sourceConnectorId || 'Document', url: directDocument.url });
   for (const document of task.evidence?.documents || []) push({ id: document.documentId, label: document.title, provider: document.source === 'google' ? 'Drive' : document.source === 'apple_notes' ? 'Apple Notes' : document.source === 'local_files' ? 'Local files' : document.source === 'simulated' ? 'Simulation' : document.source || 'Document', url: document.url });
   return sources;
 }
 
 export function taskSteps(task) {
+  if (task.completion?.kind === 'user_accepted_preparation') return [{ key: 'source', status: 'done' }, { key: 'prepare', status: 'done' }, { key: 'reviewed', status: 'done' }];
+  if (task.preparedWork?.requiresReview) return [{ key: 'source', status: 'done' }, { key: 'prepare', status: 'done' }, { key: 'review', status: 'current' }];
   const sourceKnown = Boolean(task.sourceEmailId || task.externalSource || task.request?.source);
   if (['external_issue', 'external_review', 'external_change', 'external_check', 'observed_task'].includes(task.kind)) return [
     { key: 'source', status: 'done' }, { key: 'observe', status: isFinished(task) ? 'done' : 'current' }, { key: 'source_change', status: 'next' }
@@ -64,6 +70,19 @@ export function activityEntries(state) {
     if (seen.has(key)) return false;
     seen.add(key); return true;
   }).slice(0, 50);
+}
+
+// Prefer the item that followed the one just handled. If none of those remain,
+// wrap to the first item that is still pending. The finished id is excluded
+// even if another task was just removed from the queue.
+export function nextQueueId(before, after, finishedId) {
+  const pending = (after || []).filter(id => id && id !== finishedId);
+  const start = (before || []).indexOf(finishedId);
+  if (start >= 0) {
+    const later = before.slice(start + 1).find(id => pending.includes(id));
+    if (later) return later;
+  }
+  return pending[0] || null;
 }
 
 export function recommendedMode(tasks) {

@@ -98,8 +98,17 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
   };
   const takeoverTotal = Object.values(takeovers).reduce((sum, value) => sum + value, 0);
 
+  // An interruption is a notification that actually reached the user. The
+  // durable store stamps `deliveryState`/`deliveryClass` on every notice; a
+  // notice that is pending, deferred to a digest or already resolved was not an
+  // interruption. Workspaces that predate delivery records have no stamp, so
+  // they keep the old count instead of silently reporting zero.
+  const hasDeliveryState = notifications.some(item => typeof item.deliveryState === 'string');
+  const delivered = hasDeliveryState
+    ? notifications.filter(item => item.deliveryState === 'delivered' && !['digest', 'informational'].includes(item.deliveryClass || 'interactive'))
+    : notifications;
   const interruptionsByKind = {};
-  for (const item of notifications) interruptionsByKind[item.kind] = (interruptionsByKind[item.kind] || 0) + 1;
+  for (const item of delivered) interruptionsByKind[item.kind] = (interruptionsByKind[item.kind] || 0) + 1;
 
   const withheldClaims = tasks.reduce((sum, task) => sum + (task.draft?.withheldClaims?.length || 0), 0);
   const events = state.events || [];
@@ -136,7 +145,7 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       valuableRate: tasks.length ? round(valuable.length / tasks.length) : null,
       unservableRate: tasks.length ? round(unservable.length / tasks.length) : null,
       basis: [
-        'legacy valuable is an agent activity proxy: prepared, evidence-backed action or verified completion; it is not a user-recognized outcome',
+        'legacy valuable is an agent activity proxy: a draft, prepared action or ready-for-approval task; it is not a user-recognized outcome',
         'unservable = a request with no correlated document and no probe for the requested content',
         'closed = a request the user ended while it was still waiting for information',
         `counts from ${tasks.length} task record(s)`
@@ -154,7 +163,16 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       ]
     },
     attention: {
-      interruptions: notifications.length,
+      interruptions: delivered.length,
+      // How much finished work is sitting on the user's desk, and for how long.
+      // A count and an age need no threshold, so they cannot encode a policy.
+      awaitingApproval: tasks.filter(task => task.status === 'ready_for_approval').length,
+      oldestAwaitingApprovalDays: (() => {
+        const waits = tasks.filter(task => task.status === 'ready_for_approval')
+          .map(task => Date.parse(task.progress?.at || task.createdAt || ''))
+          .filter(Number.isFinite);
+        return waits.length ? Math.max(0, Math.round((Date.now() - Math.min(...waits)) / 86400000)) : null;
+      })(),
       unresolved: notifications.filter(item => !item.resolvedAt).length,
       byKind: interruptionsByKind,
       takeovers: takeoverTotal,
@@ -163,7 +181,9 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       taskCorrections,
       correctionUndos,
       basis: [
-        'an interruption is a decision-supporting notification, not a history entry',
+        hasDeliveryState
+          ? 'an interruption is a notification the delivery budget actually delivered; pending and digest notices are excluded, while a delivered notice stays counted after the user resolves it'
+          : 'delivery state is unavailable in this workspace; interruptions count recorded decision notifications',
         'takeovers preserve the original rejection, retry, reconciliation and calibration counts; task corrections are also listed separately',
         'explicit approvals include approved outbound actions and explicitly authorized document patches'
       ]
@@ -266,7 +286,7 @@ export function computeProductMetrics(state, { now = new Date().toISOString() } 
       traceEntries: (state.trace || []).length,
       historyEntries: history.length,
       documentPatches: patches.length,
-      basis: 'counts of persisted records in this workspace; wall-clock time, model tokens, user retention and time saved are not measured'
+      basis: 'counts of persisted records in this workspace; wall-clock time, user retention and time saved are not measured. Model token usage is recorded separately by the usage ledger and is not a product metric'
     }
   };
 }

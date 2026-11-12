@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — Unreleased
+
+- Self-hosted browser workspace for macOS and Windows; no desktop installer required. Windows runtime acceptance remains pending.
+- Source permissions, scoped platform actions, incremental synchronization and recovery improvements.
+- Permission refresh keeps narrowing changes read-only; artifact retries retain the original actor and review token. Mailbox formatting, encoded path boundaries and Google Docs readback receive stricter validation.
+- Memory exploration, MCP connection controls and task detail navigation.
+- Automatic task grouping follows work when its previous section becomes empty, while preserving explicit user choices.
+- Application bundles exclude local editor backups; privacy documentation describes actual credential storage and deletion limits.
+- Sources continue using periodic reconciliation. Real-time provider notifications are deferred to a later version.
+
+### Known limitations
+
+- Connectors poll; provider push is not implemented. `/api/stream` is a workspace snapshot, not an event stream.
+- Connection health reflects the most recent sync, not an active probe. A source that has never synced reports unknown.
+- Model token usage is recorded locally for each provider response and summarized by `GET /api/model-usage`. There is no model routing or tiering, and token usage does not gate requests; runtime limits are process-wide calls per minute and concurrency. Usage is not attributed to individual tasks.
+- Autonomy leases are time- and task-scoped. There is no monetary amount limit or per-action amount check.
+- Automatic observation reads a narrow provider-defined subset. Broader API access requires explicit method and path-prefix grants.
+- Duplicate work is deduplicated by provider event identity. The same fact observed through two providers is associated through a Situation, not merged into one event.
+- Memories are checked against source availability, not source revision. A changed source document does not automatically invalidate a remembered fact.
+- Startup revalidation is bounded to eight risk-ordered tasks by default. Remaining open tasks stay eligible for later revalidation, and startup reports how many were left outside the sweep.
+
 ## 0.3.0 — 2026-10-28
 
 Unprompted is an early, local-first proactive agent implementation. This preview

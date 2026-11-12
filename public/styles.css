@@ -15,9 +15,9 @@
 .model-heading p { color: var(--muted); margin-top: 7px; }
 .model-fields { display: grid; grid-template-columns: 1.2fr 1fr 1.1fr; gap: 16px; }
 .model-fields label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; font-weight: 500; }
-.model-fields label > small { color: var(--muted); font-weight: 400; }
+.model-field-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-height: 1em; }
+.model-field-heading small { color: var(--muted); font-weight: 400; }
 .model-fields input { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--canvas); color: var(--ink); font: inherit; }
-.model-fields label > input { margin-top: auto; }
 .model-onboarding .setup-note { max-width: 85ch; margin: 12px 0; }
 .model-onboarding details { margin-top: 12px; }
 .model-onboarding summary { color: var(--green); cursor: pointer; font-size: 12px; }
@@ -1454,7 +1454,7 @@ strong {
   font-size:10px;
   color:#9aa28f
 }
-.task-dialog,.shortcut-dialog {
+.shortcut-dialog {
   color:var(--ink);
   border:1px solid #e0e7d8;
   border-radius:15px;
@@ -2646,9 +2646,6 @@ button, select, input, summary { scroll-margin-block: 110px; }
 .task-title-button h3 { font-size: 16px; line-height: 1.65; text-wrap: pretty; }
 .task-description { font-size: 13px; color: #68775d; }
 .draft-excerpt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; border-left: 2px solid #dce6d2; padding-left: 12px; color: #68775c!important; font-size: 12px!important; line-height: 1.85; margin: 12px 0 6px!important; }
-.snooze-note, .snoozed-summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #f2f5ed; padding: 10px 20px; font-size: 11px; color: #798c68; }
-.snooze-note { border-top: 1px solid var(--line); }
-.snoozed-summary { border: 1px solid var(--line); border-radius: 7px; margin-bottom: 16px; }
 .action-error { border-left: 2px solid #af8b63; background: #faf5eb; padding: 12px 15px; margin-top: 15px; font-size: 12px; color: #896e4c; }
 .action-error > p { color: #896e4c; font-size: 12px; }
 .action-error details { margin: 7px 0 12px; font-size: 11px; overflow-wrap: anywhere; }
@@ -2698,7 +2695,6 @@ html[lang="en"] .top-actions { gap: 14px; }
   .return-digest { margin-top: -5px; padding-bottom: 14px; }
   .return-digest p { gap: 8px 14px; }
   .return-digest strong { font-size: 11px; }
-  .snoozed-summary { padding: 8px 13px; }
   .task-bottom { min-height: 48px; padding-top: 4px; padding-bottom: 4px; }
   .sidebar > .secondary-nav .nav-item { min-height: 44px; min-width: 44px; }
   html[lang="en"] .sidebar > .navigation { gap: 16px; }
@@ -2719,8 +2715,6 @@ html[lang="en"] .top-actions { gap: 14px; }
   #viewHome .page-heading h1 { margin-top: 0; margin-bottom: 0; font-size: 23px; }
   #viewHome .page-heading { margin-bottom: 20px; }
 }
-.snooze-note small { display: block; max-width: 48ch; margin-top: 4px; color: #829371; font-size: 10px; line-height: 1.8; }
-.snooze-note > .text-button { flex-shrink: 0; }
 
 /* Connect real work in place; retain the form, progress and recovery together. */
 .workspace-onboarding { margin-bottom: 24px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }

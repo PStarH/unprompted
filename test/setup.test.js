@@ -59,6 +59,25 @@ test('runtime scope flags require granted scope and local credentials never over
   assert.equal(store.runtimeEnv({ GOOGLE_CLIENT_SECRET: 'explicit-secret' }).GOOGLE_CLIENT_SECRET, 'explicit-secret');
 });
 
+test('starting a new consent preserves a working token until the new consent succeeds', t => {
+  const { store } = tempStore(t);
+  store.saveConnectionCredentials('slack', { clientId: '1234567890.1234567890', clientSecret: 'slackSecretValue1' });
+  store.saveConnectionAuthorization('slack', {
+    clientId: '1234567890.1234567890', clientSecret: 'slackSecretValue1', accessToken: 'xoxp-working-token',
+    account: { id: 'T123ABC:U123ABC', label: 'ada · Work' }, scopes: ['im:history']
+  });
+  store.saveConnectionCredentials('slack', { clientId: '1234567890.1234567890', clientSecret: 'slackSecretValue2' });
+  assert.equal(store.getConnection('slack').accessToken, 'xoxp-working-token');
+  assert.equal(store.getConnection('slack').clientSecret, 'slackSecretValue2');
+
+  store.saveConnectionCredentials('slack', { clientId: '1234567890.9999999999', clientSecret: 'slackSecretValue3' });
+  const pending = store.getConnection('slack');
+  assert.equal(pending.accessToken, 'xoxp-working-token');
+  assert.equal(pending.clientId, '1234567890.1234567890');
+  assert.equal(pending.pendingClientId, '1234567890.9999999999');
+  assert.equal(pending.pendingClientSecret, 'slackSecretValue3');
+});
+
 test('Desktop OAuth uses loopback PKCE, stores only requested granted scopes, and is one-use', async t => {
   const { store } = tempStore(t);
   store.saveDesktopClientJson(desktopClient);
@@ -225,4 +244,13 @@ test('an environment account never inherits another saved account credentials, s
   assert.equal(env.GOOGLE_CLIENT_SECRET, undefined);
   assert.equal(env.GOOGLE_SEND_ENABLED, undefined);
   assert.equal(env.UNPROMPTED_SHADOW_MODE, 'true');
+});
+
+test('Google additional provider scopes are consented and retained without a fixed local scope list', async t => {
+  const { store } = tempStore(t); store.saveDesktopClientJson(desktopClient);
+  const scope = 'https://www.googleapis.com/auth/calendar.events';
+  const oauth = new GoogleOAuthSetup(store, { timeoutMs: 10000 }); t.after(() => oauth.cancel());
+  const started = await oauth.start({ scopes: { additionalScopes: [scope], readGmail: false, readDrive: false } });
+  assert.ok(new URL(started.authorizeUrl).searchParams.get('scope').split(' ').includes(scope));
+  assert.deepEqual(store.get().google.scopes.additionalScopes, [scope]);
 });

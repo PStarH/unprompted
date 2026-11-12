@@ -34,7 +34,8 @@ export class Coordination {
     });
   }
   release(id) {
-    this.db.prepare("UPDATE tentative_claims SET state='released' WHERE id=?").run(id);
+    if (!id) return;
+    this.db.prepare("UPDATE tentative_claims SET state='released' WHERE id=? AND state='held'").run(id);
   }
   held({ kind = null, situationId = null } = {}) {
     this.releaseExpired();

@@ -1,3 +1,4 @@
+import { ConnectorActions } from './connector-actions.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, createHash } from 'node:crypto';
 import { durableError, iso, json, parse } from './database.js';
@@ -5,9 +6,11 @@ import { DurableWorker, classifyFailure } from './jobs.js';
 import { FeatureRegistry, ActivationPolicies, WorkingContextIndex } from './context.js';
 import { ExperienceService, arbitrateExperiences, effectDigest } from './experience.js';
 import { ToolExecutionLedger } from './execution.js';
+import { taskArtifactLifecycle } from './artifact-lifecycle.js';
 import { ForgetService } from './privacy.js';
-import { validateEventPayload } from '../connectors/events.js';
-import { draftReviewToken } from '../draft-review.js';
+import { validateEventPayload, normalizeEvent, eventDeliveryKey } from '../connectors/events.js';
+import { draftReviewToken, preparedWorkReviewToken } from '../draft-review.js';
+import { notification, emitNotification, resolveNotifications } from '../notifications.js';
 import { OfflineReplay } from './replay.js';
 import { normalizeAddress, isTrustedThreadSender } from '../commitments.js';
 import { unquotedMessageFields } from '../commitments.js';
@@ -17,6 +20,7 @@ import { validateStateDelta, confirmsCancellation } from './state-delta.js';
 import { applyTextChanges } from '../document-delivery.js';
 import { activationFlags, setActivationFlags } from './flags.js';
 import { StandingIntents } from './standing-intents.js';
+import { UsageLedger } from './usage.js';
 import { entityKeys, recallCandidates, scopesCompatible } from './candidates.js';
 import { Coordination, readinessBlock } from './coordination.js';
 import { BoundedRsi } from './rsi.js';
@@ -24,6 +28,12 @@ import { activationMetrics } from './activation-metrics.js';
 import { structuredPrincipalRole } from '../connectors/principal-role.js';
 import { ArtifactActions } from './artifact-actions.js';
 import { taskSourceTools } from '../task-tools.js';
+import { eventContext } from '../event-context.js';
+import { planningContextManifest } from './planning-context.js';
+import { effectiveTaskRequest } from '../task-guidance.js';
+import { MemorySpaceService } from './memory-space.js';
+import { taskMemoryTools, isLocalMemoryWriter } from './memory-tools.js';
+import { observeFailureSignals } from '../observation.js';
 
 const familyOf = event => event.payload?.taskFamily || (event.type === 'issue.updated' ? 'assigned_issue' : event.type === 'pull_request.updated' ? 'pull_request_review' : event.type === 'content.changed' ? 'repository_change' : event.type === 'workflow.updated' ? 'workflow_run' : event.type === 'task.observed' ? 'local_todo' : event.payload?.deliverable || 'work_request');
 const scopeOf = task => [
@@ -38,57 +48,162 @@ const safeReceipt = receipt => receipt && ({ id: receipt.id || receipt.receiptId
  * evidence checking remains an executor; durable jobs own model work, writes
  * pass through the ledger, and the policy boundary remains independent. */
 export class DurableRuntime {
-  constructor(engine, { generateExperience = null, tickMs = 1000, unattachedWindowMs = UNATTACHED_WINDOW_MS, maxPairCandidates = 3, connectorFor = () => null, artifactConnectionFor = () => null } = {}) {
+  constructor(engine, { generateExperience = null, tickMs = 1000, unattachedWindowMs = UNATTACHED_WINDOW_MS, maxPairCandidates = 3, startupRevalidationLimit = 8, standingIntentGlobalBudget = undefined, connectorFor = () => null, artifactConnectionFor = () => null } = {}) {
     if (typeof connectorFor !== 'function') throw durableError('INVALID_CONNECTOR_RESOLVER', 'A connector resolver must be a function.', 400);
     if (!Number.isFinite(unattachedWindowMs) || unattachedWindowMs < 60000 || unattachedWindowMs > 90 * 86400000
       || !Number.isInteger(maxPairCandidates) || maxPairCandidates < 1 || maxPairCandidates > 10) throw durableError('INVALID_PAIR_POLICY', 'Pair matching needs bounded window and candidate limits.', 400);
+    if (!Number.isInteger(startupRevalidationLimit) || startupRevalidationLimit < 0 || startupRevalidationLimit > 100) throw durableError('INVALID_STARTUP_POLICY', 'Startup revalidation needs a bounded task limit.', 400);
     this.engine = engine; this.store = engine.store; this.database = this.store.database; this.db = this.database.db;
-    this.unattachedWindowMs = unattachedWindowMs; this.maxPairCandidates = maxPairCandidates;
+    this.unattachedWindowMs = unattachedWindowMs; this.maxPairCandidates = maxPairCandidates; this.startupRevalidationLimit = startupRevalidationLimit;
     const applied = parse(this.database.get('rsi_applied', 'null'));
-    if (Number.isFinite(applied?.pairWindowMs) && applied.pairWindowMs >= 3600000 && applied.pairWindowMs <= 14 * 86400000) this.unattachedWindowMs = applied.pairWindowMs;
+    if (Number.isFinite(applied?.pairWindowMs) && applied.pairWindowMs >= 60000 && applied.pairWindowMs <= 90 * 86400000) this.unattachedWindowMs = applied.pairWindowMs;
     if (Number.isInteger(applied?.maxPairCandidates) && applied.maxPairCandidates >= 1 && applied.maxPairCandidates <= 10) this.maxPairCandidates = applied.maxPairCandidates;
     this.connectorFor = connectorFor;
     this.jobs = this.store.jobs; this.tasks = this.store.tasks; this.memory = this.store.memory;
+    this.memorySpace = new MemorySpaceService(this);
     this.registry = new FeatureRegistry(); this.policies = new ActivationPolicies(this.database, this.registry);
     this.context = new WorkingContextIndex(this.database); this.experiences = new ExperienceService(this.database, { jobs: this.jobs, registry: this.registry });
     this.replay = new OfflineReplay(this.database, this.memory);
-    this.intents = new StandingIntents(this.database);
+    this.intents = new StandingIntents(this.database, standingIntentGlobalBudget ? { globalBudget: standingIntentGlobalBudget } : undefined);
+    this.usage = new UsageLedger(this.database);
     this.coordination = new Coordination(this.database);
-    this.rsi = new BoundedRsi(this.database);
+    this.rsi = new BoundedRsi(this.database, { pairWindowMs: this.unattachedWindowMs, maxPairCandidates: this.maxPairCandidates });
     this.gateway = engine.toolGateway;
     this.ledger = new ToolExecutionLedger(this.database, { tasks: this.tasks, jobs: this.jobs, experiences: this.experiences });
     this.artifacts = new ArtifactActions(this, { connectionFor: artifactConnectionFor });
-    this.owner = `runtime:${process.pid}:${randomUUID()}`; this.scope = new AsyncLocalStorage(); this.closed = false; this.pending = null;
+    this.connectorActions = new ConnectorActions(this);
+    this.owner = `runtime:${process.pid}:${randomUUID()}`; this.scope = new AsyncLocalStorage(); this.closed = false; this.pending = null; this.kickAgain = false;
     this.generateExperience = generateExperience;
     this.privacy = new ForgetService(this.database, { jobs: this.jobs, memory: this.memory, store: this.store,
       onInvalidate: () => { this.memory.invalidate(); engine.changed(); this.kick(); } });
-    this.worker = new DurableWorker({ jobs: this.jobs, id: this.owner, handlers: {
-      task_initial: job => this.runTask(job), task_continue: job => this.runTask(job),
+    // A dead reconciliation job is the end of that task's recovery path, so it
+    // must surface the uncertain action instead of letting the in-flight guard
+    // swallow the only notice the user would get.
+    const onDead = (job, error) => this.deadLetter(job, error, { exhausted: ['reconcile_execution', 'privacy_reconcile'].includes(job.job_type) });
+    this.worker = new DurableWorker({ jobs: this.jobs, id: this.owner, onDead, handlers: {
+      task_initial: (job, context) => this.runTask(job, context), task_continue: (job, context) => this.runTask(job, context),
       discovery: job => this.runDiscovery(job), experience_trial: job => this.runTrial(job), situation_timer: job => this.runSituationTimer(job), situation_pair: job => this.runSituationPair(job), situation_delta: job => this.runSituationDelta(job), standing_intent_match: job => this.runStandingIntent(job)
     }, recovery: job => this.recover(job) });
-    this.inboxWorker = new DurableWorker({ jobs: this.jobs, queue: 'inbox', id: `${this.owner}:inbox`, handlers: {
+    this.inboxWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'inbox', id: `${this.owner}:inbox`, handlers: {
       ingest_event: job => {
         const row = this.db.prepare('SELECT event_json FROM durable_inbox WHERE id=?').get(job.payload.eventId);
         if (row) this.ingest(parse(row.event_json), event => this.engine.ingestLegacy(event), { claimedJob: job });
       }
     }, recovery: job => this.recover(job) });
-    this.learningWorker = new DurableWorker({ jobs: this.jobs, queue: 'learning', id: `${this.owner}:learning`, handlers: {
+    this.learningWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'learning', id: `${this.owner}:learning`, handlers: {
       compile_experience: (job, guard) => this.experiences.compile(job, summary => this.compile(summary, job), guard)
     }, recovery: job => this.recover(job) });
-    this.effectsWorker = new DurableWorker({ jobs: this.jobs, queue: 'effects', id: `${this.owner}:reconcile`, handlers: {
+    // Publishing can run for its full deadline. Reconciliation lives on its own
+    // queue so a hung publish cannot delay another task's uncertain write.
+    this.effectsWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'effects', id: `${this.owner}:effects`, handlers: {
       artifact_publish: job => this.artifacts.publish(job),
-      external_dispatch: job => this.recoverPreparedDispatch(job),
+      external_dispatch: job => this.recoverPreparedDispatch(job)
+    }, recovery: job => this.recover(job) });
+    this.reconcileWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'reconcile', id: `${this.owner}:reconcile`, handlers: {
       privacy_reconcile: (job, guard) => this.reconcileExecution(job.payload.executionId, guard),
       reconcile_execution: (job, guard) => this.reconcileExecution(job.payload.executionId, guard)
     }, recovery: job => this.recover(job) });
-    this.privacyWorker = new DurableWorker({ jobs: this.jobs, queue: 'privacy', id: `${this.owner}:privacy`, handlers: {
+    this.privacyWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'privacy', id: `${this.owner}:privacy`, handlers: {
       finish_forget: async job => { const result = await this.privacy.finish(job.payload.requestId); if (result?.state === 'pending') throw Object.assign(new Error('Deletion still has unresolved retention.'), { status: 503 }); }
     }, recovery: job => this.recover(job) });
     engine.durableRuntime = this;
     this.timer = setInterval(() => this.kick(), tickMs); this.timer.unref?.();
   }
   current() { return this.scope.getStore(); }
-  tools(scope = {}) { return [...taskSourceTools(this, scope), ...this.artifacts.tools(scope)]; }
+  artifactLifecycle(taskId) {
+    const task = this.tasks.get(taskId);
+    if (!task) throw durableError('TASK_NOT_FOUND', 'This task does not exist.', 404);
+    return taskArtifactLifecycle(this.db, taskId, task);
+  }
+  tools(scope = {}) { return [...taskSourceTools(this, scope), ...this.connectorActions.tools(scope), ...taskMemoryTools(this, scope), ...(scope.taskId && this.tasks.get(scope.taskId)?.kind === 'standing_intent' ? [] : this.artifacts.tools(scope))]; }
+  memoryScopesFor(task) {
+    const scopes = [{ type: 'task_family', key: task.request?.deliverable || task.kind || 'work_request' },
+      { type: 'resource', key: `task:${task.id}` }];
+    if (task.request?.subjectEntity && task.request.subjectEntity !== '*') {
+      scopes.push({ type: 'project', key: task.request.subjectEntity });
+      if (task.request.deliverable) scopes.push({ type: 'project', key: json([task.request.subjectEntity.toLowerCase(), task.request.deliverable.toLowerCase()]) });
+    }
+    if (task.documentId) scopes.push({ type: 'resource', key: task.documentId });
+    const sender = normalizeAddress(task.sender || task.request?.source?.from || '');
+    if (sender) {
+      const provider = task.sourceConnectorId || task.request?.source?.connectorId || 'google';
+      const entity = this.db.prepare('SELECT id,kind,aliases_json FROM canonical_entities WHERE provider=? AND provider_id=? AND confirmed_by_user=1').get(provider, sender);
+      const keys = [sender, ...(entity ? [entity.id, ...((parse(entity.aliases_json) || []).filter(value => typeof value === 'string').slice(0, 16))] : [])];
+      for (const key of keys) { scopes.push({ type: 'entity', key }); if (!entity || entity.kind === 'person') scopes.push({ type: 'entity', key: `person:${key}` }); }
+    }
+    return scopes;
+  }
+  memoryWriteScope(task) {
+    if (task.guidance?.scope === 'task') return { type: 'resource', key: `task:${task.id}` };
+    if (task.guidance?.scope === 'similar' && task.request?.subjectEntity && task.request?.deliverable) return { type: 'project', key: json([task.request.subjectEntity.toLowerCase(), task.request.deliverable.toLowerCase()]) };
+    if (task.guidance?.scope !== 'task' && task.request?.subjectEntity && task.request.subjectEntity !== '*') return { type: 'project', key: task.request.subjectEntity };
+    return { type: 'resource', key: task.documentId || `task:${task.id}` };
+  }
+  memoryGuidance(matches, scopes) {
+    const memories = [...new Map([...this.memory.preferences({ scopes }), ...matches].map(memory => [memory.id, memory])).values()];
+    return memories.map(memory => ({ ...memory, expectedVersion: this.store.state.taskMemories?.[memory.id]?.updatedAt ?? memory.expectedVersion }));
+  }
+  async activationMemoryContext(events, { intent = null, situationId = null, job = null } = {}) {
+    const version = this.memory.version(), scopes = [];
+    for (const event of events) scopes.push(...this.memoryScopesFor({ id: event.id, sender: event.payload?.from, sourceConnectorId: event.connectorId,
+      documentId: event.type === 'document.modified' ? event.payload?.id : event.payload?.documentId,
+      request: { deliverable: familyOf(event), subjectEntity: event.payload?.projectId, source: { connectorId: event.connectorId, from: event.payload?.from } } }));
+    if (intent?.scope) {
+      if (intent.scope.projectId) scopes.push({ type: 'project', key: intent.scope.projectId });
+      if (['project', 'resource', 'entity', 'task_family'].includes(intent.scope.type) && intent.scope.key && intent.scope.key !== '*') scopes.push({ type: intent.scope.type, key: intent.scope.key });
+    }
+    if (situationId) for (const row of this.db.prepare('SELECT id FROM tasks WHERE situation_id=? LIMIT 16').all(situationId)) scopes.push(...this.memoryScopesFor(this.tasks.get(row.id)));
+    const unique = [...new Map(scopes.map(scope => [`${scope.type}:${scope.key}`, scope])).values()];
+    const query = events.map(event => { const fields = eventContext(event); return `${fields.subject} ${fields.body}`; }).join(' ').slice(0, 4000);
+    let matches;
+    try { matches = await this.memory.search(query, { scopes: unique, limit: 6, expectedContextVersion: version }); }
+    catch (error) { if (error.code === 'CONTEXT_CHANGED') error.status = 503; throw error; }
+    if (version !== this.memory.version()) throw durableError('CONTEXT_CHANGED', 'Memory changed during activation retrieval.', 503);
+    if (job) {
+      this.jobs.assert(job);
+      if (job.payload?.privacyEpoch != null && job.payload.privacyEpoch !== Number(this.database.get('privacy_epoch'))) throw durableError('PRIVACY_CHANGED', 'Privacy changed during activation retrieval.');
+    }
+    if (events.some(event => this.privacy.forgotten('event', event.id) || this.privacy.permissionRevoked(event.connectorId))) throw durableError('PRIVACY_CHANGED', 'The activation source is no longer available.');
+    const memories = this.memoryGuidance(matches, unique);
+    const manifest = planningContextManifest({ version, memories }, { budgetChars: 2200 });
+    if (job) this.database.atomic(() => { for (const memory of manifest.memory) this.database.lineage('memory', memory.id, 'job', job.id); });
+    return { contextVersion: version, memories: manifest.memory, omitted: manifest.deferred.length,
+      boundary: 'Saved context only. Current event quotations must independently support activation; memory grants no permission.' };
+  }
+  sourceForTask(task) {
+    const provider = task.sourceConnectorId || task.request?.source?.connectorId;
+    const sourceId = task.sourceEmailId || task.request?.source?.id;
+    const eventId = task.request?.source?.eventId;
+    const rows = this.db.prepare(`SELECT e.event_json FROM durable_inbox e JOIN task_events t ON t.event_id=e.id
+      JOIN source_records s ON s.kind='event' AND s.id=e.id AND s.active=1
+      WHERE t.task_id=? AND e.state!='forgotten' AND (? IS NULL OR e.id=?) ORDER BY t.associated_at DESC,e.id DESC LIMIT 32`).all(task.id, eventId || null, eventId || null);
+    const events = rows.map(row => parse(row.event_json)).filter(event => !provider || event.connectorId === provider);
+    let event = eventId ? events.find(item => item.id === eventId) : events.find(item => sourceId && (item.payload?.id === sourceId || item.payload?.documentId === sourceId)) || (!sourceId && task.kind === 'standing_intent' ? events[0] : null);
+    if (eventId && !event) throw durableError('TASK_SOURCE_UNAVAILABLE', 'The linked source is no longer available.', 409);
+    let source = task.externalSource;
+    let documentId = task.documentId || source?.documentId || null;
+    if (!source && event?.type?.startsWith('document.')) {
+      const document = this.store.state.documents[event.payload.id];
+      if (!document || document.available === false) throw durableError('TASK_SOURCE_UNAVAILABLE', 'The source document is unavailable.', 409);
+      const observed = (this.current()?.context?.events || events).find(item => item.connectorId === event.connectorId && item.type === 'document.modified' && item.payload.id === document.id && item.payload.content === document.content);
+      if (!observed) throw durableError('TASK_SOURCE_UNAVAILABLE', 'The current source revision is not in this task context.', 409);
+      event = observed;
+      source = { ...document, body: document.content }; documentId = document.id;
+    }
+    if (!source && (event?.type === 'email.received' || task.sourceEmailId)) {
+      source = this.store.state.inbox.find(item => item.id === (task.sourceEmailId || event?.payload.id || sourceId) && (!provider || (item.connectorId || item.source || provider) === provider));
+      if (!source || source.available === false) throw durableError('TASK_SOURCE_UNAVAILABLE', 'The source message is unavailable.', 409);
+    }
+    if (!source && event) { const fields = eventContext(event); source = { ...event.payload, title: fields.subject, body: fields.body }; }
+    if (!source && sourceId) throw durableError('TASK_SOURCE_UNAVAILABLE', 'No authorized source is linked to this task.', 409);
+    if (source?.state === 'unavailable' || source?.available === false) throw durableError('TASK_SOURCE_UNAVAILABLE', 'The source is unavailable.', 409);
+    return { sourceId: String(source?.id || sourceId || ''), eventId: event?.id || null, provider: provider || event?.connectorId || null,
+      accountId: source?.accountId || event?.payload?.accountId || null, sourceType: event?.type || task.request?.source?.kind || 'user_instruction',
+      title: String(source?.subject || source?.title || task.subject || ''), content: String(source ? source.body ?? source.content ?? source.title ?? source.subject ?? '' : task.request?.text || task.subject || ''),
+      documentId, observedVersion: source?.version || source?.sourceObservationRevision || source?.updatedAt || event?.at || null,
+      ...(source?.repository ? { repository: source.repository, number: source.number || null, sha: source.sha || null,
+        files: Array.isArray(source.files) ? source.files.slice(0, 5).map(filename => String(filename).slice(0, 160)) : [], conclusion: source.conclusion || null } : {}) };
+  }
   inWorker() { return Boolean(this.current()); }
   canRun(taskId) {
     const scope = this.current();
@@ -123,6 +238,7 @@ export class DurableRuntime {
   }
   canDiscover(eventId) { const scope = this.current(); return Boolean(scope?.eventId === eventId && this.jobs.owns(scope.job) && !this.privacy.forgotten('event', eventId) && scope.privacyEpoch === Number(this.database.get('privacy_epoch'))); }
   ingest(input, legacyIngest, { claimedJob = null } = {}) {
+    if (!input?.id && (input?.providerRevision != null || input?.providerEtag != null)) input = { ...input, ...normalizeEvent(input) };
     const event = { ...input, id: input.id || `${input.connectorId || 'local'}:${input.providerEventId}`, source: input.source || 'simulated', connectorId: input.connectorId || 'simulated', at: input.at || iso(this.database.now()) };
     validateEventPayload(event);
     const account = event.payload?.accountEmail || (typeof event.payload?.to === 'string' ? event.payload.to : null);
@@ -139,13 +255,13 @@ export class DurableRuntime {
     }
     const nativeTaskId = event.type === 'issue.updated' ? `issue:${event.payload.id}` : event.type === 'pull_request.updated' ? `review:${event.payload.id}` : event.type === 'content.changed' ? `change:${event.payload.id}` : event.type === 'workflow.updated' ? `check:${event.payload.id}` : event.type === 'task.observed' ? `observed:${event.payload.id}` : null;
     if (nativeTaskId && this.privacy.forgotten('task', nativeTaskId)) return { id: event.id, duplicate: true, disposition: 'forgotten' };
-    if (this.privacy.forgotten('event', event.id) || this.privacy.forgotten('provider_event', `${event.connectorId}:${event.providerEventId || event.id}`)) return { id: event.id, duplicate: true, disposition: 'forgotten' };
-    const prior = this.db.prepare('SELECT id FROM durable_inbox WHERE provider=? AND provider_event_id=?').get(event.connectorId, event.providerEventId || event.id);
+    if (this.privacy.forgotten('event', event.id) || this.privacy.forgotten('provider_event', `${event.connectorId}:${eventDeliveryKey(event)}`)) return { id: event.id, duplicate: true, disposition: 'forgotten' };
+    const prior = this.db.prepare('SELECT id FROM durable_inbox WHERE provider=? AND provider_event_id=?').get(event.connectorId, eventDeliveryKey(event));
     if (prior) event.id = prior.id;
     let inboxJob;
     this.database.atomic(() => {
       const at = iso(this.database.now());
-      this.db.prepare('INSERT OR IGNORE INTO durable_inbox(id,provider,provider_event_id,event_json,material_signature,received_at) VALUES(?,?,?,?,?,?)').run(event.id, event.connectorId, event.providerEventId || event.id, json(event), effectDigest([event.type, event.payload]), at);
+      this.db.prepare('INSERT OR IGNORE INTO durable_inbox(id,provider,provider_event_id,event_json,material_signature,received_at) VALUES(?,?,?,?,?,?)').run(event.id, event.connectorId, eventDeliveryKey(event), json(event), effectDigest([event.type, event.payload]), at);
       this.db.prepare('INSERT OR IGNORE INTO source_records(kind,id,created_at) VALUES(\'event\',?,?)').run(event.id, at);
       inboxJob = this.jobs.enqueue({ queue: 'inbox', type: 'ingest_event', key: `event:${event.id}`, payload: { eventId: event.id } });
       this.database.lineage('event', event.id, 'job', inboxJob.id);
@@ -231,7 +347,7 @@ export class DurableRuntime {
         entities: payload.projectId ? [`project:${payload.projectId}`] : [], dimensions: [payload.projectId && `project:${payload.projectId}`, payload.resourceId && `resource:${payload.resourceId}`].filter(Boolean), deadlineAt: payload.deadlineAt || null });
       this.jobs.assert(job);
       let result;
-      const invalidatesSource = event.type === 'document.unavailable'
+      const invalidatesSource = ['document.unavailable', 'email.unavailable'].includes(event.type)
         || event.type === 'issue.updated' && (!event.payload.assigned || event.payload.state !== 'open')
         || ['pull_request.updated', 'content.changed', 'workflow.updated'].includes(event.type) && (event.payload.active === false || event.payload.state !== 'open')
         || event.type === 'task.observed' && event.payload.state !== 'open';
@@ -254,20 +370,44 @@ export class DurableRuntime {
     } catch (error) { if (this.jobs.owns(job)) this.jobs.fail(job, error); throw error; }
   }
   taskFeatures(task, version = Number(this.database.get('context_version'))) {
-    const source = this.store.state.events.find(event => event.payload?.id === (task.sourceEmailId || task.request?.source?.id) && event.type !== 'document.modified');
+    const source = this.store.state.events.find(event => task.request?.source?.eventId ? event.id === task.request.source.eventId
+      : event.payload?.id === (task.sourceEmailId || task.request?.source?.id) && (!task.sourceConnectorId || event.connectorId === task.sourceConnectorId) && event.type !== 'document.modified');
+    const sender = task.sender || task.request?.source?.from || source?.payload?.from;
     const githubFamily = { external_issue: 'assigned_issue', external_review: 'pull_request_review', external_change: 'repository_change', external_check: 'workflow_run' };
     return this.registry.capture({ 'event.family': source ? familyOf(source) : githubFamily[task.kind] || (task.kind === 'observed_task' ? 'local_todo' : 'work_request'), 'event.actionable': !task.privacyInvalidated && !['completed', 'cancelled'].includes(task.status), 'task.family': task.request?.deliverable || task.kind || 'work_request', 'task.priority': Number(task.management?.priority?.score) || 0,
       'event.provider': task.sourceConnectorId || task.request?.source?.connectorId || 'google',
-      ...(task.sender || task.request?.source?.from ? { 'sender.identity': normalizeAddress(task.sender || task.request.source.from) } : {}),
+      ...(sender ? { 'sender.identity': normalizeAddress(sender) } : {}),
       'task.requires_review': Boolean(task.guidanceReviewRequired), 'task.has_deadline': Boolean(task.request?.deadline?.iso),
       ...(task.request?.subjectEntity ? { 'project.id': task.request.subjectEntity } : {}), ...(task.documentId ? { 'resource.id': task.documentId } : {}) }, { now: this.database.now(), contextVersion: version });
   }
   activationFor(task) { const version = Number(this.database.get('context_version')); return this.policies.evaluate(this.taskFeatures(task, version), scopeOf(task), version); }
-  buildContext(task, run) {
-    this.experiences.refreshStaleness();
+  activationForEvent(event) {
+    const version = Number(this.database.get('context_version')), family = familyOf(event), payload = event.payload || {};
+    const features = this.registry.capture({ 'event.provider': event.connectorId, 'event.family': family, 'event.actionable': true,
+      ...(payload.from ? { 'sender.identity': normalizeAddress(payload.from) } : {}), ...(payload.projectId ? { 'project.id': payload.projectId } : {}) }, { now: this.database.now(), contextVersion: version });
+    return this.policies.evaluate(features, [{ type: 'task_family', key: family }, ...(payload.projectId ? [{ type: 'project', key: payload.projectId }] : [])], version);
+  }
+  async #preparedMemories(task) {
+    if (!this.memory.usesAsyncEncoder()) return null;
     const version = Number(this.database.get('context_version'));
+    const scopes = this.memoryScopesFor(task);
+    const matches = await this.memory.searchAsync(`${task.subject || ''} ${task.request?.text || ''}`, { scopes, limit: 8, expectedContextVersion: version });
+    const memories = this.memoryGuidance(matches, scopes);
+    return { version, memories };
+  }
+  async loadContext(task, run) {
+    try { return this.buildContext(task, run, await this.#preparedMemories(task)); }
+    catch (error) { if (error.code === 'CONTEXT_CHANGED') error.status = 503; throw error; }
+  }
+  buildContext(task, run, prepared = null) {
+    this.experiences.refreshStaleness();
+    const version = prepared?.version ?? Number(this.database.get('context_version'));
+    if (prepared && Number(this.database.get('context_version')) !== prepared.version) throw durableError('CONTEXT_CHANGED', 'The retrieval context version is stale.');
     const features = this.taskFeatures(task, version);
-    const scopes = scopeOf(task), memories = this.memory.search(`${task.subject || ''} ${task.request?.text || ''}`, { scopes, limit: 8, expectedContextVersion: version });
+    const scopes = scopeOf(task);
+    if (!prepared && this.memory.usesAsyncEncoder()) throw durableError('ASYNC_EMBEDDING', 'Prepare memories before searching inside a transaction.', 400);
+    const memoryScopes = this.memoryScopesFor(task);
+    const memories = prepared ? prepared.memories : this.memoryGuidance(this.memory.search(`${task.subject || ''} ${task.request?.text || ''}`, { scopes: memoryScopes, limit: 8, expectedContextVersion: version }), memoryScopes);
     const experiences = this.experiences.retrieve({ scopes, features, contextVersion: version });
     const activation = this.policies.evaluate(features, scopes, version);
     const arbitration = arbitrateExperiences({ policies: activation.policyIds.map(id => { const policy = this.policies.get(id); return { ...policy, directiveKey: policy.effect.directiveKey || null }; }), experiences });
@@ -280,7 +420,104 @@ export class DurableRuntime {
     });
     return { version, features, memories, experiences, arbitration, events: events.map(event => parse(event.event_json)), sources, activation };
   }
-  async runTask(job) {
+  /** Read-only lookup across memories, observed documents, messages and other
+   * tasks already stored for this workspace. It does not contact a provider. */
+  recallWorkspace(task, { query, kind = 'all' } = {}) {
+    const text = typeof query === 'string' ? query.trim() : '';
+    if (!task || !text || text.length > 200 || !['all', 'memory', 'document', 'message', 'work'].includes(kind)) throw durableError('INVALID_RECALL', 'Workspace recall needs a short query and a known record kind.', 400);
+    const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+    const matches = value => words.every(word => String(value || '').toLowerCase().includes(word));
+    const excerpt = value => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    const records = [];
+    const take = (items, textOf, present) => {
+      const ranked = items.map(item => ({ item, text: textOf(item) })).filter(entry => matches(entry.text))
+        .map(entry => ({ ...entry, score: words.reduce((score, word) => score + Number(entry.text.toLowerCase().split(word).length - 1), 0) }))
+        .sort((a, b) => b.score - a.score || String(a.item.id).localeCompare(String(b.item.id))).slice(0, 5);
+      for (const entry of ranked) records.push(present(entry.item, entry.text));
+    };
+    const assemble = memoryHits => {
+    if (kind === 'all' || kind === 'memory') {
+      for (const hit of memoryHits) {
+        if (!this.#memoryVisible(task, hit.id)) continue;
+        records.push({ kind: 'memory', id: hit.id, title: hit.memoryKind || 'memory', excerpt: excerpt(hit.content) });
+      }
+    }
+    if (kind === 'all' || kind === 'document') take(Object.values(this.store.state.documents || {}).filter(document => !this.#documentHidden(task, document)),
+      document => `${document.title}\n${document.content}`,
+      (document, body) => ({ kind: 'document', id: document.id, title: String(document.title || document.id).slice(0, 300), excerpt: excerpt(body) }));
+    if (kind === 'all' || kind === 'message') take((this.store.state.inbox || []).filter(message => !this.#messageHidden(message)),
+      message => `${message.subject}\n${message.body}`,
+      (message, body) => ({ kind: 'message', id: message.id, title: String(message.subject || message.id).slice(0, 300), excerpt: excerpt(body) }));
+    if (kind === 'all' || kind === 'work') take(Object.values(this.store.state.tasks || {}).filter(other => other.id !== task.id && this.#workVisible(other)),
+      other => this.#workText(other),
+      (other, body) => ({ kind: 'work', id: other.id, title: String(other.subject || other.id).slice(0, 300), excerpt: excerpt(body) }));
+    const selected = records.slice(0, 12);
+    return { query: text, records: selected, omitted: Math.max(0, records.length - selected.length) };
+    };
+    if ((kind === 'all' || kind === 'memory') && this.memory.usesAsyncEncoder()) return this.memory.searchAsync(text, { scopes: this.memoryScopesFor(task), limit: 5 }).then(assemble);
+    return assemble((kind === 'all' || kind === 'memory') ? this.memory.search(text, { scopes: this.memoryScopesFor(task), limit: 5 }) : []);
+  }
+  readWorkspaceRecord(task, { kind, id } = {}) {
+    if (!task || !['memory', 'document', 'message', 'work'].includes(kind) || typeof id !== 'string' || !id || id.length > 300) throw durableError('INVALID_RECALL', 'Workspace recall needs a known record.', 400);
+    if (kind === 'memory') {
+      if (!this.#memoryVisible(task, id)) return null;
+      const row = this.db.prepare('SELECT content,memory_kind,scope_type,scope_key FROM user_memories WHERE id=?').get(id);
+      return row && { kind, id, title: row.memory_kind, content: row.content };
+    }
+    if (kind === 'document') {
+      const document = this.store.state.documents?.[id];
+      if (!document || this.#documentHidden(task, document)) return null;
+      return { kind, id, title: document.title || id, version: document.version ?? null, content: String(document.content || '') };
+    }
+    if (kind === 'message') {
+      const message = (this.store.state.inbox || []).find(item => item.id === id);
+      if (!message || this.#messageHidden(message)) return null;
+      return { kind, id, title: message.subject || id, content: String(message.body || '') };
+    }
+    const other = this.tasks.get(id);
+    if (!other || other.id === task.id || !this.#workVisible(other)) return null;
+    return { kind, id, title: other.subject || id, content: this.#workText(other) };
+  }
+  #memoryVisible(task, id) {
+    if (this.privacy.forgotten('memory', id) || !this.memory.eligible([id]).has(id)) return false;
+    const row = this.db.prepare('SELECT scope_type,scope_key FROM user_memories WHERE id=?').get(id);
+    return Boolean(row) && this.memoryScopeMatches(task, row.scope_type, row.scope_key);
+  }
+  memoryScopeMatches(task, scopeType, scopeKey) {
+    return scopeType === 'global' || this.memoryScopesFor(task).some(scope => scope.type === scopeType && scope.key === scopeKey);
+  }
+  #documentHidden(task, document) {
+    if (!document || document.available === false || this.privacy.forgotten('document', document.id)) return true;
+    const connectorId = document.connectorId || document.source;
+    if (connectorId && this.privacy.permissionRevoked(connectorId)) return true;
+    const message = (this.store.state.inbox || []).find(item => item.id === (task.sourceEmailId || task.request?.source?.id)) || null;
+    return this.engine.taskServices.matchingFeedbackRules({ request: task.request || {}, message, documentId: document.id }).some(match => match.effect === 'exclude_document_association');
+  }
+  #messageHidden(message) {
+    if (!message || message.available === false) return true;
+    const connectorId = message.connectorId || message.source;
+    if (connectorId && this.privacy.permissionRevoked(connectorId)) return true;
+    return (this.store.state.events || []).some(event => event.type === 'email.received' && event.payload?.id === message.id
+      && (this.privacy.forgotten('event', event.id) || this.privacy.forgotten('provider_event', `${event.connectorId}:${eventDeliveryKey(event)}`)));
+  }
+  #workVisible(task) {
+    if (!task || task.privacyInvalidated || this.privacy.forgotten('task', task.id)) return false;
+    const connectorId = task.sourceConnectorId || task.request?.source?.connectorId;
+    return !connectorId || !this.privacy.permissionRevoked(connectorId);
+  }
+  #workText(task) {
+    return [task.subject, task.request?.text, task.externalSource?.title, task.externalSource?.subject, task.externalSource?.body].filter(value => typeof value === 'string' && value).join('\n');
+  }
+  /**
+   * Run one task segment chain.
+   *
+   * `signal` is the worker's job deadline. It is honoured between segments and
+   * by read tools; the write path deliberately takes no abort signal, because
+   * cancelling between an intent and its dispatch would leave an undefined
+   * external state. The execution deadline owns write cancellation.
+   */
+  async runTask(job, { signal = null } = {}) {
+    signal?.throwIfAborted();
     const task = this.tasks.get(job.task_id || job.payload.taskId);
     if (!task || task.privacyInvalidated || task.control?.paused || ['completed', 'cancelled'].includes(task.status)) return;
     if (task.yieldState === 'YIELDED_TO_USER') {
@@ -299,24 +536,37 @@ export class DurableRuntime {
       return;
     }
     if (task.action && ['executing', 'accepted_live', 'uncertain'].includes(task.action.status)) {
-      await this.scope.run({ taskId: task.id, job }, () => this.engine.reconcile(task.id)); return;
+      signal?.throwIfAborted();
+      await this.scope.run({ taskId: task.id, job, signal }, () => this.engine.reconcile(task.id)); return;
     }
     if (this.tasks.hasPendingSemantic(task.id)) return;
     const run = this.tasks.beginRun(job);
-    await this.scope.run({ taskId: task.id, job, run }, async () => {
+    await this.scope.run({ taskId: task.id, job, run, signal }, async () => {
       for (let segment = 0; segment < 3; segment++) {
+        signal?.throwIfAborted();
         this.jobs.assert(job);
         if (this.tasks.hasPendingSemantic(task.id)) { this.tasks.finish(run, job, 'waiting'); return; }
         const current = this.tasks.assertRun(run, { job, allowDirty: true });
-        const context = this.buildContext(current, run); this.current().context = context;
-        this.store.mutateIfChanged(state => { state.tasks[current.id].activation = context.activation; });
+        const context = await this.loadContext(current, run); this.current().context = context; this.current().contextReadOffsets = new Map();
+        this.store.mutateIfChanged(state => {
+          const { memory, experiences, relatedEvents, ...manifest } = this.contextManifest(current.id);
+          state.tasks[current.id].activation = context.activation; state.tasks[current.id].contextManifest = manifest; state.tasks[current.id].contextReadRequired = !this.contextReady(current.id);
+          if (context.activation.activate) delete state.tasks[current.id].activationHold;
+        });
         if (!context.activation.activate) {
-          this.store.mutateIfChanged(state => { state.tasks[current.id].activationHold = { policyIds: context.activation.policyIds }; });
+          this.store.mutateIfChanged(state => { const entry = state.tasks[current.id]; entry.activationHold = { policyIds: context.activation.policyIds }; if (entry.kind === 'standing_intent') { entry.reasoning = { status: 'held', at: iso(this.database.now()) }; entry.status = 'waiting_for_information'; } });
           this.tasks.finish(run, job, 'waiting'); this.engine.changed(); return;
         }
         this.tasks.checkpoint(run, job, { expectedInputVersion: current.inputVersion, contextVersion: context.version,
           sources: context.sources, plan: { state: 'revalidate_then_plan', sourceIds: context.sources, experienceIds: context.experiences.map(experience => experience.id) } });
         this.store.refresh();
+        if (current.kind === 'standing_intent') {
+          if (!current.preparedWork || current.preparedWork.inputVersion !== current.inputVersion || current.preparedWork.contextVersion !== context.version
+            || current.preparedWork.modelVersion !== this.database.get('model_version', '0') || this.contextManifest(current.id).deferred.length) await this.prepareIntentBrief(current, run, context);
+          this.store.mutateIfChanged(state => { state.tasks[current.id].contextReadRequired = !this.contextReady(current.id); });
+          this.tasks.acknowledgeEvidence(run, job);
+          this.tasks.finish(run, job); this.engine.changed(); return;
+        }
         this.experiences.step({ taskRunId: run.id, logicalStepId: `context:${run.input_version}`, planVersion: segment + 1, stepKind: 'context_revalidation', expectedEffect: { contextVersion: context.version },
           experiences: context.experiences.map(experience => ({ id: experience.id, relation: 'predicate_matched' })) });
         const pending = this.store.state.tasks[task.id]?.reasoningWork;
@@ -330,6 +580,7 @@ export class DurableRuntime {
           this.tracePlan(latest, run, context);
           this.tasks.acknowledgeEvidence(run, job);
           if (this.db.prepare("SELECT 1 FROM task_signals WHERE task_id=? AND signal_type='EVIDENCE_CHANGED' AND status='PENDING' LIMIT 1").get(task.id)) continue;
+          this.store.mutateIfChanged(state => { state.tasks[task.id].contextReadRequired = !this.contextReady(task.id); });
           this.artifacts.schedulePrepared(this.tasks.get(task.id));
           this.tasks.finish(run, job); this.engine.changed(); return;
         }
@@ -346,14 +597,127 @@ export class DurableRuntime {
       this.engine.retryPendingReasoning(); await this.engine.whenSettled();
     });
   }
+  syncStandingIntent(intent) {
+    this.database.atomic(() => {
+      for (const row of this.db.prepare("SELECT t.* FROM tasks t JOIN situations s ON s.id=t.situation_id WHERE s.standing_intent_id=? AND t.status NOT IN ('completed','cancelled')").all(intent.id)) {
+        const data = parse(row.data_json);
+        if (data.action || data.privacyInvalidated) continue;
+        this.tasks.applyControl(row.id, 'SUPERSESSION', `standing-intent:${intent.id}:v${intent.version}`, task => {
+          delete task.preparedWork; delete task.contextManifest;
+          task.intentVersion = intent.version;
+          task.request = { ...task.request, text: intent.desiredOutcome };
+          if (intent.status === 'disabled') { task.status = 'cancelled'; return; }
+          task.status = 'waiting_for_information';
+          if (intent.status === 'paused' && !task.control?.paused) task.control = { paused: true, pauseReason: 'standing_intent_paused' };
+          if (intent.status === 'active' && task.control?.pauseReason === 'standing_intent_paused') task.control = { paused: false };
+        });
+        this.db.prepare('UPDATE artifacts SET stale=1,updated_at=? WHERE task_id=?').run(iso(this.database.now()), row.id);
+        if (intent.status === 'active') this.jobs.enqueue({ type: 'task_continue', taskId: row.id, key: `intent-control:${row.id}:v${intent.version}`, payload: { taskId: row.id } });
+      }
+      for (const row of this.db.prepare("SELECT id,closure_condition_json FROM situations WHERE standing_intent_id=? AND lifecycle_state IN ('OPEN','OBSERVING')").all(intent.id)) {
+        this.db.prepare('UPDATE situations SET closure_condition_json=?,lifecycle_state=CASE WHEN ? THEN \'SUPPRESSED\' ELSE lifecycle_state END,updated_at=? WHERE id=?')
+          .run(json({ ...parse(row.closure_condition_json), missingEvidence: [intent.desiredOutcome] }), Number(intent.status === 'disabled'), iso(this.database.now()), row.id);
+        this.tasks.situations.bump(row.id);
+      }
+    });
+    this.store.refresh(); this.kick();
+    return intent;
+  }
+  async prepareIntentBrief(task, run, context) {
+    const intent = this.intents.get(task.standingIntentId);
+    if (!this.flags().standingIntents || !intent || intent.status !== 'active' || !task.request?.text) return;
+    const outcome = effectiveTaskRequest(task, this.store.state).text;
+    let sources, body, kind = 'source_brief', title = task.subject, evidenceRefs = [];
+    const fence = this.capture(task.id), generation = this.database.get('activation_generation:standingIntents', '0'), modelVersion = this.database.get('model_version', '0');
+    const current = () => this.isCurrent(task.id, fence) && this.flags().standingIntents && this.database.get('activation_generation:standingIntents', '0') === generation
+      && this.database.get('model_version', '0') === modelVersion && this.intents.get(intent.id)?.status === 'active' && this.intents.get(intent.id)?.version === intent.version && this.activationFor(this.tasks.get(task.id)).activate;
+    try {
+      const primary = this.sourceForTask(task);
+      sources = context.events.filter(event => !event.type.startsWith('document.') || event.type === 'document.modified'
+        && this.store.state.documents[event.payload.id]?.available !== false && this.store.state.documents[event.payload.id]?.content === event.payload.content)
+        .map(event => ({ event, fields: eventContext(event) })).filter(({ fields }) => fields.subject || fields.body);
+      if (!sources.some(({ event }) => event.id === primary.eventId)) throw durableError('TASK_SOURCE_UNAVAILABLE', 'The current source is missing from this preparation context.', 409);
+      body = [outcome, ...sources.map(({ fields }) => `${fields.subject}\n\n${fields.body}`)].join('\n\n');
+      if (this.engine.reasoner.available?.() && typeof this.engine.reasoner.prepareTask === 'function') {
+        this.store.mutateIfChanged(state => { const entry = state.tasks[task.id]; delete entry.preparedWork; entry.status = 'investigating'; entry.reasoning = { status: 'running', at: iso(this.database.now()) }; });
+        const result = await this.engine.reasoner.prepareTask({ task: { id: task.id, request: { text: outcome }, primarySourceEventId: primary.eventId, sourceEventIds: sources.map(({ event }) => event.id) },
+          externalTools: this.engine.externalTools({ taskId: task.id, isCurrent: current }).filter(tool => tool.name !== 'create_work_artifact'), planningContext: this.planningContext(task.id) }, `prepare:${task.id}:${task.inputVersion}:m${modelVersion}:job:${this.current().job.id}:a${this.current().job.attempts}`);
+        if (!current()) throw durableError('PREPARATION_CHANGED', 'The task changed during preparation.');
+        if (!result || typeof result.title !== 'string' || !result.title.trim() || result.title.length > 300 || typeof result.body !== 'string' || !result.body.trim() || result.body.length > 12000
+          || !Array.isArray(result.evidenceRefs) || !result.evidenceRefs.length || result.evidenceRefs.length > 12 || !result.evidenceRefs.some(ref => ref?.eventId === primary.eventId)
+          || result.evidenceRefs.some(ref => typeof ref?.quote !== 'string' || !ref.quote.trim() || ref.quote.length > 500 || !sources.some(({ event, fields }) => event.id === ref.eventId && `${fields.subject}\n${fields.body}`.includes(ref.quote)))) throw durableError('INVALID_PREPARATION', 'The draft needs bounded text and quotations from the actual task sources.', 400);
+        if (!this.contextReady(task.id)) throw durableError('CONTEXT_READ_REQUIRED', 'Read deferred task context before preparing the draft.', 409);
+        body = result.body; title = result.title; evidenceRefs = result.evidenceRefs; kind = 'draft';
+      }
+    } catch (error) {
+      if (this.isCurrent(task.id, fence)) this.store.mutateIfChanged(state => { const entry = state.tasks[task.id]; entry.reasoning = { status: 'failed', detail: String(error.message).slice(0, 500), at: iso(this.database.now()) }; entry.status = 'waiting_for_information'; entry.reason = 'Preparation failed. Retry or revise the goal.'; delete entry.preparedWork; });
+      throw error;
+    }
+    if (!current()) return;
+    const id = `intent-brief:${task.id}:${task.inputVersion}:c${context.version}:m${modelVersion}:${effectDigest([kind, body])}`;
+    this.store.mutateIfChanged(state => {
+      const current = state.tasks[task.id];
+      current.preparedWork = { id, kind, title, body, evidenceRefs, inputVersion: task.inputVersion, contextVersion: context.version, modelVersion, sourceEventIds: sources.map(({ event }) => event.id), requiresReview: true };
+      current.reasoning = { status: 'ok', at: iso(this.database.now()) };
+      current.status = 'ready_for_approval';
+      current.reason = kind === 'draft' ? 'A draft is ready for review against your goal.' : 'A source brief is ready for review against your goal.';
+    });
+    if (!this.db.prepare('SELECT 1 FROM artifacts WHERE id=?').get(id)) {
+      const step = this.experiences.step({ taskRunId: run.id, logicalStepId: id, stepKind: 'source_brief', expectedEffect: { type: 'local_preparation', outcome }, experiences: [] });
+      this.experiences.artifact({ id, taskId: task.id, taskRunId: run.id, planStepId: step.id, content: body, version: task.inputVersion });
+    }
+  }
+  retryPreparedWork(taskId, { inputVersion } = {}) {
+    const task = this.tasks.get(taskId);
+    if (!task || task.kind !== 'standing_intent' || task.control?.paused || task.privacyInvalidated || task.inputVersion !== inputVersion
+      || task.dirty || ['completed', 'cancelled'].includes(task.status) || this.tasks.hasPendingSemantic(taskId)
+      || !this.flags().standingIntents || !this.activationFor(task).activate) throw durableError('PREPARATION_CHANGED', 'Refresh the active goal before retrying preparation.', 409);
+    const intent = this.intents.get(task.standingIntentId);
+    if (!intent || intent.status !== 'active' || intent.version !== task.intentVersion) throw durableError('PREPARATION_CHANGED', 'The standing goal changed.', 409);
+    let job = this.db.prepare("SELECT id,state FROM jobs WHERE task_id=? AND queue_name='tasks' AND job_type IN ('task_initial','task_continue') AND state IN ('queued','retry_wait','running') ORDER BY created_at DESC LIMIT 1").get(taskId);
+    if (job?.state === 'running') return this.jobs.get(job.id);
+    this.database.atomic(() => {
+      if (job?.state === 'retry_wait') this.db.prepare("UPDATE jobs SET available_at=?,updated_at=? WHERE id=? AND state='retry_wait'").run(iso(this.database.now()), iso(this.database.now()), job.id);
+      if (!job) job = this.jobs.enqueue({ type: 'task_continue', taskId, key: `prepare-retry:${taskId}:${randomUUID()}`, payload: { taskId, inputVersion } });
+      this.tasks.update(taskId, task.stateVersion, entry => { delete entry.preparedWork; entry.status = 'investigating'; entry.reasoning = { status: 'pending', at: iso(this.database.now()) }; });
+    });
+    this.store.refresh(); this.engine.changed(); this.kick(); return this.jobs.get(job.id);
+  }
+  acceptPreparedWork(taskId, { reviewToken } = {}) {
+    let task = this.tasks.get(taskId);
+    if (task?.status === 'completed' && typeof reviewToken === 'string' && task.preparedWork?.acceptedReviewToken === reviewToken) return task;
+    this.database.atomic(() => {
+      task = this.tasks.get(taskId);
+      const intent = task?.standingIntentId && this.intents.get(task.standingIntentId);
+      const work = task?.preparedWork, artifact = work && this.db.prepare('SELECT * FROM artifacts WHERE id=? AND task_id=?').get(work.id, taskId);
+      if (!task || task.control?.paused || task.privacyInvalidated || task.action || task.status !== 'ready_for_approval' || task.dirty || task.inputVersion !== task.processedInputVersion || !this.activationFor(task).activate
+        || this.tasks.hasPendingSemantic(taskId) || !intent || intent.status !== 'active' || intent.version !== task.intentVersion
+        || typeof reviewToken !== 'string' || preparedWorkReviewToken(task) !== reviewToken || work.contextVersion !== Number(this.database.get('context_version')) || work.modelVersion !== this.database.get('model_version', '0')
+        || !artifact || artifact.stale || artifact.latest_digest !== effectDigest(work.body)) throw durableError('REVIEW_CHANGED', 'The prepared work changed. Review its current version first.', 409);
+      this.sourceForTask(task);
+      const feedback = this.experiences.feedback({ kind: 'explicit_acceptance', taskId, artifactId: work.id, planStepId: artifact.plan_step_id });
+      const at = iso(this.database.now());
+      this.tasks.update(taskId, task.stateVersion, entry => {
+        entry.status = 'completed'; entry.preparedWork = { ...work, requiresReview: false, acceptedAt: at, acceptedReviewToken: reviewToken };
+        entry.completion = { kind: 'user_accepted_preparation', at, artifactId: work.id, feedbackId: feedback.id, external: false };
+        entry.reason = 'You accepted this local preparation.';
+      });
+      this.db.prepare("UPDATE jobs SET state='cancelled',updated_at=? WHERE task_id=? AND queue_name='tasks' AND state IN ('queued','retry_wait')").run(at, taskId);
+      if (task.situationId && !this.db.prepare("SELECT 1 FROM tasks WHERE situation_id=? AND status NOT IN ('completed','cancelled')").get(task.situationId)) {
+        this.db.prepare("UPDATE situations SET lifecycle_state='RESOLVED',closure_status='CONFIRMED',closure_evidence_json=?,updated_at=?,version=version+1 WHERE id=?").run(json([{ kind: 'user_acceptance', id: feedback.id }]), at, task.situationId);
+        this.database.lineage('feedback', feedback.id, 'situation', task.situationId);
+      }
+    });
+    this.store.refresh(); this.engine.changed(); this.kick(); return this.tasks.get(taskId);
+  }
   situationRecall(event) {
     if (!event || !this.flags().lexicalRecall) return [];
-    return recallCandidates(this.db, event, { now: this.database.now() }).situations.filter(item => item.method === 'entity' || item.method === 'lexical');
+    return recallCandidates(this.db, event, { now: this.database.now() }).situations.filter(item => (item.method === 'entity' || item.method === 'lexical') && this.tasks.situations.get(item.id)?.kind !== 'standing_intent');
   }
   situationTargets(event) {
     if (event.type !== 'email.received' || !event.payload?.threadId) return [];
     return this.db.prepare(`SELECT DISTINCT s.id,s.kind,(SELECT COUNT(*) FROM tasks t WHERE t.situation_id=s.id AND t.status NOT IN ('completed','cancelled')) activeTasks FROM situations s JOIN event_situation_links l ON l.situation_id=s.id
-      JOIN durable_inbox e ON e.id=l.event_id WHERE s.lifecycle_state IN ('OPEN','OBSERVING')
+      JOIN durable_inbox e ON e.id=l.event_id WHERE s.lifecycle_state IN ('OPEN','OBSERVING') AND s.kind!='standing_intent'
       AND e.provider=? AND json_extract(e.event_json,'$.payload.threadId')=? AND COALESCE(json_extract(e.event_json,'$.payload.accountId'),'')=?
       LIMIT 4`).all(event.connectorId, event.payload.threadId, event.payload.accountId || '');
   }
@@ -375,6 +739,7 @@ export class DurableRuntime {
         for (const notice of state.notifications || []) if (notice.taskId === taskId && !notice.resolvedAt) notice.resolvedAt = iso(this.database.now());
       }
     });
+    this.scheduleStandingIntents(event);
     this.engine.changed();
   }
   finishUninterpretable(event, reason, situationId) {
@@ -401,6 +766,7 @@ export class DurableRuntime {
       let released = [];
       this.database.atomic(() => { released = this.tasks.releaseSemantic(eventId); if (prior?.outcome === 'UNRELATED') this.removeUnrelatedTaskLineage(eventId, released); });
       for (const taskId of released) this.scheduleTask(taskId, `situation_delta_recovery:${eventId}`);
+      this.scheduleStandingIntents(parse(row.event_json));
       return;
     }
     const event = parse(row.event_json);
@@ -423,7 +789,7 @@ export class DurableRuntime {
       const fields = unquotedMessageFields(event.payload), boundedEvent = { subject: fields.subject.slice(0, 200), body: fields.body.slice(0, 600) };
       const missingEvidence = Array.isArray(situation.closureCondition?.missingEvidence) ? situation.closureCondition.missingEvidence.slice(0, 3).map(item => String(item).slice(0, 120)) : [];
       let proposal;
-      try { proposal = await this.engine.reasoner.extractSituationDelta({ situation: { id: situation.id, summary: situation.summary.slice(0, 200), missingEvidence }, event: boundedEvent }, `delta:${job.id}:attempt:${job.attempts}`); }
+      try { proposal = await this.engine.reasoner.extractSituationDelta({ situation: { id: situation.id, summary: situation.summary.slice(0, 200), missingEvidence }, event: boundedEvent, memoryContext: await this.activationMemoryContext([event], { situationId, job }) }, `delta:${job.id}:attempt:${job.attempts}`); }
       catch (error) {
         if (error?.code === 'REASONING_BUDGET') { error.status = 429; error.retryAfterMs = Math.max(Number(error.retryAfterMs) || 0, 60000); }
         if (classifyFailure(error) === 'permanent' || job.attempts >= job.max_attempts) {
@@ -433,7 +799,7 @@ export class DurableRuntime {
           }
         }
         throw error;
-      }
+      } finally { this.engine.pruneReasoningBudget({ finishedJobId: job.id }); }
       const delta = validateStateDelta(proposal, { ...event, payload: { subject: boundedEvent.subject, body: boundedEvent.body } });
       interpreted = delta;
       this.jobs.assert(job);
@@ -515,6 +881,7 @@ export class DurableRuntime {
     else this.recordSituationObservation(event, `state_delta_${prior.outcome.toLowerCase()}`, prior.outcome === 'UNCERTAIN_ASSOCIATION' ? null : situationId,
       activeTasks, activeTasks.length > 0, prior.outcome !== 'UNCERTAIN_ASSOCIATION');
     this.database.atomic(() => { this.tasks.releaseSemantic(eventId); if (prior.outcome === 'UNRELATED') this.removeUnrelatedTaskLineage(eventId, activeTasks); });
+    this.scheduleStandingIntents(this.store.state.events.find(item => item.id === eventId) || event);
     for (const taskId of activeTasks) this.scheduleTask(taskId, `situation_delta:${eventId}`);
   }
   flags() { return activationFlags(this.database); }
@@ -538,10 +905,21 @@ export class DurableRuntime {
     }).map(row => row.id);
   }
   scheduleStandingIntents(event) {
-    if (!this.flags().standingIntents || !event || event.type === 'timer.due' || event.meta?.originClass === 'AUTOMATION' || this.privacy.permissionRevoked(event.connectorId)) return;
-    const hits = this.intents.prefilterHits(event, { limit: 50 });
+    if (!this.flags().standingIntents || !event || event.type === 'timer.due' || ['AUTOMATION', 'AGENT_SELF'].includes(event.meta?.originClass)
+      || event.type === 'email.received' && isAutomatedSender(event.payload?.from) || this.privacy.permissionRevoked(event.connectorId) || !this.activationForEvent(event).activate) return;
+    const hits = this.intents.prefilterHits(event, { limit: Infinity });
+    if (!this.intents.globalBudgetOpen()) {
+      const availableAt = this.intents.nextGlobalBudgetAt();
+      const recorded = this.db.prepare("SELECT 1 FROM activation_decisions WHERE stage='standing_intent' AND event_a=? AND evaluator_version=? AND outcome='DEFERRED' AND reason_code='global_budget_exhausted' LIMIT 1");
+      for (const intent of hits) {
+        const payload = { intentId: intent.id, eventId: event.id, intentVersion: intent.version, activationVersion: Number(this.database.get('activation_generation:standingIntents', '0')), privacyEpoch: Number(this.database.get('privacy_epoch')) };
+        if (!recorded.get(event.id, intent.id)) this.intents.record(intent.id, event.id, 'DEFERRED', 'global_budget_exhausted');
+        this.jobs.enqueue({ type: 'standing_intent_match', key: `intent-deferred:${intent.id}:${event.id}:v${intent.version}`, availableAt, payload });
+      }
+      return;
+    }
     hits.forEach((intent, index) => {
-      const payload = { intentId: intent.id, eventId: event.id, intentVersion: intent.version, privacyEpoch: Number(this.database.get('privacy_epoch')) };
+      const payload = { intentId: intent.id, eventId: event.id, intentVersion: intent.version, activationVersion: Number(this.database.get('activation_generation:standingIntents', '0')), privacyEpoch: Number(this.database.get('privacy_epoch')) };
       if (index < 3) {
         const job = this.jobs.enqueue({ type: 'standing_intent_match', key: `intent:${intent.id}:${event.id}:v${intent.version}`, payload });
         this.database.lineage('event', event.id, 'job', job.id);
@@ -552,30 +930,45 @@ export class DurableRuntime {
       this.jobs.enqueue({ type: 'standing_intent_match', key: `intent-deferred:${intent.id}:${event.id}:v${intent.version}`, availableAt: iso(this.database.now() + Math.min(intent.budget.windowMs, 3600000)), payload });
     });
   }
+  #deferStandingIntent(job, intent, eventId, { intentBudgetOpen, globalBudgetOpen }) {
+    // Wait for both ceilings: the intent's own window and the shared window.
+    const availableAt = [intentBudgetOpen ? null : this.intents.nextBudgetAt(intent), globalBudgetOpen ? null : this.intents.nextGlobalBudgetAt()].filter(Boolean).sort().pop();
+    this.database.atomic(() => {
+      this.jobs.assert(job);
+      this.intents.record(intent.id, eventId, 'DEFERRED', intentBudgetOpen ? 'global_budget_exhausted' : 'budget_exhausted');
+      const generation = Number(job.payload.deferralGeneration || 0) + 1;
+      const deferred = this.jobs.enqueue({ type: 'standing_intent_match', key: `intent-budget:${intent.id}:${eventId}:v${intent.version}:a${generation}`, availableAt, payload: { ...job.payload, deferralGeneration: generation } });
+      this.database.lineage('event', eventId, 'job', deferred.id);
+      this.database.lineage('standing_intent', intent.id, 'job', deferred.id);
+    });
+  }
   async runStandingIntent(job) {
     const { intentId, eventId, intentVersion, privacyEpoch } = job.payload;
+    const activationCurrent = () => this.flags().standingIntents && Number(job.payload.activationVersion || 0) === Number(this.database.get('activation_generation:standingIntents', '0'));
+    if (!activationCurrent()) return;
     if (privacyEpoch !== Number(this.database.get('privacy_epoch')) || this.privacy.forgotten('event', eventId)) return;
     const intent = this.intents.get(intentId);
     const row = this.db.prepare('SELECT event_json FROM durable_inbox WHERE id=?').get(eventId);
     if (!intent || !row || intent.version !== intentVersion || intent.status !== 'active') return;
     const event = this.store.state.events.find(item => item.id === eventId) || parse(row.event_json);
-    if (!this.intents.matchesPrefilter(intent, event)) return;
-    if (!this.intents.budgetOpen(intent)) {
-      this.database.atomic(() => {
-        this.jobs.assert(job);
-        this.intents.record(intent.id, eventId, 'DEFERRED', 'budget_exhausted');
-        this.jobs.enqueue({ type: 'standing_intent_match', key: `intent-budget:${intent.id}:${eventId}:v${intent.version}:a${job.attempts}`, availableAt: iso(this.database.now() + Math.min(intent.budget.windowMs, 3600000)), payload: job.payload });
-      });
+    if (!this.intents.matchesPrefilter(intent, event) || !this.activationForEvent(event).activate) return;
+    const intentBudgetOpen = this.intents.budgetOpen(intent), globalBudgetOpen = this.intents.globalBudgetOpen();
+    if (!intentBudgetOpen || !globalBudgetOpen) {
+      this.#deferStandingIntent(job, intent, eventId, { intentBudgetOpen, globalBudgetOpen });
       return;
     }
     let matched = !intent.predicate, quote = null;
+    const memoryContext = intent.predicate ? await this.activationMemoryContext([event], { intent, job }) : { contextVersion: this.memory.version(), memories: [] };
     if (intent.predicate) {
       if (typeof this.engine.reasoner?.assessStandingIntent !== 'function' || !this.engine.reasoner.available?.()) {
         this.database.atomic(() => this.intents.record(intent.id, eventId, 'UNKNOWN', 'semantic_unavailable'));
         return;
       }
-      const proposal = await this.engine.reasoner.assessStandingIntent({ predicate: intent.predicate, event: { id: event.id, subject: String(event.payload?.subject || '').slice(0, 200), body: String(event.payload?.body || '').slice(0, 600) } }, `intent:${job.id}:${job.attempts}`);
-      const fields = unquotedMessageFields(event.payload);
+      const fields = event.type === 'email.received' ? unquotedMessageFields(event.payload) : eventContext(event);
+      let proposal;
+      try { proposal = await this.engine.reasoner.assessStandingIntent({ predicate: intent.predicate, memoryContext, event: { id: event.id, subject: fields.subject.slice(0, 200), body: fields.body.slice(0, 600) } }, `intent:${job.id}:${job.attempts}`); }
+      finally { this.engine.pruneReasoningBudget({ finishedJobId: job.id }); }
+      if (!activationCurrent()) return;
       quote = proposal?.quote;
       matched = proposal?.matched === true && typeof quote === 'string' && quote.length > 0 && (`${fields.subject}\n${fields.body}`).includes(quote) && proposal.confidence >= 0.8;
       if (!matched) {
@@ -583,17 +976,47 @@ export class DurableRuntime {
         return;
       }
     }
-    if (privacyEpoch !== Number(this.database.get('privacy_epoch')) || this.privacy.permissionRevoked(event.connectorId) || this.privacy.forgotten('event', eventId)) return;
+    if (memoryContext.contextVersion !== this.memory.version()) throw durableError('CONTEXT_CHANGED', 'Memory changed during activation; retry with fresh context.', 503);
+    if (!activationCurrent() || !this.activationForEvent(event).activate || privacyEpoch !== Number(this.database.get('privacy_epoch')) || this.privacy.permissionRevoked(event.connectorId) || this.privacy.forgotten('event', eventId)) return;
+    // The model call may have consumed the last slot. Recheck before creating a
+    // Situation so a match won the race is deferred, not silently dropped.
+    const commitIntent = this.intents.get(intentId);
+    if (!commitIntent || commitIntent.version !== intentVersion || commitIntent.status !== 'active') return;
+    const commitIntentBudgetOpen = this.intents.budgetOpen(commitIntent), commitGlobalBudgetOpen = this.intents.globalBudgetOpen();
+    if (!commitIntentBudgetOpen || !commitGlobalBudgetOpen) {
+      this.#deferStandingIntent(job, commitIntent, eventId, { intentBudgetOpen: commitIntentBudgetOpen, globalBudgetOpen: commitGlobalBudgetOpen });
+      return;
+    }
     this.database.atomic(() => {
       this.jobs.assert(job);
       const current = this.intents.get(intentId);
-      if (!current || current.version !== intentVersion || current.status !== 'active' || !this.intents.matchesPrefilter(current, event) || !this.intents.budgetOpen(current)) return;
+      if (memoryContext.contextVersion !== this.memory.version()) throw durableError('CONTEXT_CHANGED', 'Memory changed before activation commit.', 503);
+      if (typeof current?.desiredOutcome !== 'string' || !current.desiredOutcome.trim()) throw durableError('INVALID_INTENT_OUTCOME', 'The standing intent has no grounded outcome.', 400);
+      if (!current || current.version !== intentVersion || current.status !== 'active' || !this.intents.matchesPrefilter(current, event) || !this.intents.budgetOpen(current) || !this.intents.globalBudgetOpen()) return;
       if (privacyEpoch !== Number(this.database.get('privacy_epoch')) || this.privacy.permissionRevoked(event.connectorId) || this.privacy.forgotten('event', eventId)) return;
       if (this.db.prepare("SELECT 1 FROM activation_decisions WHERE stage='standing_intent' AND event_a=? AND evaluator_version=? AND outcome='MATCHED'").get(eventId, intentId)) return;
-      const situation = this.tasks.situations.create({ kind: 'standing_intent', summary: quote || current.description, lifecycleState: 'OBSERVING',
+      const existing = this.db.prepare(`SELECT DISTINCT s.id FROM situations s JOIN event_situation_links l ON l.situation_id=s.id JOIN durable_inbox e ON e.id=l.event_id
+        WHERE s.standing_intent_id=? AND s.lifecycle_state IN ('OPEN','OBSERVING') AND e.provider=? AND COALESCE(json_extract(e.event_json,'$.payload.accountId'),'')=?
+        AND ((? IS NOT NULL AND json_extract(e.event_json,'$.payload.threadId')=?) OR (? IS NULL AND json_extract(e.event_json,'$.payload.id')=?)) ORDER BY s.id LIMIT 1`)
+        .get(current.id, event.connectorId, event.payload.accountId || '', event.payload.threadId || null, event.payload.threadId || null, event.payload.threadId || null, event.payload.id);
+      const situation = existing ? this.tasks.situations.get(existing.id) : this.tasks.situations.create({ kind: 'standing_intent', summary: quote || current.description, lifecycleState: 'OBSERVING',
         closureCondition: { kind: 'AWAIT_EVIDENCE', missingEvidence: [current.desiredOutcome], reevaluationCondition: current.predicate || 'When the prefilter matches again.' },
         scope: { ...current.scope, standingIntentId: current.id }, sourceEventIds: [eventId], associationMethod: 'standing_intent', standingIntentId: current.id });
-      if (current.autonomy?.maxAutonomy === 'prepare') this.tasks.createOrLoad({ candidateKey: `intent:${current.id}:${eventId}`, situationId: situation.id, dedupTaskKey: `intent:${current.id}`, eventId, data: { status: 'waiting_for_information', subject: current.description, sourceConnectorId: event.connectorId, guidanceReviewRequired: true, request: { text: current.desiredOutcome, deliverable: 'draft' } } });
+      if (existing) this.tasks.situations.linkEvent(situation.id, eventId, 'standing_intent');
+      if (current.autonomy?.maxAutonomy === 'prepare') {
+        const source = { kind: event.type === 'email.received' ? 'email' : event.type === 'document.modified' ? 'document' : event.type, id: event.payload.id, connectorId: event.connectorId, eventId, from: event.payload.from || null, accountId: event.payload.accountId || null };
+        const project = current.scope.projectId || (current.scope.type === 'project' ? current.scope.key : null);
+        const subjectEntity = typeof project === 'string' ? project : null;
+        const created = this.tasks.createOrLoad({ candidateKey: `intent:${current.id}:${eventId}`, situationId: situation.id, dedupTaskKey: `intent:${current.id}`, eventId, data: { kind: 'standing_intent', standingIntentId: current.id, intentVersion: current.version, status: 'waiting_for_information', subject: current.description, sender: event.payload.from || null, sourceConnectorId: event.connectorId, documentId: event.type === 'document.modified' ? event.payload.id : event.payload.documentId || null, guidanceReviewRequired: true, request: { text: current.desiredOutcome, subjectEntity, deliverable: 'draft', source } } });
+        if (!created.createdNew) {
+          const task = this.tasks.get(created.taskId);
+          const fresh = task.preparedWork?.inputVersion === task.inputVersion && task.preparedWork.sourceEventIds.includes(eventId)
+            && task.preparedWork.contextVersion === Number(this.database.get('context_version')) && task.preparedWork.modelVersion === this.database.get('model_version', '0')
+            && task.intentVersion === current.version && task.request.text === current.desiredOutcome;
+          this.tasks.update(task.id, task.stateVersion, entry => { entry.request = { ...entry.request, source, text: current.desiredOutcome, subjectEntity }; entry.sender = event.payload.from || null; entry.intentVersion = current.version; if (event.type === 'document.modified') entry.documentId = event.payload.id; if (!fresh) { delete entry.preparedWork; entry.status = 'waiting_for_information'; } });
+          if (!task.control?.paused) this.jobs.enqueue({ type: 'task_continue', taskId: task.id, key: `standing-update:${task.id}:${this.tasks.get(task.id).inputVersion}:v${current.version}`, payload: { taskId: task.id } });
+        }
+      }
       this.intents.record(current.id, eventId, 'MATCHED', current.predicate ? 'semantic_prefilter' : 'prefilter', situation.id);
       this.database.lineage('standing_intent', current.id, 'situation', situation.id);
     });
@@ -663,11 +1086,11 @@ export class DurableRuntime {
       longest.event[longest.field] = longest.event[longest.field].slice(0, Math.floor(longest.event[longest.field].length / 2));
     }
     let proposed;
-    try { proposed = await this.engine.reasoner.assessSituationPair({ events: input }, `pair:${job.id}:attempt:${job.attempts}`); }
+    try { proposed = await this.engine.reasoner.assessSituationPair({ events: input, memoryContext: await this.activationMemoryContext(events, { job }) }, `pair:${job.id}:attempt:${job.attempts}`); }
     catch (error) {
       if (error?.code === 'REASONING_BUDGET') { error.status = 429; error.retryAfterMs = Math.max(Number(error.retryAfterMs) || 0, 60000); }
       throw error;
-    }
+    } finally { this.engine.pruneReasoningBudget({ finishedJobId: job.id }); }
     const result = validatePairAssessment(proposed, input.map(event => ({ id: event.id, payload: { subject: event.subject, body: event.body } })));
     const currentEvents = eventIds.map(id => this.store.state.events.find(event => event.id === id));
     if (!result) {
@@ -713,6 +1136,7 @@ export class DurableRuntime {
     this.kick(); return job;
   }
   configureSituationProbe(situationId, { sourceEventId, scheduledAt }) {
+    if (!this.flags().coverageProbes) throw durableError('PROBES_DISABLED', 'Coverage probes are disabled.', 409);
     const at = Date.parse(scheduledAt);
     if (!Number.isFinite(at) || typeof sourceEventId !== 'string' || !sourceEventId) throw durableError('INVALID_PROBE', 'Choose an existing source event and a valid reevaluation time.', 400);
     const result = this.database.atomic(() => {
@@ -733,6 +1157,8 @@ export class DurableRuntime {
     this.kick(); return result;
   }
   async probeSituation(situation, eventId, job) {
+    if (!this.flags().coverageProbes) return null;
+    const activationVersion = this.database.get('activation_generation:coverageProbes', '0');
     const targets = situation.closureCondition?.probeTargets;
     if (!Array.isArray(targets) || targets.length !== 1 || targets[0]?.kind !== 'EXPECTED_REPLY') return null;
     const target = targets[0], epoch = Number(this.database.get('privacy_epoch')), contextVersion = Number(this.database.get('context_version'));
@@ -740,7 +1166,8 @@ export class DurableRuntime {
       JOIN source_records s ON s.kind='event' AND s.id=e.id AND s.active=1 WHERE e.id=? AND l.situation_id=?`).get(target.sourceEventId, situation.id);
     const event = parse(source?.event_json), connector = this.connectorFor(target.connectorId), wasLive = Boolean(connector?.live);
     const health = this.store.state.connectorStatus?.[target.connectorId], watermark = this.store.state.cursors?.[target.connectorId]?.gmail?.historyId;
-    const healthAt = Date.parse(health?.lastSyncAt || ''), fresh = health?.ok === true && Number.isFinite(healthAt)
+    const observation = parse(this.database.get(`connector_observation:${target.connectorId}`, 'null'));
+    const healthAt = Date.parse(observation?.observedAt || health?.lastSyncAt || ''), fresh = health?.ok === true && (!observation || observation.complete && observation.watermark === watermark) && Number.isFinite(healthAt)
       && healthAt <= this.database.now() && this.database.now() - healthAt <= 600000 && typeof watermark === 'string' && watermark.length > 0;
     let outcome = 'PROBE_INCOMPLETE', foundEvent = null;
     const sourceTime = Date.parse(event?.payload?.receivedAt || event?.at);
@@ -752,7 +1179,8 @@ export class DurableRuntime {
     else if (supported) {
       try {
         this.noteObservation('network');
-        const observation = await this.gateway.read(() => connector.probeExpectedReply(target));
+        const observation = await this.gateway.read(signal => connector.probeExpectedReply(target, { signal }));
+        if (!this.flags().coverageProbes || this.database.get('activation_generation:coverageProbes', '0') !== activationVersion) return null;
         if (observation?.status === 'NOT_FOUND' && observation.complete === true) outcome = target.deadlineAt && Date.parse(target.deadlineAt) <= this.database.now() ? 'DEADLINE_PASSED' : 'EXPECTED_EVENT_ABSENT';
         else if (observation?.status === 'CANCELLED' && observation.complete === true) outcome = 'EXPLICIT_CANCELLATION';
         else if (observation?.status === 'CONTRADICTION') outcome = 'SOURCE_CONTRADICTION';
@@ -762,17 +1190,18 @@ export class DurableRuntime {
             && foundEvent.payload?.id === observation.messageId && normalizeAddress(foundEvent.payload?.from) === target.expectedSender
             && foundEvent.meta?.originClass !== 'AUTOMATION' && !isAutomatedSender(foundEvent.payload.from)
             && !this.privacy.forgotten('event', foundEvent.id)
-            && !this.privacy.forgotten('provider_event', `${target.connectorId}:${foundEvent.providerEventId || foundEvent.id}`)) outcome = 'EXPECTED_EVENT_PRESENT';
+            && !this.privacy.forgotten('provider_event', `${target.connectorId}:${eventDeliveryKey(foundEvent)}`)) outcome = 'EXPECTED_EVENT_PRESENT';
         }
       } catch { outcome = 'PROBE_INCOMPLETE'; }
     }
     this.jobs.assert(job);
     try { this.gateway.authorizeRead(); } catch { return null; }
     const current = this.tasks.situations.get(situation.id);
-    if (!current || current.version !== situation.version || epoch !== Number(this.database.get('privacy_epoch')) || contextVersion !== Number(this.database.get('context_version'))
+    if (!this.flags().coverageProbes || this.database.get('activation_generation:coverageProbes', '0') !== activationVersion || !current || current.version !== situation.version || epoch !== Number(this.database.get('privacy_epoch')) || contextVersion !== Number(this.database.get('context_version'))
       || this.privacy.forgotten('event', target.sourceEventId) || this.privacy.permissionRevoked(target.connectorId) || connector !== this.connectorFor(target.connectorId) || wasLive && (!connector?.live || connector.config?.readGmail === false)) return null;
     const currentHealth = this.store.state.connectorStatus?.[target.connectorId], currentWatermark = this.store.state.cursors?.[target.connectorId]?.gmail?.historyId;
-    if (['EXPECTED_EVENT_ABSENT', 'DEADLINE_PASSED'].includes(outcome) && (!fresh || currentHealth?.ok !== true || currentHealth.lastSyncAt !== health.lastSyncAt || currentWatermark !== watermark)) outcome = 'PROBE_INCOMPLETE';
+    if (['EXPECTED_EVENT_ABSENT', 'DEADLINE_PASSED'].includes(outcome) && (!fresh || currentHealth?.ok !== true || currentWatermark !== watermark
+      || (observation ? json(parse(this.database.get(`connector_observation:${target.connectorId}`, 'null'))) !== json(observation) : currentHealth.lastSyncAt !== health.lastSyncAt))) outcome = 'PROBE_INCOMPLETE';
     this.database.atomic(() => {
       this.jobs.assert(job);
       this.db.prepare('UPDATE situations SET closure_condition_json=?,source_watermark_json=?,updated_at=?,version=version+1 WHERE id=? AND version=?')
@@ -811,11 +1240,55 @@ export class DurableRuntime {
     });
   }
   planningContext(taskId) {
+    const manifest = this.contextManifest(taskId);
+    if (!manifest) return null;
+    const task = this.tasks.get(taskId);
+    const failures = task ? this.failureSignals().observations.slice(0, 3) : [];
+    return { ...manifest, selected: manifest.selected.map(item => ({ id: item.id, kind: item.kind })), ...(failures.length ? { failureObservations: failures } : {}) };
+  }
+  /** Sources this process may read. Live connectors come from the resolver.
+   * Simulation mail is authorized by the runtime mode, never by event text. */
+  #authorizedSources() {
+    const sources = new Set();
+    for (const id of ['google', 'microsoft', 'github', 'slack', 'notion', 'local_files', 'apple_notes', 'apple_reminders', 'todoist', 'simulated']) {
+      const connector = this.connectorFor(id);
+      if (!connector?.live || this.privacy.permissionRevoked(connector.id || id)) continue;
+      sources.add(id);
+      if (typeof connector.kind === 'string' && connector.kind) sources.add(connector.kind);
+    }
+    if (this.engine.mode !== 'live' && !this.privacy.permissionRevoked('simulated')) sources.add('simulated');
+    return [...sources];
+  }
+  /** Recompute failure statements from authorized mail already stored locally. */
+  failureSignals() {
+    const events = (this.store.state.events || []).filter(event => {
+      if (!event?.id || this.privacy.forgotten('event', event.id)) return false;
+      const connectorId = event.connectorId || event.source;
+      if (connectorId && (this.privacy.permissionRevoked(connectorId) || this.privacy.forgotten('provider_event', `${event.connectorId}:${eventDeliveryKey(event)}`))) return false;
+      return true;
+    });
+    const report = observeFailureSignals({ events }, { authorizedSources: this.#authorizedSources() });
+    const observations = report.observations.slice(0, 8).map(item => ({
+      eventRef: item.eventRef,
+      evidence: item.evidence.map(entry => ({ marker: entry.marker, basis: entry.basis, field: entry.field, excerpt: entry.excerpt })),
+      signature: item.signature
+    }));
+    const signatureCounts = {};
+    for (const item of observations) signatureCounts[item.signature] = report.signatureCounts[item.signature] || 1;
+    return { rule: report.rule, ruleVersion: report.ruleVersion, counts: report.counts, observations, omitted: Math.max(0, report.observations.length - observations.length), signatureCounts };
+  }
+  contextManifest(taskId) {
     const scope = this.current(); if (scope?.taskId !== taskId || !scope.context) return null;
-    return { memory: scope.context.memories.slice(0, 2).map(memory => ({ id: memory.id, text: memory.content.slice(0, 250) })),
-      experiences: scope.context.experiences.slice(0, 3).map(experience => ({ id: experience.id, kind: experience.kind, status: experience.status, instruction: experience.instruction_text.slice(0, 180), advisoryOnly: experience.advisoryOnly })),
-      relatedEvents: scope.context.events.slice(0, 2).map(event => ({ id: event.id, type: event.type, text: String(event.payload?.body || event.payload?.content || event.payload?.title || '').slice(0, 200) })),
-      conflicts: scope.context.arbitration.conflicts };
+    const task = this.tasks.get(taskId);
+    return planningContextManifest(scope.context, { taskId, inputVersion: task?.inputVersion, privacyEpoch: task?.privacyEpoch, guidance: task?.guidance });
+  }
+  contextReady(taskId) {
+    const scope = this.current(), manifest = this.contextManifest(taskId);
+    if (!manifest) return !this.tasks.get(taskId)?.contextReadRequired;
+    return manifest.deferred.every(({ id }) => {
+      const item = scope.context.memories.find(item => item.id === id) || scope.context.experiences.find(item => item.id === id);
+      return item && (scope.contextReadOffsets?.get(id) || 0) >= (item.content ?? item.instruction_text).length;
+    });
   }
   tracePlan(task, run, context) {
     for (const spec of task.evidence?.plan?.specs || []) this.experiences.step({ taskRunId: run.id, logicalStepId: `probe:${spec.id}`, stepKind: 'evidence_probe', actionFamily: 'evidence.read', expectedEffect: { criterionId: spec.criterionId, concept: spec.concept }, experiences: [] });
@@ -830,14 +1303,16 @@ export class DurableRuntime {
     }
   }
   wrapReadTools(tools, taskId, { provider = 'mcp' } = {}) {
-    return tools.map(tool => ({ ...tool, execute: async (id, args, signal) => {
+    return tools.map(tool => isLocalMemoryWriter(tool) || tool.effect === 'write' ? tool : ({ ...tool, execute: async (id, args, signal) => {
       const scope = this.current();
       if (!scope?.run || scope.taskId !== taskId) throw durableError('TASK_LEASE_REQUIRED', 'A read tool requires an active durable task run.');
+      // A read is cancelled either by its own call or by the job deadline.
+      const combined = scope.signal && signal ? AbortSignal.any([scope.signal, signal]) : scope.signal || signal || null;
       this.tasks.preResume(scope.run, scope.job);
       const key = `read:${scope.run.id}:${id}`;
       const intent = this.ledger.intent({ taskId, run: scope.run, job: scope.job, provider: tool.contextProvider === 'workspace' ? 'workspace' : provider, tool: tool.name, actionFamily: 'context.read', resourceId: tool.name, key,
         effect: { type: 'read', tool: tool.name, argumentsDigest: effectDigest(args) }, payload: {}, isWrite: false });
-      return this.ledger.dispatch(intent, { run: scope.run, job: scope.job, signal, send: currentSignal => {
+      return this.ledger.dispatch(intent, { run: scope.run, job: scope.job, signal: combined, send: currentSignal => {
         this.gateway.authorizeRead();
         return tool.execute(id, args, currentSignal);
       } });
@@ -852,10 +1327,13 @@ export class DurableRuntime {
       return parse(existing.result_json);
     }
     if (existing && !['failed', 'cancelled'].includes(existing.status)) throw Object.assign(durableError('RECONCILIATION_REQUIRED', 'This external intent must be reconciled before retry.'), { ambiguous: true });
-    let job, run, step, intent;
+    if (actionFamily === 'email.send') await this.recheckSourceMessage(task);
+    let job, run, step, intent, claimIds = [], claimsCommitted = false, settledError = null;
     try {
+      const prepared = await this.#preparedMemories(task);
       void this.store.state; // Refresh the compatibility view before the short SQL transaction.
       this.database.atomic(() => {
+        claimIds = [];
         const attempt = this.db.prepare("SELECT COUNT(*) n FROM jobs WHERE queue_name='effects' AND job_type='external_dispatch' AND json_extract(payload_json,'$.key')=?").get(key).n;
         const enqueued = this.jobs.enqueue({ queue: 'effects', type: 'external_dispatch', key: `${key}:attempt:${attempt}`, taskId: task.id, payload: { taskId: task.id, key } });
         job = this.jobs.claim(`${this.owner}:effect:${randomUUID()}`, { queue: 'effects', id: enqueued.id });
@@ -871,13 +1349,15 @@ export class DurableRuntime {
           if (slot) {
             const time = this.coordination.claim({ kind: 'time', scopeKey: slot, situationId: holder, taskId: current.id });
             if (time.blocked) throw durableError('RESOURCE_CONTENTION', 'Another Situation holds this time.');
+            if (time.claimId) claimIds.push(time.claimId);
           }
           const reserved = this.coordination.claim({ kind: 'resource', scopeKey: `${providerId}:${resourceId}`, situationId: holder, taskId: current.id });
           if (reserved.blocked) throw durableError('RESOURCE_CONTENTION', 'Another Situation holds this resource.');
+          if (reserved.claimId) claimIds.push(reserved.claimId);
         }
         const expectedInputVersion = task.action?.inputVersion ?? task.inputVersion;
         if (expectedInputVersion !== current.inputVersion) throw durableError('TASK_DIRTY', 'The approved context changed. Review a refreshed action before sending.');
-        const context = this.buildContext(current, run);
+        const context = this.buildContext(current, run, prepared);
         if (!context.activation.activate && task.action?.permission !== 'user_approved' && !task.patchAuthorization) throw durableError('ACTIVATION_SUPPRESSED', 'An explicit user policy suppresses this task action.', 403);
         if (context.activation.requiresReview && task.action?.permission !== 'user_approved' && !task.patchAuthorization) throw durableError('REVIEW_REQUIRED', 'An explicit user policy requires review of this exact action.', 403);
         if (context.arbitration.conflicts.length && task.action?.permission !== 'user_approved' && !task.patchAuthorization) throw durableError('EXPERIENCE_CONFLICT', 'Conflicting guidance requires clarification before this action.');
@@ -892,7 +1372,11 @@ export class DurableRuntime {
           expectedInputVersion, authorize });
         this.experiences.transitionStep(step.id, 'approved', 'executing');
       });
+      claimsCommitted = true;
       this.noteObservation('external');
+      // Writes take no worker abort signal: cancelling between the intent and
+      // its dispatch would leave an undefined external state. The execution
+      // deadline and lease fencing own write cancellation.
       const result = await this.ledger.dispatch(intent, { run, job, send, verify, deferDispatch });
       this.database.atomic(() => {
         if (verify) {
@@ -907,10 +1391,46 @@ export class DurableRuntime {
       });
       return result;
     } catch (error) {
+      settledError = error;
       const execution = this.ledger.byKey(key);
       if (!execution || execution.status === 'cancelled' || execution.status === 'failed' && execution.last_error_class === 'confirmed_absent') error.definitiveNoEffect = true;
       if (job && this.jobs.owns(job)) this.jobs.fail(job, error); throw error;
+    } finally {
+      if (claimsCommitted) this.#settleCoordination(claimIds, this.ledger.byKey(key), settledError);
     }
+  }
+  #settleCoordination(claimIds, execution, error = null) {
+    if (!claimIds?.length || !execution) return;
+    const status = execution.status;
+    if (!status || status === 'unknown' || status === 'dispatched' || status === 'intent') return;
+    if (error?.ambiguous && !['accepted', 'verified', 'cancelled', 'failed'].includes(status)) return;
+    if (!['accepted', 'verified', 'cancelled', 'failed'].includes(status)) return;
+    for (const id of claimIds) this.coordination.release(id);
+  }
+  releaseTaskCoordination(taskId) {
+    if (!taskId) return;
+    for (const claim of this.coordination.held()) if (claim.task_id === taskId) this.coordination.release(claim.id);
+  }
+  /**
+   * Re-read the message a reply answers, just before sending. A message the
+   * provider confirms is gone stops the send and invalidates the task. A read
+   * that fails or cannot decide leaves the send to the existing checks: it is
+   * a freshness check, not a new availability requirement.
+   */
+  async recheckSourceMessage(task) {
+    const messageId = task.sourceEmailId || task.request?.source?.id;
+    const message = messageId && (this.store.state.inbox || []).find(item => item.id === messageId);
+    const connectorId = task.sourceConnectorId || message?.connectorId;
+    const connector = connectorId && this.connectorFor(connectorId);
+    if (!messageId || !connector?.live || typeof connector.sourceMessageState !== 'function' || this.privacy.permissionRevoked(connectorId)) return { status: 'unknown' };
+    let state;
+    try { state = await this.gateway.read(() => connector.sourceMessageState(messageId, { threadTs: message?.slackThreadTs || null })); }
+    catch { return { status: 'unknown' }; }
+    if (state?.status !== 'missing') return state || { status: 'unknown' };
+    const reason = String(state.reason || 'deleted').slice(0, 80);
+    this.engine.ingest({ id: `${connectorId}:recheck-removed:${messageId}`, providerEventId: `recheck-removed:${messageId}`, type: 'email.unavailable',
+      source: message?.source || connectorId, connectorId, at: iso(this.database.now()), payload: { id: messageId, reason } });
+    throw Object.assign(durableError('SOURCE_UNAVAILABLE', 'The source message was removed before sending. Nothing was sent.'), { definitiveNoEffect: true });
   }
   normalizeLookup(key, provider, result) {
     const execution = this.ledger.byKey(key);
@@ -939,6 +1459,7 @@ export class DurableRuntime {
         }
       });
     }
+    this.releaseTaskCoordination(taskId);
   }
   confirmCurrentContext(taskId, receipt) {
     const task = this.store.state.tasks[taskId];
@@ -959,7 +1480,8 @@ export class DurableRuntime {
     return steps.map(step => this.experiences.feedback({ kind, taskId, planStepId: step.id }));
   }
   providerFor(execution) {
-    if (['email.draft', 'notion.page.create', 'notes.note.create'].includes(execution.action_family)) return this.artifacts.recoveryProvider(execution);
+    if (['connector.request', 'mcp.tool'].includes(execution.action_family)) return this.connectorActions.recoveryProvider(execution);
+    if (['email.draft', 'notion.page.create', 'notes.note.create', 'reminders.reminder.create'].includes(execution.action_family)) return this.artifacts.recoveryProvider(execution);
     if (execution.action_family === 'document.patch') {
       if (execution.privacy_redacted) return null;
       const effect = parse(execution.effect_signature_json), document = this.store.state.documents[effect.documentId];
@@ -978,6 +1500,7 @@ export class DurableRuntime {
   async reconcileExecution(id, { assertOwned = () => {} } = {}) {
     const execution = this.ledger.get(id); if (!execution) return;
     const result = await this.ledger.reconcile(id, this.providerFor(execution), { assertOwned });
+    if (result.status === 'not_found') this.releaseTaskCoordination(execution.task_id);
     const current = this.ledger.get(id);
     if (result.status === 'found' && current && !current.privacy_redacted) {
       const task = this.tasks.get(current.task_id);
@@ -985,7 +1508,7 @@ export class DurableRuntime {
       if (task && !task.privacyInvalidated && current.action_family === 'document.patch') {
         this.store.mutateIfChanged(state => { for (const patch of Object.values(state.documentPatches || {})) if (patch.taskId === task.id && `patch:${patch.id}:${patch.baseDocument.version}` === current.idempotency_key && ['applying', 'uncertain'].includes(patch.status)) { patch.status = 'applied'; patch.result = { status: 'verified', applied: true, provider: current.provider, readbackVerified: true }; delete patch.writeAttemptId; } });
       }
-      if (task && !task.privacyInvalidated && ['email.draft', 'notion.page.create', 'notes.note.create'].includes(current.action_family)) {
+      if (task && !task.privacyInvalidated && ['email.draft', 'notion.page.create', 'notes.note.create', 'reminders.reminder.create'].includes(current.action_family)) {
         const request = task.artifactRequests?.find(item => item.key === current.idempotency_key);
         if (request) this.artifacts.record(task.id, request.id, { status: 'verified', receipt: parse(current.result_json), error: null });
       }
@@ -994,54 +1517,125 @@ export class DurableRuntime {
     if (result.status !== 'unknown') for (const request of this.db.prepare("SELECT id FROM privacy_requests WHERE state='pending' ORDER BY created_at LIMIT 100").all()) await this.privacy.finish(request.id);
     if (result.status === 'unknown') throw Object.assign(new Error('External reconciliation still requires provider confirmation.'), { status: 503 });
   }
-  recoverPreparedDispatch(job, { recovering = false } = {}) {
-    if (recovering) { const current = this.jobs.get(job.id); if (current?.state !== 'recovery_required' || current.lease_token !== job.lease_token) throw durableError('LEASE_LOST', 'The recovery state changed.'); }
-    else this.jobs.assert(job);
-    const execution = this.ledger.byKey(job.payload.key);
-    if (execution) {
-      if (['intent', 'dispatched', 'accepted', 'unknown'].includes(execution.status)) this.jobs.enqueue({ queue: 'effects', type: 'reconcile_execution', key: `prepared:${execution.id}`, taskId: execution.task_id, payload: { executionId: execution.id } });
-      return;
-    }
-    // All shipped adapters commit an intent before dispatch. A queued dispatch
-    // without that intent was interrupted before it could contact the provider.
+  /**
+   * Record that a prepared external action never left this process.
+   *
+   * Every adapter commits a ledger intent before dispatch, and `execute()`
+   * persists `lookup`/`sending` before it can reach a provider. An approved
+   * action with no intent therefore provably produced no external effect, so it
+   * is marked confirmed-absent instead of uncertain. That avoids a bogus
+   * resource claim and a provider lookup that can only return "not found".
+   */
+  markNotDispatched(taskId, key) {
     this.store.mutateIfChanged(state => {
-      const task = state.tasks[job.task_id];
+      const task = state.tasks[taskId];
       if (!task || task.privacyInvalidated || task.control?.paused || ['cancelled', 'completed'].includes(task.status)) return;
-      if (task.action?.idempotencyKey === job.payload.key && ['executing', 'uncertain'].includes(task.action.status)) {
-        task.action.status = 'confirmed_absent'; task.status = 'blocked';
+      if (task.action?.idempotencyKey === key && ['executing', 'uncertain', 'accepted_live'].includes(task.action.status)) {
+        task.action.status = 'confirmed_absent'; task.action.phase = 'not_dispatched'; task.status = 'blocked';
         task.reason = 'Interrupted before tool dispatch. Nothing was sent by this attempt; retry requires a separate user action.';
       }
-      for (const patch of Object.values(state.documentPatches || {})) if (patch.taskId === task.id && `patch:${patch.id}:${patch.baseDocument.version}` === job.payload.key && ['applying', 'uncertain'].includes(patch.status)) {
+      for (const patch of Object.values(state.documentPatches || {})) if (patch.taskId === task.id && `patch:${patch.id}:${patch.baseDocument.version}` === key && ['applying', 'uncertain'].includes(patch.status)) {
         patch.status = 'prepared'; patch.result = { status: 'not_dispatched', applied: false }; delete patch.writeAttemptId;
       }
     });
     this.engine.changed();
   }
+  recoverPreparedDispatch(job, { recovering = false } = {}) {
+    if (recovering) { const current = this.jobs.get(job.id); if (current?.state !== 'recovery_required' || current.lease_token !== job.lease_token) throw durableError('LEASE_LOST', 'The recovery state changed.'); }
+    else this.jobs.assert(job);
+    const execution = this.ledger.byKey(job.payload.key);
+    if (execution) {
+      if (['intent', 'dispatched', 'accepted', 'unknown'].includes(execution.status)) this.jobs.enqueue({ queue: 'reconcile', type: 'reconcile_execution', key: `prepared:${execution.id}`, taskId: execution.task_id, payload: { executionId: execution.id } });
+      return;
+    }
+    // All shipped adapters commit an intent before dispatch. A queued dispatch
+    // without that intent was interrupted before it could contact the provider.
+    this.markNotDispatched(job.task_id, job.payload.key);
+  }
+  /**
+   * A job that reached `dead` is a terminal failure the user has to see.
+   *
+   * The task keeps its evidence and draft; it stops pretending to be in
+   * progress and says why. This never authorizes a retry: `reopen` runs the
+   * normal re-planning path, and anything that may have produced an external
+   * effect stays owned by the uncertain-execution blocker instead.
+   */
+  deadLetter(job, error = null, { exhausted = false } = {}) {
+    const taskId = job.task_id || job.payload?.taskId;
+    if (!taskId) return null;
+    const task = this.tasks.get(taskId);
+    if (!task || task.privacyInvalidated || ['completed', 'cancelled'].includes(task.status)) return null;
+    // An in-flight action usually still has a reconciliation path, so a
+    // dead letter must not pre-empt it. Recovery that has exhausted its attempts
+    // is the exception: nothing else will ever converge this task, and leaving it
+    // in `verifying` is the silent stall this whole path exists to prevent.
+    if (!exhausted && task.action && ['executing', 'accepted_live', 'uncertain'].includes(task.action.status)) return null;
+    const attempts = Number(job.attempts) || 0, maxAttempts = Number(job.max_attempts) || attempts;
+    const errorClass = job.last_error_class || classifyFailure(error);
+    const reason = `Stopped after ${attempts} of ${maxAttempts} attempt(s): the last failure was classified ${errorClass}. The evidence gathered so far is kept.`;
+    const at = iso(this.database.now());
+    this.store.mutate(state => {
+      const entry = state.tasks[taskId];
+      if (!entry || entry.privacyInvalidated || ['completed', 'cancelled'].includes(entry.status)) return;
+      entry.status = 'blocked';
+      entry.reason = reason;
+      entry.failure = { jobId: job.id, jobType: job.job_type, attempts, maxAttempts, errorClass, at };
+      emitNotification(state.notifications, notification({
+        kind: 'blocker', priority: 'high', dedupeKey: `blocker:${taskId}`, taskId, at,
+        headline: 'Work stopped before it was finished',
+        what: reason,
+        why: 'The system stopped retrying rather than repeat an action that kept failing. Continuing automatically could duplicate an external effect or repeat a broken request.',
+        checked: [`Ran ${attempts} attempt(s); the last failure was classified ${errorClass}.`, 'Kept the collected evidence and any prepared draft on this machine.'],
+        uncertainty: ['Whether the last attempt left an external side effect.'],
+        decision: 'Try this work again, or close the request?',
+        options: [{ value: 'reopen', label: 'Try again' }, { value: 'close', label: 'Close this request' }]
+      }));
+    });
+    this.engine.changed();
+    return this.tasks.get(taskId);
+  }
   async recover(job) {
     if (job.job_type === 'external_dispatch' && !this.ledger.byKey(job.payload.key)) this.recoverPreparedDispatch(job, { recovering: true });
     const executions = this.db.prepare("SELECT * FROM tool_executions WHERE job_id=? AND status IN ('intent','dispatched','accepted','unknown') AND is_write=1").all(job.id);
     for (const execution of executions) {
-      if (execution.status === 'intent' && !execution.dispatched_at) this.database.atomic(() => {
-        this.db.prepare("UPDATE tool_executions SET status='cancelled',payload_json=NULL,updated_at=? WHERE id=? AND status='intent'").run(iso(this.database.now()), execution.id);
-        const claim = this.db.prepare('SELECT * FROM resource_claims WHERE current_execution_id=?').get(execution.id);
-        if (claim) this.ledger.claims.release({ userId: claim.user_id, provider: claim.provider, resourceId: claim.resource_id, owner: claim.lease_owner, token: claim.lease_token, executionId: execution.id });
-      });
+      if (execution.status === 'intent' && !execution.dispatched_at) {
+        this.database.atomic(() => {
+          this.db.prepare("UPDATE tool_executions SET status='cancelled',payload_json=NULL,updated_at=? WHERE id=? AND status='intent'").run(iso(this.database.now()), execution.id);
+          const claim = this.db.prepare('SELECT * FROM resource_claims WHERE current_execution_id=?').get(execution.id);
+          if (claim) this.ledger.claims.release({ userId: claim.user_id, provider: claim.provider, resourceId: claim.resource_id, owner: claim.lease_owner, token: claim.lease_token, executionId: execution.id });
+        });
+        this.releaseTaskCoordination(execution.task_id);
+      }
       else {
         const result = await this.ledger.reconcile(execution.id, this.providerFor(execution));
-        if (result.status === 'unknown') { this.jobs.deferRecovery(job.id, job.lease_token); return; }
+        if (result.status === 'not_found') this.releaseTaskCoordination(execution.task_id);
+        if (result.status === 'unknown') {
+          // Recovery that can never be reconciled must still end somewhere the
+          // user can see. Deferring forever left the task in its pre-crash status
+          // with no terminal state and no notification.
+          const deferred = this.jobs.deferRecovery(job.id, job.lease_token);
+          if (deferred?.state === 'dead') await this.deadLetter(deferred.job || this.jobs.get(job.id), durableError('RECOVERY_UNRESOLVED', 'The outcome of this action could not be reconciled, so the job was dead-lettered.'), { exhausted: true });
+          return;
+        }
       }
     }
     this.jobs.recover(job.id, () => ({ state: ['external_dispatch', 'privacy_reconcile', 'reconcile_execution'].includes(job.job_type) ? 'completed' : 'queued', safeToRepeat: true }));
   }
   async compile(summary, job) {
-    if (this.generateExperience) return this.generateExperience(summary);
-    if (this.engine.reasoner.compileExperiences?.bind && this.engine.reasoner.available()) return this.engine.reasoner.compileExperiences(summary, `compile:${job.id}`);
-    // No compiler/model is required for P0. Absence never fabricates learning.
-    return [];
+    try {
+      if (this.generateExperience) return await this.generateExperience(summary);
+      if (this.engine.reasoner.compileExperiences?.bind && this.engine.reasoner.available()) return await this.engine.reasoner.compileExperiences(summary, `compile:${job.id}`);
+      // No compiler/model is required for P0. Absence never fabricates learning.
+      return [];
+    } finally { this.engine.pruneReasoningBudget({ finishedJobId: job?.id }); }
   }
   ingestInstruction({ text, kind = 'fact', scopeType = 'global', scopeKey = '*', policy = null, identities = [] }) {
     if (typeof text !== 'string' || !text.trim() || text.length > 2000) throw durableError('INVALID_INSTRUCTION', 'An instruction needs 1–2,000 characters.', 400);
-    if (kind === 'fact') { const memory = this.memory.put({ content: text.trim(), scopeType, scopeKey }); this.contextChanged(); return { status: 'saved', memory }; }
+    if (kind === 'fact') {
+      const input = { content: text.trim(), scopeType, scopeKey };
+      if (this.memory.usesAsyncEncoder()) return this.memory.putAsync(input).then(memory => { this.contextChanged({ memoryId: memory.id, scopeType: memory.scope_type, scopeKey: memory.scope_key }); return { status: 'saved', memory }; });
+      const memory = this.memory.put(input); this.contextChanged({ memoryId: memory.id, scopeType: memory.scope_type, scopeKey: memory.scope_key }); return { status: 'saved', memory };
+    }
     if (kind !== 'policy') throw durableError('INVALID_INSTRUCTION', 'Choose a grounded memory or an explicit activation policy.', 400);
     if (!policy) {
       const address = text.match(/[a-zA-Z0-9.!#$%&'*+\-/=?^_`{|}~]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)?.[0]?.toLowerCase();
@@ -1091,7 +1685,7 @@ export class DurableRuntime {
     const task = this.tasks.get(job.task_id), experience = this.experiences.get(job.payload.experienceId);
     if (!task?.draft || task.action || draftReviewToken(task) !== job.payload.reviewToken || !experience || !['candidate', 'active'].includes(experience.status)) throw durableError('REVIEW_CHANGED', 'The reviewed trial context is no longer current.');
     const run = this.tasks.beginRun(job);
-    const context = this.buildContext(this.tasks.get(task.id), run);
+    const context = await this.loadContext(this.tasks.get(task.id), run);
     if (!context.activation.activate || context.arbitration.conflicts.length) throw durableError('TRIAL_POLICY', 'Resolve the current policy or guidance conflict before a trial.');
     if (!context.experiences.some(record => record.id === experience.id) || experience.effect.type !== 'draft_format') throw durableError('TRIAL_SCOPE', 'The candidate does not apply to this task.');
     const original = task.draft.body;
@@ -1118,18 +1712,46 @@ export class DurableRuntime {
     this.experiences.artifact({ id: artifactId, taskId: task.id, taskRunId: run.id, planStepId: step.id, content: body, version: task.draft.documentVersion || 1 });
     this.tasks.finish(run, job); this.store.refresh(); this.engine.changed();
   }
+  /** A task_continue job that has not started yet will load the latest
+   * context, model and evidence when it runs, so a second trigger in the same
+   * burst adds no work. Only queued/retry_wait jobs qualify: a running job may
+   * already have passed its last context check. */
+  hasQueuedTaskJob(taskId) {
+    return Boolean(this.db.prepare("SELECT 1 FROM jobs WHERE task_id=? AND queue_name='tasks' AND job_type IN ('task_initial','task_continue') AND state IN ('queued','retry_wait') LIMIT 1").get(taskId));
+  }
+  /** Whether a memory mutation can change this task's planning context. Tasks
+   * that never planned have no manifest to compare, so they stay eligible; a
+   * planned task is affected by scope match or by an explicit manifest entry. */
+  memoryChangeAffects(task, { memoryId, scopeType, scopeKey }) {
+    if (this.memoryScopeMatches(task, scopeType, scopeKey)) return true;
+    if (!task.contextManifest) return true;
+    return [task.contextManifest.selected, task.contextManifest.deferred, task.contextManifest.overridden]
+      .some(list => Array.isArray(list) && list.some(item => item.id === memoryId));
+  }
   modelChanged() {
     this.database.atomic(() => this.database.bump('model_version'));
-    for (const task of Object.values(this.store.state.tasks)) this.scheduleTask(task.id, 'model_changed');
+    for (const task of Object.values(this.store.state.tasks)) if (!this.hasQueuedTaskJob(task.id)) this.scheduleTask(task.id, 'model_changed');
   }
-  contextChanged() { this.memory.invalidate(); for (const task of Object.values(this.store.state.tasks)) this.scheduleTask(task.id, `context:${this.database.get('context_version')}`); }
+  contextChanged(changed = null) {
+    this.memory.invalidate();
+    const version = this.database.get('context_version');
+    for (const task of Object.values(this.store.state.tasks)) {
+      if (changed && !this.memoryChangeAffects(task, changed)) continue;
+      if (!this.hasQueuedTaskJob(task.id)) this.scheduleTask(task.id, `context:${version}`);
+    }
+  }
   importUncertainActions() {
+    const notDispatched = [];
     this.database.atomic(() => {
       const at = iso(this.database.now());
-      const add = ({ task, provider, tool, family, resource, key, effect, receiptId = null }) => {
+      const add = ({ task, provider, tool, family, resource, key, effect, receiptId = null, dispatched = true }) => {
         if (!key || this.ledger.byKey(key)) return;
         const prepared = this.db.prepare("SELECT 1 FROM jobs WHERE queue_name='effects' AND job_type='external_dispatch' AND state IN ('queued','retry_wait','running','recovery_required') AND json_extract(payload_json,'$.key')=?").get(key);
         if (prepared) return;
+        // `execute()` persists `lookup` before it can contact any provider, and
+        // every adapter commits an intent before dispatch. An action still at
+        // `approved` with neither marker provably never left this process.
+        if (!dispatched) { notDispatched.push({ taskId: task.id, key }); return; }
         const id = randomUUID();
         this.db.prepare(`INSERT INTO tool_executions(id,task_id,provider,tool,action_family,resource_id,idempotency_key,effect_signature_json,status,is_write,provider_receipt_id,input_version,run_generation,privacy_epoch,last_error_class,created_at,updated_at)
           VALUES(?,?,?,?,?,?,?,?,'unknown',1,?,?,?,?,'legacy_interrupted',?,?)`).run(id, task.id, provider, tool, family, resource, key, json(effect), receiptId, task.inputVersion, task.runGeneration, task.privacyEpoch, at, at);
@@ -1139,43 +1761,120 @@ export class DurableRuntime {
           const held = this.ledger.claims.acquire({ provider, resourceId: resource, runId: null, owner: this.owner, executionId: id });
           this.ledger.claims.unresolved(held);
         }
-        this.jobs.enqueue({ queue: 'effects', type: 'reconcile_execution', key: `import:${id}`, taskId: task.id, payload: { executionId: id } });
+        this.jobs.enqueue({ queue: 'reconcile', type: 'reconcile_execution', key: `import:${id}`, taskId: task.id, payload: { executionId: id } });
       };
       for (const task of Object.values(this.store.state.tasks)) {
         if (task.privacyInvalidated) continue;
         if (task.action && ['executing', 'accepted_live', 'uncertain'].includes(task.action.status)) {
           const provider = typeof this.engine.provider.forSource === 'function' ? this.engine.provider.forSource(task.sourceConnectorId || task.request?.source?.connectorId || 'google') : this.engine.provider;
           const message = this.store.state.inbox.find(item => item.id === task.sourceEmailId);
-          add({ task, provider: provider?.kind || 'unavailable_mail', tool: 'send', family: 'email.send', resource: message?.threadId || `${task.draft?.to}:${task.draft?.subject}`, key: task.action.idempotencyKey, receiptId: task.action.receiptId,
+          const dispatched = task.action.phase !== 'approved';
+          add({ task, dispatched, provider: provider?.kind || 'unavailable_mail', tool: 'send', family: 'email.send', resource: message?.threadId || `${task.draft?.to}:${task.draft?.subject}`, key: task.action.idempotencyKey, receiptId: task.action.receiptId,
             effect: { type: 'email_reply', to: task.draft?.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(task.draft?.body || '').digest('hex') } });
         }
         for (const patch of Object.values(this.store.state.documentPatches || {})) if (patch.taskId === task.id && ['applying', 'uncertain'].includes(patch.status)) {
           const document = this.store.state.documents[patch.documentId || task.documentId];
-          add({ task, provider: patch.provider, tool: 'apply_patch', family: 'document.patch', resource: document?.externalId || document?.id || task.documentId, key: `patch:${patch.id}:${patch.baseDocument.version}`,
+          add({ task, dispatched: Boolean(patch.writeAttemptId), provider: patch.provider, tool: 'apply_patch', family: 'document.patch', resource: document?.externalId || document?.id || task.documentId, key: `patch:${patch.id}:${patch.baseDocument.version}`,
             effect: { type: 'document_patch', documentId: document?.id || task.documentId, baseVersion: patch.baseDocument.version, changesDigest: createHash('sha256').update(JSON.stringify(patch.changes)).digest('hex') } });
         }
       }
     });
+    // The state projection cannot be mutated inside the SQL transaction.
+    for (const item of notDispatched) this.markNotDispatched(item.taskId, item.key);
   }
   start() {
+    // Reconciliation moved to its own queue so a slow publish cannot delay it.
+    // Move jobs queued by an earlier build before recovery dedupe looks at them.
+    this.db.prepare("UPDATE jobs SET queue_name='reconcile' WHERE queue_name='effects' AND job_type IN ('reconcile_execution','privacy_reconcile')").run();
+    this.repairStandingIntentWork();
     this.importUncertainActions();
     this.ledger.recoverUnfinished();
-    // Each process needs one fresh revalidation. Reusing the same completed
-    // startup job across restarts can strand a previously unknown outcome even
-    // after the provider becomes available again.
-    for (const task of Object.values(this.store.state.tasks)) if (!task.privacyInvalidated && !task.control?.paused && !['completed', 'cancelled'].includes(task.status)) this.scheduleTask(task.id, `startup_revalidation:${this.owner}`);
+    this.noteDeferredRevalidation(this.scheduleStartupRevalidation());
     // Inbox commits precede processing: resume received events after a crash.
     for (const row of this.db.prepare("SELECT event_json FROM durable_inbox WHERE state='received'").all()) this.ingest(parse(row.event_json), event => this.engine.ingestLegacy(event));
     this.kick();
   }
+  /** Revalidate a bounded, risk-ordered slice of open tasks on process start.
+   * Recovery paths above run in full; this sweep is a safety net, not a queue
+   * drain. Tasks left out stay eligible for the next event or user action. */
+  scheduleStartupRevalidation() {
+    const limit = this.startupRevalidationLimit;
+    if (!limit) return [];
+    const activeJob = this.db.prepare("SELECT 1 FROM jobs WHERE task_id=? AND queue_name='tasks' AND job_type IN ('task_initial','task_continue') AND state IN ('queued','retry_wait','running','recovery_required') LIMIT 1");
+    const rank = status => ['executing', 'verifying', 'blocked'].includes(status) ? 0
+      : ['investigating', 'newly_discovered', 'prepared'].includes(status) ? 1
+        : status === 'waiting_for_information' ? 2 : 3;
+    const candidates = Object.values(this.store.state.tasks)
+      .filter(task => !task.privacyInvalidated && !task.control?.paused && !['completed', 'cancelled', 'withdrawn'].includes(task.status) && !activeJob.get(task.id))
+      .sort((a, b) => rank(a.status) - rank(b.status) || String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')) || String(a.id).localeCompare(String(b.id)));
+    for (const task of candidates.slice(0, limit)) this.scheduleTask(task.id, `startup_revalidation:${this.owner}`);
+    return candidates.slice(limit).map(task => task.id);
+  }
+  /** Make the bounded sweep's tail visible instead of silent. The tasks stay
+   * eligible for their next event; this notice only records what startup
+   * deliberately left unexamined and clears itself once the tail is empty. */
+  noteDeferredRevalidation(taskIds) {
+    const key = 'startup-revalidation:tail';
+    const at = iso(this.database.now());
+    const existing = (this.store.state.notifications || []).some(item => item.dedupeKey === key && !item.resolvedAt);
+    if (!taskIds.length && !existing) return;
+    this.store.mutate(state => {
+      state.notifications = state.notifications || [];
+      if (!taskIds.length) { resolveNotifications(state.notifications, item => item.dedupeKey === key, at); return; }
+      emitNotification(state.notifications, notification({
+        kind: 'risk', priority: 'low', dedupeKey: key, at,
+        headline: 'Some open work was not checked at startup',
+        what: `${taskIds.length} open ${taskIds.length === 1 ? 'task was' : 'tasks were'} outside the bounded startup check.`,
+        why: 'Startup revalidation is capped so a restart cannot fan out into every open task at once.',
+        checked: [`Revalidated up to ${this.startupRevalidationLimit} highest-risk open task(s) first.`, 'Ran every recovery and uncertain-write check without the cap.'],
+        uncertainty: ['Whether these tasks still match their sources since the restart.'],
+        decision: 'Review them now, or leave them for their next source event.',
+        options: [{ value: 'ack', label: 'Got it' }]
+      }));
+    });
+    this.engine.changed();
+  }
+  repairStandingIntentWork() {
+    this.database.atomic(() => {
+      const at = iso(this.database.now());
+      for (const row of this.db.prepare("SELECT t.*,s.standing_intent_id FROM tasks t JOIN situations s ON s.id=t.situation_id WHERE s.standing_intent_id IS NOT NULL AND t.status NOT IN ('completed','cancelled')").all()) {
+        const data = parse(row.data_json), intent = this.intents.get(row.standing_intent_id);
+        if (!intent || data.action || data.guidance || data.privacyInvalidated || data.kind === 'standing_intent' || data.request?.text && data.request.text !== data.subject) continue;
+        if (intent.version !== 1) { data.control = { ...data.control, paused: true, pauseReason: 'intent_repair_required' }; }
+        else {
+          data.kind = 'standing_intent'; data.standingIntentId = intent.id; data.intentVersion = intent.version;
+          data.request = { ...data.request, text: intent.desiredOutcome }; delete data.draft; delete data.preparedWork;
+          const situation = this.tasks.situations.get(row.situation_id);
+          this.db.prepare('UPDATE situations SET closure_condition_json=?,version=version+1,updated_at=? WHERE id=?').run(json({ ...situation.closureCondition, missingEvidence: [intent.desiredOutcome] }), at, row.situation_id);
+        }
+        this.jobs.cancelTask(row.id);
+        this.db.prepare("UPDATE task_runs SET status='cancelled',checkpoint_json=NULL,updated_at=? WHERE task_id=? AND status='running'").run(at, row.id);
+        this.db.prepare('UPDATE tasks SET data_json=?,input_version=input_version+1,run_generation=run_generation+1,dirty=1,version=version+1,updated_at=? WHERE id=?').run(json(data), at, row.id);
+      }
+      const deferred = this.db.prepare(`SELECT DISTINCT d.event_a,d.evaluator_version FROM activation_decisions d JOIN standing_intents i ON i.id=d.evaluator_version
+        JOIN durable_inbox e ON e.id=d.event_a WHERE d.stage='standing_intent' AND d.outcome='DEFERRED' AND i.status='active' AND e.state!='forgotten'
+        AND NOT EXISTS(SELECT 1 FROM activation_decisions done WHERE done.stage='standing_intent' AND done.event_a=d.event_a AND done.evaluator_version=d.evaluator_version AND done.outcome='MATCHED')`).all();
+      for (const row of deferred) {
+        if (this.db.prepare("SELECT 1 FROM jobs WHERE job_type='standing_intent_match' AND state IN ('queued','retry_wait','running','recovery_required') AND json_extract(payload_json,'$.intentId')=? AND json_extract(payload_json,'$.eventId')=?").get(row.evaluator_version, row.event_a)) continue;
+        const intent = this.intents.get(row.evaluator_version);
+        const epoch = Number(this.database.get('privacy_epoch'));
+        const job = this.jobs.enqueue({ type: 'standing_intent_match', key: `intent-resume:${intent.id}:${row.event_a}:v${intent.version}:p${epoch}`, payload: { intentId: intent.id, eventId: row.event_a, intentVersion: intent.version, privacyEpoch: epoch, activationVersion: Number(this.database.get('activation_generation:standingIntents', '0')) } });
+        this.database.lineage('event', row.event_a, 'job', job.id); this.database.lineage('standing_intent', intent.id, 'job', job.id);
+      }
+    });
+    this.store.refresh();
+  }
   kick() {
-    if (this.suspended || this.closed || this.pending) return;
-    this.pending = Promise.resolve().then(async () => {
+    if (this.suspended || this.closed) return;
+    this.kickServices();
+    // Jobs enqueued while a drain is in its tail used to wait for the interval.
+    // Remember the wakeup and run one more pass when this one finishes.
+    if (this.pending) { this.kickAgain = true; return; }
+    this.pending = Promise.resolve().then(() => this.scope.run(undefined, async () => {
       this.database.atomic(() => { this.tasks.situations.expireDue(); this.coordination.releaseExpired(); });
       await this.inboxWorker.drain();
       await this.worker.drain();
-      await this.effectsWorker.drain({ maxJobs: 8 });
-      await this.privacyWorker.drain({ maxJobs: 8 });
+      await this.kickServices();
       await this.learningWorker.drain({ maxJobs: 8 });
       const released = this.store.attention.releaseDue();
       if (released.length) {
@@ -1183,9 +1882,28 @@ export class DurableRuntime {
         this.store.mutate(state => { for (const notice of state.notifications || []) { const delivery = deliveries.get(notice.dedupeKey || notice.id); if (delivery) { notice.deliveryState = delivery.state; notice.notBefore = delivery.not_before; } } });
         this.engine.changed();
       }
-    }).catch(() => { /* Jobs preserve bounded failure state; no raw provider errors are logged. */ }).finally(() => { this.pending = null; });
+    })).catch(() => { /* Jobs preserve bounded failure state; no raw provider errors are logged. */ }).finally(() => {
+      this.pending = null;
+      if (this.kickAgain && !this.closed && !this.suspended) { this.kickAgain = false; this.kick(); }
+    });
   }
-  async whenIdle() { if (this.inWorker()) return; while (this.pending) await this.pending; }
+  kickServices() {
+    if (this.servicePending) { this.serviceAgain = true; return this.servicePending; }
+    this.servicePending = Promise.resolve().then(() => this.scope.run(undefined, async () => {
+      // Drain independently: a publish that runs to its deadline must not hold
+      // the reconcile queue behind it.
+      await Promise.all([
+        this.effectsWorker.drain({ maxJobs: 8 }),
+        this.reconcileWorker.drain({ maxJobs: 8 }),
+        this.privacyWorker.drain({ maxJobs: 8 })
+      ]);
+    })).catch(() => { /* Individual jobs persist their failure state. */ }).finally(() => {
+      this.servicePending = null;
+      if (this.serviceAgain) { this.serviceAgain = false; if (!this.closed && !this.suspended) return this.kickServices(); }
+    });
+    return this.servicePending;
+  }
+  async whenIdle() { if (this.inWorker()) return; while (this.pending || this.servicePending) await Promise.all([this.pending, this.servicePending]); }
   prepareSituation(situationId) {
     const situation = this.tasks.situations.get(situationId);
     if (!situation) throw durableError('MISSING_SITUATION', 'An active Situation is required.');
@@ -1220,9 +1938,11 @@ export class DurableRuntime {
     const key = kind === 'network' ? 'activation_network_calls' : 'activation_external_actions';
     this.database.atomic(() => this.database.set(key, String(Number(this.database.get(key, '0')) + 1)));
   }
-  async backfill(connectorId, { limit = 20 } = {}) {
+  async backfill(connectorId, { limit = 20, once = false } = {}) {
     if (typeof connectorId !== 'string' || !connectorId) throw durableError('INVALID_BACKFILL', 'A connector id is required.', 400);
     if (this.privacy.permissionRevoked(connectorId)) return { blocked: true, reason: 'permission_revoked', networkCalls: 0 };
+    const seen = `backfill-seen:${connectorId}:${Number(this.database.get('privacy_epoch', '0'))}`;
+    if (once && this.database.get(seen)) return { advanced: 0, skipped: true, cursor: this.database.get(`backfill:${connectorId}`, ''), networkCalls: 0, historyDiscovery: 'already' };
     const cap = Math.max(1, Math.min(50, limit));
     const connector = this.connectorFor(connectorId);
     if (typeof connector?.listHistoricalEvents === 'function') {
@@ -1230,13 +1950,14 @@ export class DurableRuntime {
       if (!discovered?.unavailable) {
         let ingested = 0;
         for (const event of (discovered.events || []).slice(0, cap)) {
-          const providerEventId = event.providerEventId || event.payload?.id || event.id;
+          const providerEventId = eventDeliveryKey(event);
           if (this.db.prepare('SELECT 1 FROM durable_inbox WHERE id=? OR (provider=? AND provider_event_id=?)').get(event.id, connectorId, providerEventId)) continue;
           this.ingest(event, input => this.engine.ingestLegacy(input));
           ingested += 1;
         }
         const networkCalls = Number(discovered.networkCalls) || 0;
         for (let index = 0; index < networkCalls; index += 1) this.noteObservation('network');
+        if (once) this.database.atomic(() => this.database.set(seen, iso(this.database.now())));
         return { advanced: ingested, cursor: this.database.get(`backfill:${connectorId}`, ''), networkCalls, historyDiscovery: 'available' };
       }
     }
@@ -1252,44 +1973,54 @@ export class DurableRuntime {
     if (!proposal || proposal.version !== expectedVersion || proposal.status !== 'proposed') throw durableError('RSI_CHANGED', 'The proposal changed.');
     this.assertRsiValue(proposal.parameter, proposal.proposed);
     this.database.atomic(() => {
+      if (proposal.scope?.type !== 'global' || proposal.evidence?.baselineSignature !== this.rsi.signature(proposal.parameter)) throw durableError('RSI_CHANGED', 'The effective configuration changed after this proposal.');
       this.rsi.transition(proposalId, expectedVersion, 'approved');
-      this.applyRsiValue(proposal.parameter, proposal.proposed);
+      this.persistRsiValue(proposal.parameter, proposal.proposed, proposal.id);
     });
+    this.reloadRsiValues();
     return this.rsi.get(proposalId);
   }
   rollbackRsi(proposalId, expectedVersion) {
     const current = this.rsi.get(proposalId);
     if (!current || current.version !== expectedVersion || current.status !== 'approved') throw durableError('RSI_CHANGED', 'The proposal changed.');
-    this.assertRsiValue(current.parameter, current.previous);
+    this.assertRsiValue(current.parameter, current.previous, { rollback: true });
     this.database.atomic(() => {
+      const configuration = this.rsi.configuration(current.parameter);
+      if (configuration.proposalId !== current.id || configuration.value !== current.proposed) throw durableError('RSI_CHANGED', 'A newer configuration cannot be overwritten by an old rollback.');
       this.rsi.transition(proposalId, expectedVersion, 'rolled_back');
-      this.applyRsiValue(current.parameter, current.previous);
+      this.persistRsiValue(current.parameter, current.previous, null);
     });
+    this.reloadRsiValues();
     return this.rsi.get(proposalId);
   }
-  assertRsiValue(parameter, value) {
-    if (parameter === 'pairWindowMs' && (!Number.isInteger(value) || value < 3600000 || value > 14 * 86400000)) throw durableError('RSI_INVALID', 'Pair window is outside its allowed range.', 400);
+  assertRsiValue(parameter, value, { rollback = false } = {}) {
+    if (parameter === 'pairWindowMs' && (!Number.isInteger(value) || value < (rollback ? 60000 : 3600000) || value > (rollback ? 90 : 14) * 86400000)) throw durableError('RSI_INVALID', 'Pair window is outside its allowed range.', 400);
     else if (parameter === 'maxPairCandidates' && (!Number.isInteger(value) || value < 1 || value > 10)) throw durableError('RSI_INVALID', 'Pair candidate limit is outside its allowed range.', 400);
-    else if (parameter === 'maxInteractivePerHour' && (!Number.isInteger(value) || value < 0 || value > 20)) throw durableError('RSI_INVALID', 'Interactive budget is outside its allowed range.', 400);
+    else if (parameter === 'maxInteractivePerHour' && (!Number.isInteger(value) || value < 0 || value > (rollback ? 100 : 20))) throw durableError('RSI_INVALID', 'Interactive budget is outside its allowed range.', 400);
     else if (parameter === 'minIntervalMs' && (!Number.isInteger(value) || value < 0 || value > 86400000)) throw durableError('RSI_INVALID', 'Minimum interval is outside its allowed range.', 400);
     else if (!['pairWindowMs', 'maxPairCandidates', 'maxInteractivePerHour', 'minIntervalMs'].includes(parameter)) throw durableError('RSI_FORBIDDEN', 'This parameter is outside the bounded RSI surface.', 403);
   }
-  applyRsiValue(parameter, value) {
-    this.assertRsiValue(parameter, value);
-    if (parameter === 'pairWindowMs') {
-      if (!Number.isFinite(value) || value < 3600000 || value > 14 * 86400000) throw durableError('RSI_INVALID', 'Pair window is outside its allowed range.', 400);
-      this.unattachedWindowMs = value;
-    } else if (parameter === 'maxPairCandidates') {
-      if (!Number.isInteger(value) || value < 1 || value > 10) throw durableError('RSI_INVALID', 'Pair candidate limit is outside its allowed range.', 400);
-      this.maxPairCandidates = value;
-    } else if (parameter === 'maxInteractivePerHour') this.store.attention.configure({ maxInteractivePerHour: value });
-    else if (parameter === 'minIntervalMs') this.store.attention.configure({ minIntervalMs: value });
-    else throw durableError('RSI_FORBIDDEN', 'This parameter is outside the bounded RSI surface.', 403);
+  persistRsiValue(parameter, value, proposalId) {
+    if (['maxInteractivePerHour', 'minIntervalMs'].includes(parameter)) this.database.set('attention_policy', json({ ...this.store.attention.options, ...parse(this.database.get('attention_policy', '{}')), [parameter]: value }));
+    const current = this.rsi.configuration(parameter);
+    this.database.set(`rsi_config:${parameter}`, json({ version: current.version + 1, proposalId }));
     const applied = parse(this.database.get('rsi_applied', '{}')) || {};
     applied[parameter] = value;
-    this.database.atomic(() => this.database.set('rsi_applied', json(applied)));
+    this.database.set('rsi_applied', json(applied));
   }
-  describe() { return { version: '1.2', activationContract: '1.5.0', activityTelemetry: 'unavailable', flags: this.flags(), storage: this.database.describe(), jobs: this.jobs.list().map(({ payload_json, payload, ...job }) => job),
-    executions: this.ledger.list(), deletion: this.db.prepare("SELECT id FROM privacy_requests WHERE state='pending' ORDER BY created_at LIMIT 100").all().map(row => this.privacy.get(row.id)), memory: this.memory.describe(), context: this.context.options, attention: this.store.attention.describe(), learning: { ...this.experiences.policy, active: this.experiences.list().filter(experience => experience.status === 'active').length, candidates: this.experiences.list().filter(experience => experience.status === 'candidate').length } }; }
-  async close() { this.closed = true; clearInterval(this.timer); await this.whenIdle(); await Promise.all([this.inboxWorker.close(), this.worker.close(), this.effectsWorker.close(), this.learningWorker.close(), this.privacyWorker.close()]); }
+  reloadRsiValues() {
+    this.unattachedWindowMs = this.rsi.currentValue('pairWindowMs');
+    this.maxPairCandidates = this.rsi.currentValue('maxPairCandidates');
+    this.store.attention.options = { ...this.store.attention.options, ...parse(this.database.get('attention_policy', '{}')) };
+  }
+  describe() { return { version: '1.2', activationContract: '1.5.0', activityTelemetry: 'unavailable', flags: this.flags(), intents: this.intents.list({ limit: 100 }), intentGlobalBudget: this.intents.globalBudget(), rsi: this.db.prepare('SELECT id FROM rsi_proposals ORDER BY created_at DESC LIMIT 50').all().map(row => this.rsi.get(row.id)), storage: this.database.describe(), jobs: this.jobs.list().map(({ payload_json, payload, ...job }) => job),
+    executions: this.ledger.list(), deletion: this.db.prepare("SELECT id FROM privacy_requests WHERE state='pending' ORDER BY created_at LIMIT 100").all().map(row => this.privacy.get(row.id)), memory: this.memory.describe(), context: this.context.options, attention: this.store.attention.describe(), coordination: this.coordination.held().map(row => ({ id: row.id, kind: row.claim_kind, scopeKey: row.scope_key, situationId: row.situation_id, taskId: row.task_id, expiresAt: row.expires_at })), learning: { ...this.experiences.policy, active: this.experiences.list().filter(experience => experience.status === 'active').length, candidates: this.experiences.list().filter(experience => experience.status === 'candidate').length } }; }
+  async replayExperiences(body = {}) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw durableError('INVALID_REPLAY', 'Replay requires a request object.', 400);
+    const kind = body.kind || 'retrieval';
+    if (kind === 'retrieval') return this.replay.retrieval(body.cases, body.options);
+    if (kind === 'arbitration_shadow') return this.replay.shadowArbitration(body.cases, input => arbitrateExperiences(input && typeof input === 'object' && !Array.isArray(input) ? input : {}));
+    throw durableError('INVALID_REPLAY', 'Replay kind must be retrieval or arbitration_shadow.', 400);
+  }
+  async close() { this.closed = true; clearInterval(this.timer); await this.whenIdle(); await Promise.all([this.inboxWorker.close(), this.worker.close(), this.effectsWorker.close(), this.reconcileWorker.close(), this.learningWorker.close(), this.privacyWorker.close()]); }
 }

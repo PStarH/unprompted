@@ -338,6 +338,9 @@ export function buildDeterministicPlan(request) {
     reasoning: 'deterministic',
     degraded: true,
     specs: specs.slice(0, MAX_PROBES_PER_PLAN),
+    // A requirement that did not fit is not a requirement that was checked. Keep
+    // the overflow so the assessment can refuse to call the work complete.
+    truncated: specs.slice(MAX_PROBES_PER_PLAN).map(spec => ({ criterionId: spec.criterionId, criterionLabel: spec.criterionLabel })),
     rejected: [],
     unverifiable: unresolved
   };
@@ -440,6 +443,7 @@ export function applyModelProposals(plan, proposals, request) {
   return {
     ...plan,
     specs: specs.slice(0, MAX_PROBES_PER_PLAN),
+    truncated: specs.slice(MAX_PROBES_PER_PLAN).map(spec => ({ criterionId: spec.criterionId, criterionLabel: spec.criterionLabel })),
     rejected,
     reasoning: 'deterministic+model',
     degraded: false

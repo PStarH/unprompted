@@ -375,3 +375,25 @@ test('request interpretation is unchanged for the original experiment wording', 
   assert.equal(interpreted.deliverable, 'proposal');
   assert.equal(interpreted.intent, 'update_and_send');
 });
+
+test('a plan that drops requirements records them instead of silently shrinking the work', () => {
+  // Twelve distinct required items exceed MAX_PROBES_PER_PLAN, so at least two
+  // cannot be probed. The plan must say so rather than look complete.
+  const requiredContent = [
+    'incident statistics', 'revenue figures', 'customer testimonials', 'uptime metrics',
+    'error budget', 'latency percentiles', 'deployment log', 'security findings',
+    'cost breakdown', 'headcount plan', 'roadmap dates', 'support volume'
+  ];
+  const plan = buildDeterministicPlan(request({ requiredContent }));
+  assert.equal(plan.specs.length, 10, 'the probe limit still applies');
+  assert.ok(Array.isArray(plan.truncated), 'the overflow must be recorded');
+  assert.ok(plan.truncated.length > 0, 'twelve requirements cannot fit in ten probes');
+  const kept = new Set(plan.specs.map(spec => spec.criterionId));
+  for (const item of plan.truncated) {
+    assert.ok(item.criterionId, 'a dropped requirement keeps its identity');
+    assert.ok(item.criterionLabel, 'a dropped requirement keeps its label');
+    assert.equal(kept.has(item.criterionId), false, 'a requirement is either probed or recorded as dropped, never both');
+  }
+  // A plan that fits records nothing.
+  assert.deepEqual(buildDeterministicPlan(request({ requiredContent: ['incident statistics'] })).truncated, []);
+});

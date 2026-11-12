@@ -143,7 +143,7 @@ export const CONTRACTS = {
     id: string({ required: true }),
     idempotencyKey: string({ required: true }),
     actionClass: string({ required: true, enum: ACTION_CLASSES }),
-    permission: string({ required: true, enum: ['user_approved', 'pre_authorized'] }),
+    permission: string({ required: true, enum: ['user_approved', 'pre_authorized', 'temporary_yolo'] }),
     status: string({ required: true })
   }),
 

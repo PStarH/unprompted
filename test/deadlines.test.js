@@ -398,3 +398,44 @@ test('a deadline that becomes imminent while nothing else happens still reaches 
   assert.equal(env.store.state.revision, revision, 'a quiet tick does not rewrite state');
   assert.equal(env.store.state.outbox.length, 0);
 });
+
+test('a deadline that has passed raises its own interruption instead of rewriting a read notice', () => {
+  const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const env = setup();
+  // Five days out: outside the three-day warning window when the request arrives.
+  const target = new Date(Date.now() + 5 * 86400000);
+  const iso = target.toISOString().slice(0, 10);
+  env.engine.ingest({
+    id: 'event-overdue', type: 'email.received', source: 'simulated',
+    payload: {
+      id: 'm-overdue', from: 'alex@example.test', subject: 'Vega status report',
+      body: `Please update the Vega status report with the uptime metrics and share it by ${weekdayNames[target.getUTCDay()]}.`,
+      receivedAt: new Date().toISOString()
+    }
+  });
+  assert.equal(env.store.state.tasks['request:m-overdue'].request.deadline.iso, iso);
+
+  // Inside the warning window: one upcoming notice.
+  const inWindow = new Date(Date.now() + 3 * 86400000);
+  inWindow.setUTCHours(23, 30, 0, 0);
+  env.engine.sweepAttention(inWindow);
+  const upcoming = env.engine.publicState().notifications.filter(item => item.kind === 'deadline');
+  assert.equal(upcoming.length, 1, 'the approaching deadline is raised once');
+  assert.equal(upcoming[0].priority, 'normal');
+  const upcomingKey = upcoming[0].dedupeKey;
+
+  // Past the deadline: the escalation must be a new interruption, not an in-place rewrite.
+  const overdue = new Date(Date.now() + 7 * 86400000);
+  overdue.setUTCHours(9, 0, 0, 0);
+  env.engine.sweepAttention(overdue);
+  const all = env.store.state.notifications.filter(item => item.kind === 'deadline');
+  assert.equal(all.length, 2, 'the overdue condition is recorded separately from the approach');
+  const raised = all.find(item => item.dedupeKey !== upcomingKey);
+  assert.ok(raised, 'the overdue notice must not reuse the approach key');
+  assert.equal(raised.priority, 'high');
+  assert.equal(raised.readAt, null, 'a new condition starts unread');
+  assert.ok(all.find(item => item.dedupeKey === upcomingKey).resolvedAt, 'the superseded approach notice is withdrawn');
+  const open = env.engine.publicState().notifications.filter(item => item.kind === 'deadline');
+  assert.equal(open.length, 1, 'only the current phase is open');
+  assert.equal(open[0].priority, 'high');
+});

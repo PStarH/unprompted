@@ -135,6 +135,98 @@ test('startup imports an interrupted old action into an unresolved ledger withou
   assert.equal(fs.existsSync(context.filename + '.migration-backup'), true);
 });
 
+test('startup revalidation is bounded and leaves recovery jobs intact', async t => {
+  const state = emptyState();
+  for (let i = 0; i < 20; i++) state.tasks[`open-${i}`] = { id: `open-${i}`, status: 'waiting_for_information', subject: `Open ${i}`,
+    request: { subjectEntity: 'Cedar', deliverable: 'proposal' }, updatedAt: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z` };
+  state.tasks.legacy = { id: 'legacy', status: 'blocked', subject: 'Legacy work', request: { subjectEntity: 'Cedar', deliverable: 'proposal' },
+    draft: { to: 'alex@example.test', subject: 'Cedar proposal', body: 'Existing draft' }, action: { idempotencyKey: 'legacy-write', status: 'uncertain' } };
+  const context = fixture(t, { seed: state, providerFactory: store => { const provider = new SimulatedMailProvider(store); provider.live = true; provider.lookup = async () => ({ status: 'unknown' }); provider.send = () => { throw new Error('Must not resend'); }; return provider; } });
+  context.runtime.startupRevalidationLimit = 3;
+  context.runtime.kick = () => {};
+  const scheduled = [];
+  const schedule = context.runtime.scheduleTask.bind(context.runtime);
+  context.runtime.scheduleTask = (id, reason) => { scheduled.push(id); return schedule(id, reason); };
+  context.runtime.start();
+  assert.equal(scheduled.length, 3, 'only the bounded slice is revalidated');
+  assert.ok(scheduled.includes('legacy'), 'unresolved external actions are revalidated first');
+  assert.equal(context.store.database.db.prepare("SELECT COUNT(*) n FROM jobs WHERE queue_name='reconcile' AND job_type='reconcile_execution'").get().n, 1, 'recovery jobs are not throttled');
+});
+
+test('startup surfaces the bounded sweep tail and clears it when nothing is left', async t => {
+  const state = emptyState();
+  for (let i = 0; i < 5; i++) state.tasks[`open-${i}`] = { id: `open-${i}`, status: 'waiting_for_information', subject: `Open ${i}`,
+    request: { subjectEntity: 'Cedar', deliverable: 'proposal' }, updatedAt: `2026-01-01T00:00:0${i}.000Z` };
+  const context = fixture(t, { seed: state });
+  context.runtime.startupRevalidationLimit = 2;
+  context.runtime.kick = () => {};
+  const scheduled = [];
+  context.runtime.scheduleTask = id => scheduled.push(id);
+  context.runtime.start();
+  assert.equal(scheduled.length, 2, 'only the bounded slice is scheduled');
+  const notice = context.store.state.notifications.find(item => item.dedupeKey === 'startup-revalidation:tail');
+  assert.ok(notice, 'the omitted tail is visible instead of silent');
+  assert.equal(notice.priority, 'low');
+  assert.match(notice.what, /3 open tasks/);
+  assert.equal(notice.options[0].value, 'ack');
+  // A later start that covers everything must not leave a stale warning open.
+  context.runtime.startupRevalidationLimit = 10;
+  context.runtime.start();
+  assert.ok(context.store.state.notifications.find(item => item.dedupeKey === 'startup-revalidation:tail').resolvedAt);
+});
+
+test('the default startup sweep is bounded to eight tasks and names the tail', async t => {
+  const state = emptyState();
+  for (let i = 0; i < 10; i++) state.tasks[`open-${i}`] = { id: `open-${i}`, status: 'waiting_for_information', subject: `Open ${i}`,
+    request: { subjectEntity: 'Cedar', deliverable: 'proposal' }, updatedAt: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z` };
+  const context = fixture(t, { seed: state });
+  assert.equal(context.runtime.startupRevalidationLimit, 8);
+  context.runtime.kick = () => {};
+  const scheduled = [];
+  context.runtime.scheduleTask = id => scheduled.push(id);
+  context.runtime.start();
+  assert.equal(scheduled.length, 8, 'the default limit revalidates eight tasks');
+  assert.match(context.store.state.notifications.find(item => item.dedupeKey === 'startup-revalidation:tail').what, /2 open tasks/);
+});
+
+test('restart gives an already-ledgered accepted write a reconcile job', async t => {
+  const context = fixture(t);
+  const db = context.store.database.db, at = new Date().toISOString();
+  db.prepare(`INSERT INTO tool_executions(id,task_id,provider,tool,action_family,resource_id,idempotency_key,effect_signature_json,status,is_write,input_version,run_generation,privacy_epoch,created_at,updated_at)
+    VALUES('recover-1',NULL,'fixture','send','fixture.send','resource','recover-key','{}','dispatched',1,1,1,1,?,?)`).run(at, at);
+  context.runtime.kick = () => {};
+  context.runtime.start();
+  assert.equal(db.prepare("SELECT status FROM tool_executions WHERE id='recover-1'").get().status, 'unknown');
+  assert.ok(db.prepare("SELECT 1 FROM jobs WHERE queue_name='reconcile' AND job_type='reconcile_execution' AND idempotency_key='recover:recover-1'").get());
+});
+
+test('a slow artifact publish does not delay reconciliation on another queue', { timeout: 5000 }, async t => {
+  const context = fixture(t);
+  let releasePublish;
+  const publish = new Promise(resolve => { releasePublish = resolve; });
+  context.runtime.artifacts.publish = () => publish;
+  let reconciled = null;
+  context.runtime.reconcileExecution = async executionId => { reconciled = executionId; releasePublish(); };
+  const publishJob = context.runtime.jobs.enqueue({ queue: 'effects', type: 'artifact_publish', key: 'slow-publish', payload: { taskId: 'task', requestId: 'request' } });
+  const reconcile = context.runtime.jobs.enqueue({ queue: 'reconcile', type: 'reconcile_execution', key: 'during-publish', payload: { executionId: 'execution-during-publish' } });
+  await context.runtime.kickServices();
+  assert.equal(reconciled, 'execution-during-publish', 'reconciliation runs while the publish is still pending');
+  assert.equal(context.store.database.db.prepare('SELECT state FROM jobs WHERE id=?').get(publishJob.id).state, 'completed');
+  assert.equal(context.store.database.db.prepare('SELECT state FROM jobs WHERE id=?').get(reconcile.id).state, 'completed');
+});
+
+test('an exhausted reconcile job surfaces the uncertain action instead of stalling', async t => {
+  const state = emptyState();
+  state.tasks.uncertain = { id: 'uncertain', status: 'verifying', subject: 'Cedar proposal',
+    request: { subjectEntity: 'Cedar', deliverable: 'proposal' }, action: { status: 'accepted_live', idempotencyKey: 'uncertain-write' } };
+  const context = fixture(t, { seed: state });
+  context.runtime.reconcileExecution = async () => { throw Object.assign(new Error('External reconciliation still requires provider confirmation.'), { status: 503 }); };
+  context.runtime.jobs.enqueue({ queue: 'reconcile', type: 'reconcile_execution', key: 'exhausted-reconcile', taskId: 'uncertain', maxAttempts: 1, payload: { executionId: 'missing-execution' } });
+  assert.equal(await context.runtime.reconcileWorker.tick(), true);
+  assert.equal(context.store.state.tasks.uncertain.status, 'blocked');
+  assert.ok(context.store.state.notifications.find(item => item.dedupeKey === 'blocker:uncertain' && !item.resolvedAt), 'the user is told the outcome is unresolved');
+});
+
 test('received durable inbox events resume through their own job after interruption', async t => {
   const context = fixture(t), event = { ...email(), connectorId: 'simulated', source: 'simulated', at: new Date().toISOString() };
   const db = context.store.database;

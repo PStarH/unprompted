@@ -1,106 +1,40 @@
-<p align="center"><img src="docs/assets/banner.svg" alt="Unprompted — Work without the prompt." width="100%"></p>
+<p align="center"><img src="docs/assets/banner.svg" alt="Unprompted logo — Work without the prompt." width="100%"></p>
 
 # Unprompted
 
-**A proactive AI agent that notices what needs doing and moves it forward.**
+**Your work keeps moving. Your attention stays yours.**
 
-Unprompted follows changes in the work and personal environments you authorize,
-connects them to existing work, checks the evidence, and prepares the next useful action. You
-join in when a decision needs you. Work starts without another prompt.
+Unprompted is an agent that works in the background. It watches the sources you
+authorize, notices work nobody assigned it,
+checks the evidence, and prepares the next action. You don't write prompts or
+manage it. You open it when something needs you. Every conclusion points back
+to a source, and freshness is checked when the request requires it.
 
-This is a local first version for one person, on one machine, in one process.
-Email and documents are the first sources; the product stays a general work partner.
-[Product direction](docs/PRODUCT_DIRECTION.md)
+[简体中文](README.zh-CN.md) · [Quick start](#quick-start) · [Docs](docs/README.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/PStarH/unprompted/issues/new/choose)
 
-[简体中文](README.zh-CN.md) · [Quick start](#start-your-agent) · [Docs](docs/README.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/PStarH/unprompted/issues/new/choose)
+[![License: Apache-2.0](docs/assets/badge-license.svg)](LICENSE)
+[![Node.js: 22+ recommended](docs/assets/badge-node.svg)](package.json)
+[![Realtime connector: in development](docs/assets/badge-realtime.svg)](#in-development)
 
-[![CI](https://github.com/PStarH/unprompted/actions/workflows/ci.yml/badge.svg)](https://github.com/PStarH/unprompted/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-b9eea3)](LICENSE)
-[![Node.js: 20+](https://img.shields.io/badge/Node.js-20%2B-174438)](package.json)
+[Build status](https://github.com/PStarH/unprompted/actions/workflows/ci.yml)
 
-## Start your agent
+<p align="center"><img src="docs/assets/ui-work.png" alt="Updated Work interface in English: focused state tabs, a reply ready for review, watched sources and recent work." width="100%"></p>
 
-**macOS app (Apple silicon):** download `Unprompted-0.3.0-macos-arm64.zip` from
-[Releases](https://github.com/PStarH/unprompted/releases), check it with
-`shasum -a 256 -c Unprompted-0.3.0-macos-arm64.zip.sha256`, unzip, and move
-`Unprompted.app` to `/Applications`. The app is ad-hoc signed, not notarized:
-on first launch, right-click it and choose **Open**, or run
-`xattr -dr com.apple.quarantine /Applications/Unprompted.app`. Run it from an
-APFS disk; launching from an exFAT external drive can hang. Your data is kept in
-`~/Library/Application Support/Unprompted` and is not removed when you delete
-the app.
+*A real screen from the disposable local demo. The reply is ready; you make the call.*
 
-**From source (any platform):** you need **Node.js 20+** and your model provider's API endpoint, model ID and
-API key. Local compatible models can work without a key. Install the locked
-dependencies once; no frontend build step is needed.
+## A little less chasing
 
-```sh
-git clone https://github.com/PStarH/unprompted.git
-cd unprompted
-npm ci --include=optional
-npm start
-```
+| When work changes… | Unprompted prepares… |
+| --- | --- |
+| An email asks for experiment results | A reply grounded in the documents and run records it checked |
+| Evidence is missing or out of date | A visible waiting state, followed by another check when the source changes |
+| An action needs your decision | The proposed result and its evidence, together for review |
 
-Open the address printed after **Ready**. An interactive terminal also opens
-your browser. Enter the endpoint, model ID and key, then choose **Verify and
-connect model**. The application sends one real structured inference using
-invented content. Only a successful response saves the key locally and activates
-the connection; no restart is required. Keys are not returned by the API.
+> **Under development: realtime connector.** Provider push notifications are upcoming. Today, connected sources are checked by polling; the local UI stream updates the workspace as observations arrive. [See what’s next ↓](#in-development)
 
-Next, choose a source on the same page. **Local folders** work without a cloud
-account: select a folder containing Markdown or text. **Apple Notes** is
-macOS-only and asks for Automation permission; real-account acceptance is still
-pending. Google, GitHub, Outlook, Slack and Notion use your provider account.
-GitHub and Outlook use device authorization, so you confirm a short code on the
-provider’s page. Slack and Notion open that provider’s consent page. Sources can
-be paused or disconnected independently.
-[Source permissions and limits →](docs/CONNECTORS.md)
+## How it works
 
-External MCP tools are available in **Connections → MCP** after
-`npm ci --include=optional` and a restart. Connect a remote URL or paste a
-`mcpServers` config for HTTP, stdio or legacy SSE. Both harnesses can use
-authorized read tools while investigating existing tasks.
-[MCP setup and scope →](docs/CONNECTORS.md#external-mcp-tools)
-
-For Google, a distribution with a registered Desktop OAuth client opens Google
-consent directly. A self-hosted checkout without that client guides you through
-the one-time Google Cloud setup and accepts its downloaded JSON. No refresh-token
-copying or service restart is required.
-
-Authorization starts the first read immediately. Actual email and document
-content become model context; GitHub issues, pull requests, commits and Actions runs retain their native source,
-assignee and state. The page reports actual emails read, documents read
-and work discovered. An empty result is shown as an empty result. **Normal
-startup never plays a sample or invents tasks.**
-
-Read access is the starting permission. Automatic observation can be paused,
-and sending or editing requires a separate explicit opt-in. Model failure
-keeps work unready; rules cannot silently substitute a successful model reading.
-
-The interface supports English and Chinese. A busy default port is replaced
-automatically; `npm start -- --port 4180` chooses a specific port.
-[Download a source ZIP](https://github.com/PStarH/unprompted/archive/refs/heads/main.zip)
-if you prefer not to use Git.
-
-## Durable execution and bounded learning
-
-[v0.3 implementation baseline](docs/PRD.md) adds persisted jobs, fresh task
-checkpoints, external-write intents and resource claims. Interrupted writes are
-reconciled before retry. Memory, explicit rules and learned Experiences remain
-separate; learned guidance never grants a tool permission. Automatic promotion
-starts off. Manage memories and rules in **Memory**, and quiet hours in **Settings**.
-**Forget** removes dependent local data and cancels dependent work; the result
-reports unresolved provider operations and retention limits.
-
-The default local retrieval combines FTS5 and in-process lexical vectors; a local
-semantic encoder can be supplied through the framework API. This is not a claim
-of neural semantic retrieval. Existing JSON workspaces migrate on first open,
-with a private backup retained until Forget or explicit removal.
-[Storage and recovery details](docs/ARCHITECTURE.md#storage-and-process-model).
-
-## What makes it proactive?
-
-A new prompt isn't the trigger. A meaningful change in context is.
+A meaningful change in your context is the trigger, not a new prompt.
 
 ```text
 An email arrives → a commitment is discovered → evidence changes
@@ -108,26 +42,145 @@ An email arrives → a commitment is discovered → evidence changes
 ```
 
 - **It notices existing work.** Requests are discovered from authorized events.
-- **It follows the evidence.** Missing or stale information keeps work open;
-  a newer result can withdraw a prepared draft automatically.
-- **It does the preparation.** The next action comes with its document, sources,
-  and checked requirements, ready for review.
-- **It knows when to ask.** External actions require your approval or a
-  previously stated, explicitly scoped authorization. Uncertain outcomes are
-  reconciled before a retry.
+- **It follows the evidence.** Missing or stale information keeps work open.
+  A newer result can withdraw a prepared draft automatically.
+- **It does the preparation.** The next action comes with its document,
+  sources and checked requirements, ready for review.
+- **It knows when to ask.** External actions need your approval or an
+  explicitly scoped standing authorization. Uncertain outcomes are reconciled
+  before any retry.
+
+## What you see
+
+The interface is built to take as little of your attention as possible.
+
+- **Work** gives you a task count and focused tabs: *Needs you*, *In motion*,
+  *Waiting*, and *Watching · paused · done*. Open one state at a time, then
+  glance below for watched sources, recent work and remembered context.
+- **A task** opens as its own page, with tabs for the overview, evidence,
+  assessment, history and follow-up. Review the proposed result, check each
+  requirement, or steer the next step. An unconfirmed result stays unconfirmed;
+  the left/right arrow keys move between tasks.
+- **Memory** lets you search what the agent learned, inspect its sources and
+  explore recorded relationships. You can edit, delete or restore memories
+  in your own workspace; the demo preview is read-only.
+- **Connections** states each source's access in words: read on, modify on or
+  off. Read access is the starting permission.
+
+<p align="center"><img src="docs/assets/ui-task.png" alt="Updated task page in English: a proposed reply, checked requirements and source evidence ready for review." width="100%"></p>
+
+*Open a task to review the proposed reply and the evidence behind it.*
+
+<details>
+<summary><strong>A memory you can inspect</strong></summary>
+
+![Memory explorer with English controls: searchable sample memories, their source and scope.](docs/assets/ui-memory.png)
+
+Follow the context back to its source. Search, inspect, and explore before
+correcting what the agent remembers.
+</details>
+
+New tasks and live updates never open details, steal
+focus or interrupt typing.
+
+## Quick start
+
+Version **0.4.0** runs as a self-hosted web application on macOS and Windows (Linux can also run the Node service). No desktop app, Docker or paid hosting is required. Install Node.js 22 or newer, then run the commands below in Terminal or Windows PowerShell. Windows runtime acceptance is pending; Apple Notes and Reminders require macOS.
+
+**Try it without any account:**
+
+```sh
+git clone https://github.com/PStarH/unprompted.git
+cd unprompted
+npm ci --include=optional
+npm run demo
+```
+
+The demo is a disposable local simulation. It does not use saved accounts or
+contact external services.
+
+**Use your own work:** run `npm start` instead (Node.js 20+). Open the address
+printed after **Ready**. Enter your model provider's endpoint, model ID and API
+key, then choose **Verify and connect model**. Local compatible models can work
+without a key. Only a successful real inference saves the key; no restart is
+needed.
+
+Then connect a source on the same page:
+
+- **Local folders** need no cloud account: select a folder of Markdown or text.
+- **Apple Notes** (macOS) asks for Automation permission. Real-account
+  acceptance is still pending.
+- **Google, GitHub, Outlook, Slack and Notion** use your provider account.
+  GitHub uses device authorization; Outlook, Slack and Notion open the
+  provider's consent page.
+
+[Source permissions and limits →](docs/CONNECTORS.md)
+
+Authorization starts the first read immediately. The page reports the actual
+emails, documents and work it found, and an empty result stays empty. **Normal
+startup never plays a sample or invents tasks.**
+
+<details>
+<summary><strong>Previous macOS app preview (0.3.0, Apple silicon)</strong></summary>
+
+Download `Unprompted-0.3.0-macos-arm64.zip` from
+[Releases](https://github.com/PStarH/unprompted/releases), check it with
+`shasum -a 256 -c Unprompted-0.3.0-macos-arm64.zip.sha256`, unzip, and move
+`Unprompted.app` to `/Applications`. The app is ad-hoc signed, not notarized.
+On first launch, right-click it and choose **Open**, or run
+`xattr -dr com.apple.quarantine /Applications/Unprompted.app`. Run it from an
+APFS disk; launching from an exFAT external drive can hang. Your data is kept in
+`~/Library/Application Support/Unprompted` and is not removed when you delete
+the app.
+</details>
+
+<details>
+<summary><strong>Google, MCP tools, ports</strong></summary>
+
+For Google, a distribution with a registered Desktop OAuth client opens Google
+consent directly. A self-hosted checkout without that client guides you through
+the one-time Google Cloud setup and accepts its downloaded JSON.
+
+External MCP tools are available in **Connections → MCP** after
+`npm ci --include=optional` and a restart. Connect a remote URL or paste a
+`mcpServers` config for HTTP, stdio or legacy SSE.
+[MCP setup and scope →](docs/CONNECTORS.md#external-mcp-tools)
+
+The interface supports English and Chinese. A busy default port is replaced
+automatically; `npm start -- --port 4180` chooses a specific port.
+[Download a source ZIP](https://github.com/PStarH/unprompted/archive/refs/heads/main.zip)
+if you prefer not to use Git.
+</details>
+
+## Safety and privacy
+
+- Sources start **read-only**. Sending and document edits stay off until you
+  opt in to each one separately. Automatic observation can be paused.
+- If the model fails, that work stays unready; rules never silently stand in
+  for a successful model reading.
+- The server binds to `127.0.0.1` and has no authentication. Run it on your own
+  machine. Email, document and task content are sent to the model you choose.
+- The local database, tokens and model keys are **not encrypted**.
+- Disconnecting stops new reads and keeps the saved copy. **Disconnect and
+  clear** deletes that source's local inbox, tasks, snapshots and derived
+  records.
+
+More: [local setup](docs/ONBOARDING.md) · [connectors](docs/CONNECTORS.md) ·
+[Gmail and Drive](docs/LIVE_INTEGRATION.md) ·
+[configuration and data handling](docs/CONFIGURATION.md) · [API](docs/API.md)
 
 ## What works today
 
-Unprompted is a **local first version** for one person, one machine, and one process. Connect your model, then one source. Local folders need no cloud account and start reading immediately. Sending and document edits stay off until you opt in. An empty result stays empty. If the model fails, that work stays unready.
-
-The macOS download is ad-hoc signed, not notarized by Apple. On other platforms, use Node.js 20 or newer, `npm ci --include=optional`, and `npm start`, then open the local address. Google, GitHub, Outlook, Slack, and Notion need an OAuth client you register, or a build that already includes one. This repository does not ship a public client ID. Read-only use on a live account is for you to confirm; it is not claimed as production-validated here.
+This is a **local first version** for one person, on one machine, in one
+process. Real-world usefulness and error rates still need user feedback.
+[Product direction](docs/PRODUCT_DIRECTION.md)
 
 | Area | Current scope |
 | --- | --- |
 | Context | Email requests, GitHub issues, pull requests, commits, Actions runs, document updates and run records |
 | Local sources | Selected Markdown/text folders (explicit to-dos) and macOS Notes; note creation requires a separate folder grant, and real-account acceptance is pending |
 | GitHub | Device OAuth; assigned issues, review requests, repository commits and Actions runs; read-only |
-| Microsoft Outlook | Device OAuth, inbox delta sync and model-backed request discovery; draft creation requires separate authorization |
+| Microsoft Outlook | Browser OAuth with PKCE, inbox delta sync and model-backed request discovery; draft creation requires separate authorization |
 | Slack | Browser OAuth with PKCE, direct and group direct messages; read-only |
 | Notion | Browser OAuth, pages selected during consent; child-page creation requires a separate parent-page grant |
 | Google Workspace | Optional Gmail / Drive / Docs connector; draft creation, sending and document edits require separate authorization |
@@ -136,31 +189,48 @@ The macOS download is ad-hoc signed, not notarized by Apple. On other platforms,
 | Task management | Trusted commitment revisions/withdrawals, persisted waits, reversible corrections and shared dependencies |
 | Document changes | Source-backed, version-checked patches with separate authorization and readback |
 | Local app | Browser OAuth setup, continuous observation controls and an unsigned macOS app builder |
-| Storage | One user, one process, SQLite WAL + FTS5. Local files, tokens, and model keys are not encrypted |
+| Storage | One user, one process, SQLite WAL + FTS5. Local files, tokens and model keys are not encrypted |
 
-Built-in Calendar, general desktop control, unrestricted autonomous rewriting, and a
-hosted multi-user service are not implemented. Real-world usefulness and error
-rates still need user feedback. [Architecture and limitations →](docs/ARCHITECTURE.md)
+Google, GitHub, Outlook, Slack and Notion need an OAuth client you register, or
+a build that already includes one. This repository does not ship a public
+client ID. Read-only use on a live account is for you to confirm; it is not
+claimed as production-validated here.
 
-## Use your own workspace
+Built-in Calendar, general desktop control, unrestricted autonomous rewriting
+and a hosted multi-user service are not implemented.
+[Architecture and limitations →](docs/ARCHITECTURE.md)
 
-`npm start` opens persistent model and source setup for **your real work**.
-Sources start **read-only**. The interface supports first connection, initial
-observation, incremental permissions, pause, retry and disconnect without
-restarting the service. Each Google account has its own local workspace:
+<details>
+<summary><strong>Durable execution and bounded learning (v0.3)</strong></summary>
 
-- [Local app and browser connection setup](docs/ONBOARDING.md)
-- [Choose or build a connector](docs/CONNECTORS.md)
-- [Connect Gmail and Drive](docs/LIVE_INTEGRATION.md)
-- [Configuration and data handling](docs/CONFIGURATION.md)
-- [API reference](docs/API.md)
+The [v0.3 implementation baseline](docs/PRD.md) adds persisted jobs, fresh task
+checkpoints, external-write intents and resource claims. Interrupted writes are
+reconciled before retry. Memory, explicit rules and learned Experiences remain
+separate; learned guidance never grants a tool permission. Automatic promotion
+starts off. Manage memories and rules in **Memory**, and quiet hours in
+**Settings**. **Forget** removes dependent local data and cancels dependent
+work; the result reports unresolved provider operations and retention limits.
 
-The server binds to `127.0.0.1` and has no authentication. Run it on your own
-machine. Email, documents, and task content are sent to the model you choose.
-The local database and keys are not encrypted. Disconnecting stops new reads and
-keeps the saved copy. **Disconnect and clear** deletes that source’s local inbox,
-tasks, snapshots, and derived records. The explicitly invoked rule-only example
-makes no model calls.
+The default local retrieval combines FTS5 and in-process lexical vectors; a
+local semantic encoder can be supplied through the framework API. This is not a
+claim of neural semantic retrieval. Existing JSON workspaces migrate on first
+open, with a private backup retained until Forget or explicit removal.
+[Storage and recovery details](docs/ARCHITECTURE.md#storage-and-process-model)
+</details>
+
+## In development
+
+**Realtime connector — under development.** The goal is to react to provider
+changes through push notifications, reducing the delay between a source change
+and a fresh check. It is not available as a finished connector yet.
+
+Today, automatic observation uses **polling**. The local `/api/stream` updates
+the interface after observations are processed; it is not a provider push
+connection. Recovery from missed notifications and reconnects is part of the
+work still ahead. [Current connector behavior](docs/CONNECTORS.md)
+
+Have a source or workflow you want to see supported?
+[Share your scenario](https://github.com/PStarH/unprompted/issues/new/choose).
 
 ## Build it with us
 
@@ -174,7 +244,8 @@ npm run example -- --approve
 The first command discovers a follow-up and prepares a reply while keeping
 sends at zero. The second explicitly approves one **simulated** delivery,
 verifies its receipt and checks that a duplicate event does not resend it.
-Edit [the example](examples/first-workflow.mjs) to change the request or evidence.
+Edit [the example](examples/first-workflow.mjs) to change the request or
+evidence.
 
 ```text
 Connector events → WorkEngine → evidence / policy → provider → verified result
@@ -182,15 +253,11 @@ Connector events → WorkEngine → evidence / policy → provider → verified 
                   local store
 ```
 
-[Extend your first workflow](docs/EXTENDING.md) explains the actual extension
+[Extend your first workflow](docs/EXTENDING.md) explains the extension
 boundaries, contracts and tests. The optional
 [Pi harness](docs/CONFIGURATION.md#pi-tool-loop) adds bounded document-reading
-tool calls; it requires Node.js 22.19+ and the optional packages. The core example
-and demo require neither. To inspect the disposable browser simulation, run
-`npm run demo`; it does not use saved accounts or contact external services.
-
-Contribute a focused improvement; documentation, accessibility and synthetic
-regression cases all help.
+tool calls; it requires Node.js 22.19+ and the optional packages. The core
+example and demo require neither.
 
 - New to the code? Start with the [contributor guide](CONTRIBUTING.md) and
   [good first issues](https://github.com/PStarH/unprompted/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22).
@@ -201,7 +268,7 @@ regression cases all help.
 - Working on a change? `npm run test:workflow` is a short first check;
   [testing docs](docs/TESTING.md) explain the full suite and evaluations.
 
-Documentation, accessibility, reproducible scenarios, and regression tests are
+Documentation, accessibility, reproducible scenarios and regression tests are
 all useful contributions. No separate contributor agreement is required.
 
 ## License

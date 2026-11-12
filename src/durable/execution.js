@@ -179,6 +179,18 @@ export class ToolExecutionLedger {
     });
   }
   recoverUnfinished() {
-    return this.database.atomic(() => this.db.prepare("UPDATE tool_executions SET status='unknown',last_error_class='process_interrupted',updated_at=? WHERE is_write=1 AND status IN ('dispatched','accepted')").run(iso(this.database.now())).changes);
+    return this.database.atomic(() => {
+      const at = iso(this.database.now());
+      const rows = this.db.prepare("SELECT id,task_id FROM tool_executions WHERE is_write=1 AND status IN ('dispatched','accepted')").all();
+      const changed = this.db.prepare("UPDATE tool_executions SET status='unknown',last_error_class='process_interrupted',updated_at=? WHERE is_write=1 AND status IN ('dispatched','accepted')").run(at).changes;
+      // Restart recovery must leave every accepted write with a way to
+      // converge. Importing a legacy action creates this job, but an execution
+      // that already had a ledger row is intentionally skipped by that import.
+      for (const row of rows) {
+        const existing = this.db.prepare("SELECT 1 FROM jobs WHERE queue_name='reconcile' AND job_type='reconcile_execution' AND state IN ('queued','retry_wait','running','recovery_required') AND json_extract(payload_json,'$.executionId')=?").get(row.id);
+        if (!existing) this.jobs.enqueue({ queue: 'reconcile', type: 'reconcile_execution', key: `recover:${row.id}`, taskId: row.task_id, payload: { executionId: row.id } });
+      }
+      return changed;
+    });
   }
 }

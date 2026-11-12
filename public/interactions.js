@@ -1,15 +1,10 @@
-import { copy, ui } from './i18n.js';
-import { readLocal, writeLocal, evidenceFacts, evidenceDelta, decisionQueue, decisionCursor } from './ux-state.js';
+import { copy, ui } from './i18n.js?v=ix2';
+import { readLocal, writeLocal, evidenceFacts, evidenceDelta } from './ux-state.js';
 
-export function createInteractions({ context, renderTask, renderNotice, update, refresh, escape, title, sourceLabel, time }) {
+export function createInteractions({ context, update, refresh, escape, title, sourceLabel }) {
   const byId = id => document.getElementById(id);
   let workspace = null;
   let reviewed = {};
-  let mode = readLocal('unprompted:decision-view', 'focus') === 'list' ? 'list' : 'focus';
-  let queue = [];
-  let selected = null;
-  let previousIndex = 0;
-  let receipt = null;
   let proof = null;
   let press = null;
   let suppressedClickUntil = 0;
@@ -23,15 +18,13 @@ export function createInteractions({ context, renderTask, renderNotice, update, 
       workspace = key;
       reviewed = readLocal(`${key}:evidence-seen`, {});
       if (!reviewed || typeof reviewed !== 'object' || Array.isArray(reviewed)) reviewed = {};
-      selected = null;
-      previousIndex = 0;
-      receipt = null;
     }
-    for (const task of state.tasks) {
+    const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+    for (const task of tasks) {
       if (!Object.hasOwn(reviewed, task.id)) reviewed[task.id] = visitBaseline?.facts?.[task.id] || evidenceFacts(task);
     }
     if (proof) {
-      const task = state.tasks.find(item => item.id === proof.taskId);
+      const task = tasks.find(item => item.id === proof.taskId);
       // An open peek never silently changes the facts being read.
       if (!task || JSON.stringify(evidenceFacts(task)) !== JSON.stringify(proof.facts)) closeProof(false);
     }
@@ -48,68 +41,6 @@ export function createInteractions({ context, renderTask, renderNotice, update, 
     if (change.freshnessChanged) return copy('证据时效有变化');
     if (change.conflictsChanged) return copy('来源情况有变化');
     return copy('核对范围有变化');
-  }
-
-  function unitTitle(item) {
-    return item.kind === 'task' ? title(item.value) : item.value.headline;
-  }
-
-  function renderQueue(tasks, notices) {
-    queue = decisionQueue(tasks, notices);
-    const oldKey = selected;
-    selected = decisionCursor(queue, selected, previousIndex);
-    previousIndex = Math.max(0, queue.findIndex(item => item.key === selected));
-    const focused = byId('decisionDeckCurrent').contains(document.activeElement);
-    byId('decisionModebar').hidden = !queue.length;
-    byId('decisionList').hidden = mode === 'focus' && Boolean(queue.length);
-    byId('decisionDeck').hidden = mode !== 'focus' || !queue.length;
-    for (const button of document.querySelectorAll('[data-decision-mode]')) {
-      button.setAttribute('aria-pressed', String(button.dataset.decisionMode === mode));
-    }
-    const current = queue[previousIndex];
-    const announcement = current ? `${copy('第 {index} 件，共 {total} 件', { index: previousIndex + 1, total: queue.length })} · ${unitTitle(current)}` : '';
-    if (byId('decisionAnnouncer').textContent !== announcement) byId('decisionAnnouncer').textContent = announcement;
-    byId('decisionPosition').textContent = current ? copy('第 {index} 件，共 {total} 件', { index: previousIndex + 1, total: queue.length }) : '';
-    byId('previousDecision').disabled = previousIndex === 0;
-    byId('nextDecision').disabled = previousIndex >= queue.length - 1;
-    if (current) {
-      update('decisionDeckCurrent', current.kind === 'task' ? renderTask(current.value) : renderNotice(current.value));
-      const upcoming = queue.slice(previousIndex + 1, previousIndex + 3);
-      update('decisionUpcoming', upcoming.map((item, index) => ui`<button class="decision-preview" data-queue-key="${escape(item.key)}" style="--depth:${index}"><span>${index ? copy('再下一件') : copy('下一件')}</span><strong>${escape(unitTitle(item))}</strong><span aria-hidden="true">↗</span></button>`).join(''));
-      byId('decisionUpcoming').hidden = !upcoming.length;
-    } else {
-      update('decisionDeckCurrent', '');
-      update('decisionUpcoming', '');
-    }
-    if (oldKey && oldKey !== selected && focused && current && mode === 'focus') byId('decisionDeckTitle').focus({ preventScroll: true });
-    renderReceipt();
-  }
-
-  function renderReceipt() {
-    byId('decisionReceipt').hidden = !receipt;
-    if (!receipt) return;
-    byId('decisionReceipt').dataset.status = receipt.kind;
-    const labels = {
-      verified: copy('已完成，并已核验结果'), declined: copy('已搁下，没有发送'),
-      closed: copy('已关闭，没有发送'), restored: copy('已恢复跟进，没有发送'),
-      uncertain: copy('结果仍待核实')
-    };
-    update('decisionReceipt', ui`<span class="receipt-mark" aria-hidden="true">${receipt.kind === 'uncertain' ? '·' : '✓'}</span><div><strong>${labels[receipt.kind]}</strong><p>${escape(receipt.title)}</p></div>${['declined', 'closed'].includes(receipt.kind) ? ui`<button class="text-button" data-action="reopen" data-id="${escape(receipt.taskId)}">撤销</button>` : ''}<button class="icon-button" data-clear-receipt aria-label="收起这条回执">×</button>`);
-  }
-
-  function noteResult(taskId, action, result) {
-    let kind = null;
-    if (['approve', 'retry', 'reconcile'].includes(action)) {
-      if (result.status === 'completed' && ['verified_live', 'verified_simulated'].includes(result.action?.status)) kind = 'verified';
-      else if (['blocked', 'verifying'].includes(result.status)) kind = 'uncertain';
-    }
-    if (action === 'reject' && result.status === 'blocked' && !result.action) kind = 'declined';
-    if (action === 'cancel' && result.status === 'cancelled') kind = 'closed';
-    if (action === 'reopen' && ['ready_for_approval', 'waiting_for_information'].includes(result.status)) kind = 'restored';
-    if (!kind) return;
-    const task = context().state?.tasks.find(item => item.id === taskId) || result;
-    receipt = { kind, taskId, title: title(task) };
-    renderReceipt();
   }
 
   function sourceURL(value) {
@@ -216,25 +147,9 @@ export function createInteractions({ context, renderTask, renderNotice, update, 
     const proofMode = event.target.closest('[data-proof-mode]');
     if (proofMode && proof) { proof.changesOnly = proofMode.dataset.proofMode === 'changes'; renderProof(); positionProof(); return; }
     if (event.target.closest('[data-view], [data-go], [data-open-task]')) closeProof(false);
-    const viewMode = event.target.closest('[data-decision-mode]');
-    if (viewMode) { mode = viewMode.dataset.decisionMode; writeLocal('unprompted:decision-view', mode); refresh(); return; }
-    const step = event.target.closest('[data-queue-step]');
-    const pick = event.target.closest('[data-queue-key]');
-    if (step || pick) {
-      closeProof(false);
-      selected = pick?.dataset.queueKey || queue[Math.max(0, Math.min(previousIndex + Number(step.dataset.queueStep), queue.length - 1))]?.key;
-      refresh(); return;
-    }
-    if (event.target.closest('[data-clear-receipt]')) { receipt = null; renderReceipt(); }
   });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && proof) { event.preventDefault(); closeProof(true, true); return; }
-    if (event.target.closest('input, textarea, select, [contenteditable="true"]') || event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]') || proof) return;
-    if (mode === 'focus' && !byId('viewAttention').hidden && ['j', 'k'].includes(event.key.toLowerCase()) && queue.length) {
-      event.preventDefault();
-      selected = queue[Math.max(0, Math.min(previousIndex + (event.key.toLowerCase() === 'j' ? 1 : -1), queue.length - 1))].key;
-      refresh();
-    }
   });
   window.addEventListener('resize', () => { if (proof) positionProof(); });
   window.addEventListener('scroll', event => {
@@ -249,5 +164,5 @@ export function createInteractions({ context, renderTask, renderNotice, update, 
     if (proof && !proof.ephemeral && !byId('evidencePeek').contains(event.target) && event.target !== proof.anchor) closeProof(false);
   });
   window.addEventListener('hashchange', () => closeProof(true));
-  return { prepare, delta, deltaLabel, renderQueue, noteResult, closeProof };
+  return { prepare, delta, deltaLabel, closeProof };
 }

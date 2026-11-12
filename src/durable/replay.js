@@ -5,11 +5,13 @@ import { durableError, iso, json } from './database.js';
  * metrics are retained, and Forget clears these derived comparison records. */
 export class OfflineReplay {
   constructor(database, memory) { this.database = database; this.memory = memory; this.db = database.db; }
-  retrieval(cases, { limit = 8, configurationVersion = 1 } = {}) {
+  async retrieval(cases, { limit = 8, configurationVersion = 1 } = {}) {
     if (!Array.isArray(cases) || !cases.length || cases.length > 100 || cases.some(item => typeof item.query !== 'string' || item.query.length > 2000 || !Array.isArray(item.relevantIds))) throw durableError('INVALID_REPLAY', 'Replay requires at most 100 labeled retrieval cases.', 400);
     let reciprocal = 0, recalled = 0, relevant = 0, lexicalHits = 0, vectorHits = 0;
     for (const item of cases) {
-      const ranked = this.memory.search(item.query, { scopes: item.scopes || [], limit });
+      const ranked = this.memory.usesAsyncEncoder?.()
+        ? await this.memory.searchAsync(item.query, { scopes: item.scopes || [], limit })
+        : this.memory.search(item.query, { scopes: item.scopes || [], limit });
       const expected = new Set(item.relevantIds), first = ranked.findIndex(row => expected.has(row.id));
       if (first >= 0) reciprocal += 1 / (first + 1);
       relevant += expected.size;

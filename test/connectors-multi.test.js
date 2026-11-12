@@ -117,6 +117,57 @@ test('Outlook resets an expired delta cursor without losing the outage window or
   assert.match(result.cursor.resumeUrl, /skiptoken=next/);
 });
 
+test('Outlook accepts a Graph folder-id delta only when that folder is the inbox', async () => {
+  const inboxId = 'AQMkAGI2THVq';
+  const quoted = `https://graph.microsoft.com/v1.0/me/mailfolders('${inboxId}')/messages/delta?$deltatoken=folder`;
+  const plain = `https://graph.microsoft.com/v1.0/me/mailfolders/${inboxId}/messages/delta?$deltatoken=plain`;
+  const message = { id: 'mail-1', conversationId: 'thread', subject: 'Cedar proposal',
+    from: { emailAddress: { address: 'alex@example.test' } }, receivedDateTime: '2026-10-26T10:00:00Z',
+    body: { contentType: 'text', content: 'Please update the Cedar proposal to include sample size and conclusion and send it back.' } };
+  const calls = [];
+  const pages = [
+    { value: [message], '@odata.deltaLink': quoted },
+    { value: [], '@odata.deltaLink': plain },
+    { value: [], '@odata.deltaLink': plain }
+  ];
+  const connector = new OutlookConnector({ auth, account: { id: 'ms-user', label: 'reader@example.test' }, fetchImpl: async (url, options) => {
+    calls.push({ url: String(url), authorization: options?.headers?.authorization });
+    if (String(url).includes('/mailFolders/inbox?')) return json({ id: inboxId });
+    return json(pages.shift());
+  } });
+  const first = await connector.pull();
+  assert.equal(first.cursor.resumeUrl, quoted);
+  assert.equal(calls.filter(call => call.url.includes('/mailFolders/inbox?')).length, 1);
+  const second = await connector.pull({ cursor: first.cursor });
+  assert.equal(calls.at(-1).url, quoted);
+  assert.equal(second.cursor.resumeUrl, plain);
+  const third = await connector.pull({ cursor: second.cursor });
+  assert.equal(calls.at(-1).url, plain);
+  assert.equal(third.cursor.resumeUrl, plain);
+  assert.equal(calls.filter(call => call.url.includes('/mailFolders/inbox?')).length, 1, 'the inbox id is cached on the connector');
+  assert.ok(calls.every(call => call.authorization === 'Bearer PRIVATE_ACCOUNT_TOKEN' && new URL(call.url).origin === 'https://graph.microsoft.com'));
+  const seen = calls.length;
+  const rejected = [
+    'https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems/messages/delta?$deltatoken=no',
+    'https://evil.example.test/v1.0/me/mailfolders(\'AQMkAGI2THVq\')/messages/delta',
+    `https://graph.microsoft.com/v1.0/me/mailfolders('OTHER')/messages/delta`,
+    `https://graph.microsoft.com/v1.0/me/mailfolders/${inboxId.toLowerCase()}/messages/delta`,
+    'https://graph.microsoft.com/v1.0/me/mailfolders/../messages/delta',
+    'https://graph.microsoft.com/v1.0/me/drive/root/delta'
+  ];
+  for (const resumeUrl of rejected) await assert.rejects(connector.pull({ cursor: { resumeUrl } }), /invalid/);
+  assert.equal(calls.length, seen, 'a rejected continuation never receives the bearer token');
+  const hostile = [];
+  const blocked = new OutlookConnector({ auth, account: { id: 'ms-user', label: 'reader@example.test' }, fetchImpl: async url => {
+    hostile.push(String(url));
+    if (String(url).includes('/mailFolders/inbox?')) return json({ id: inboxId });
+    return json({ value: [message], '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems/messages/delta?$deltatoken=moved' });
+  } });
+  await assert.rejects(blocked.pull(), /invalid/);
+  assert.ok(hostile.every(url => !url.toLowerCase().includes('deleteditems')));
+  assert.ok(hostile.every(url => new URL(url).origin === 'https://graph.microsoft.com'));
+});
+
 test('Outlook preserves the old checkpoint on failed recovery and does not reset permission failures', async () => {
   let calls = 0;
   const connector = new OutlookConnector({ auth, account: { id: 'ms-user', label: 'reader@example.test' }, fetchImpl: async () => {
@@ -180,7 +231,7 @@ test('GitHub pull request reviews, repository commits and Actions runs become na
   };
   const withdrawn = await connector.pull({ cursor: result.cursor });
   engine.ingest(withdrawn.events.find(event => event.type === 'pull_request.updated'));
-  assert.equal(state.state.tasks['review:github:123:pr:90'].status, 'cancelled');
+  assert.equal(state.state.tasks['review:github:123:pr:team/project:3'].status, 'cancelled');
   assert.equal(state.state.tasks['change:github:123:commit:' + sha].status, 'waiting_for_information');
 });
 
@@ -196,4 +247,30 @@ test('temporarily unavailable GitHub issues are rechecked and restored even when
   assert.equal(state.state.tasks[id].status, 'cancelled'); assert.equal(Object.keys(missing.cursor.tracked).length, 1);
   mode = 'restored'; const restored = await connector.pull({ cursor: missing.cursor }); engine.ingest(restored.events[0]);
   assert.equal(state.state.tasks[id].status, 'waiting_for_information'); assert.equal(state.state.tasks[id].externalSource.state, 'open');
+});
+
+test('Outlook delta tombstones become email.unavailable and hold the requested work for review', async t => {
+  const connector = new OutlookConnector({ auth, account: { id: 'ms-user', label: 'reader@example.test' }, now: () => Date.parse('2026-10-27T00:00:00Z'), fetchImpl: async () => json({ value: [
+    { id: 'mail-1', conversationId: 'thread', subject: 'Cedar proposal', from: { emailAddress: { address: 'alex@example.test' } }, receivedDateTime: '2026-10-26T10:00:00Z',
+      body: { contentType: 'text', content: 'Please update the Cedar proposal to include sample size and conclusion and send it back.' } },
+    { id: 'mail-1', '@removed': { reason: 'deleted' } }
+  ], '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=after-delete' }) });
+  const result = await connector.pull();
+  assert.deepEqual(result.events.map(event => event.type), ['email.received', 'email.unavailable']);
+  assert.equal(result.events[1].payload.id, 'microsoft:ms-user:mail-1');
+  assert.equal(result.events[1].payload.reason, 'deleted');
+  await assert.rejects(new OutlookConnector({ auth, account: { id: 'ms-user' }, fetchImpl: async () => json({ value: [{ '@removed': { reason: 'deleted' } }],
+    '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=x' }) }).pull(), /incomplete removal/);
+
+  const state = store(t), engine = new WorkEngine(state);
+  engine.ingest(result.events[0]);
+  const task = Object.values(state.state.tasks).find(item => item.sourceEmailId === 'microsoft:ms-user:mail-1');
+  assert.ok(task, 'the request created a task');
+  const outcome = engine.ingest(result.events[1]);
+  assert.equal(outcome.disposition, 'evidence_invalidated');
+  assert.deepEqual(outcome.relations, [task.id]);
+  assert.equal(state.state.tasks[task.id].sourceUnavailable.reason, 'deleted');
+  assert.equal(state.state.inbox.find(item => item.id === 'microsoft:ms-user:mail-1').available, false);
+  assert.notEqual(state.state.tasks[task.id].status, 'cancelled', 'deleting mail is not a withdrawal');
+  assert.equal(engine.ingest(result.events[1]).duplicate, true);
 });

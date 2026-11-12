@@ -173,3 +173,9 @@ test('a planned probe always cites the request, whichever part it came from', ()
     assert.equal(spec.justified, true);
   }
 });
+
+test('the action contract accepts every permission the engine can write', () => {
+  const action = permission => ({ id: 'action-1', idempotencyKey: 'action-1', actionClass: 'execute_external', permission, status: 'executing' });
+  assert.equal(validateContract('action', action('temporary_yolo')).ok, true);
+  assert.equal(validateContract('action', action('yolo')).ok, false);
+});

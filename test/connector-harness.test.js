@@ -179,6 +179,59 @@ for (const harness of ['standard', 'pi']) for (const sourceId of sources) {
   });
 }
 
+const standingEventTypes = {
+  google: 'email.received', microsoft: 'email.received', slack: 'email.received', notion: 'document.modified',
+  local_files: 'document.modified', apple_notes: 'document.modified', github: 'issue.updated',
+  github_review: 'pull_request.updated', github_change: 'content.changed', github_check: 'workflow.updated'
+};
+
+for (const harness of ['standard', 'pi']) for (const sourceId of sources) {
+  test(`${sourceId} sync automatically invokes ${harness} for semantic activation and source-grounded preparation`, { skip: harness === 'pi' && !piSupported(), timeout: 20000 }, async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-activation-harness-'));
+    const store = new SqliteStore(path.join(directory, 'state.json')), notion = notionFixture();
+    const engine = new WorkEngine(store), connectors = sourceFixtures(sourceId, directory, notion);
+    const provider = sourceId.startsWith('github') ? 'github' : sourceId;
+    const runtime = new DurableRuntime(engine, { tickMs: 100000, connectorFor: id => connectors.find(connector => connector.id === id), artifactConnectionFor: id => id === 'notion' ? notion : null });
+    t.after(async () => { await runtime.close(); await engine.whenSettled(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+    for (const connector of connectors) if (connector.account?.id) bindConnectionAccount(store, connector.id, connector.account.id);
+    const intent = runtime.intents.create({ description: 'Watch Cedar updates', desiredOutcome: 'Prepare a concise Cedar note',
+      prefilter: { connectorIds: [provider], eventTypes: [standingEventTypes[sourceId]], roles: ['UNKNOWN', 'DIRECT_ACTOR', 'SHARED_GROUP', 'PASSIVE_OBSERVER'], tokens: ['cedar'] },
+      predicate: 'The source mentions Cedar.', autonomy: { maxAutonomy: 'prepare' }, prohibited: ['external_write'] }, { confirmed: true });
+    let semanticCalls = 0, sourceReads = 0;
+    engine.replaceReasoner(await scriptedReasoner(harness, messages => {
+      const user = messages.find(message => message.role === 'user');
+      const input = JSON.parse(typeof user?.content === 'string' ? user.content : user?.content?.[0]?.text || '{}');
+      if (input.predicate && input.event) {
+        semanticCalls++;
+        const text = `${input.event.subject}\n${input.event.body}`;
+        assert.ok(text.includes('Cedar'));
+        return { matched: true, quote: 'Cedar', confidence: 0.99 };
+      }
+      if (input.primarySourceEventId) {
+        const result = messages.filter(message => ['tool', 'toolResult'].includes(message.role)).at(-1);
+        if (!result) return { tool: 'read_task_source', id: 'source', args: {} };
+        const read = JSON.parse(typeof result.content === 'string' ? result.content : result.content[0].text);
+        assert.equal(read.provider, provider); assert.equal(read.eventId, input.primarySourceEventId);
+        assert.ok(read.content.includes('Cedar')); sourceReads++;
+        return { title: 'Cedar note', body: 'Cedar requires follow-up.', evidenceRefs: [{ eventId: read.eventId, quote: 'Cedar' }] };
+      }
+      return { probes: [], nextStep: 'Review the source.', experiences: [] };
+    }));
+    const sync = new ConnectorSync({ connectors, cursors: new CursorStore(store), engine });
+    const synced = await sync.run();
+    assert.ok(synced.results.every(result => !result.failed && !result.partial), JSON.stringify(synced));
+    await engine.whenSettled();
+    const task = Object.values(store.state.tasks).find(item => item.kind === 'standing_intent' && item.standingIntentId === intent.id);
+    assert.ok(task, JSON.stringify({ events: store.state.events, jobs: runtime.jobs.list() }));
+    assert.equal(task.preparedWork?.kind, 'draft', JSON.stringify({ reasoning: task.reasoning, jobs: runtime.jobs.list() }));
+    assert.equal(task.preparedWork.evidenceRefs[0].eventId, task.request.source.eventId);
+    assert.equal(semanticCalls, 1); assert.equal(sourceReads, 1);
+    assert.ok(runtime.ledger.list({ taskId: task.id }).some(row => row.provider === 'workspace' && row.tool === 'read_task_source' && row.status === 'verified'));
+    assert.equal(runtime.ledger.list({ taskId: task.id }).filter(row => row.is_write).length, 0);
+    assert.equal(notion.written.size, 0);
+  });
+}
+
 for (const sourceId of ['google', 'microsoft', 'slack', 'github', 'local_files', 'apple_notes']) {
   test(`${sourceId} suppression prevents source activation and all provider writes`, async t => {
     const context = await fixture(t, sourceId, { policy: 'suppress' });

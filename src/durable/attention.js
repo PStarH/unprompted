@@ -10,6 +10,10 @@ export class AttentionBudget {
   }
   quiet(now) {
     const quiet = this.options.quietHours; if (!quiet) return false;
+    // A zero-length window is not a 24-hour window. Policies stored before the
+    // validator rejected start === end read as "no quiet window" instead of
+    // silencing every notification forever.
+    if (quiet.startHour === quiet.endHour) return false;
     const hour = Number(new Intl.DateTimeFormat('en', { hour: 'numeric', hourCycle: 'h23', timeZone: quiet.timeZone || 'UTC' }).format(new Date(now)));
     return quiet.startHour < quiet.endHour ? hour >= quiet.startHour && hour < quiet.endHour : hour >= quiet.startHour || hour < quiet.endHour;
   }
@@ -45,9 +49,19 @@ export class AttentionBudget {
       const last = this.db.prepare("SELECT MAX(delivered_at) at FROM notification_deliveries WHERE class!='critical'").get().at;
       const repeated = this.db.prepare("SELECT 1 FROM notification_deliveries WHERE issue_key=? AND delivered_at>=? AND state!='resolved'").get(issueKey, iso(now - this.options.issueCooldownMs));
       const activeCritical = this.db.prepare("SELECT 1 FROM notification_deliveries WHERE class='critical' AND state='delivered' LIMIT 1").get();
-      const deferred = !critical && (activeCritical || this.quiet(now) || used >= this.options.maxInteractivePerHour || last && now - Date.parse(last) < this.options.minIntervalMs || repeated);
-      const state = deferred ? ['informational', 'digest'].includes(notificationClass) ? 'digest' : 'pending' : 'delivered';
-      const notBefore = deferred ? iso(Math.max(now + this.options.digestWindowMs, last ? Date.parse(last) + this.options.minIntervalMs : 0)) : null;
+      // Zero means "interactive delivery is off", not "queue forever". Without
+      // this branch `used >= 0` is always true and every non-critical
+      // notification stays pending, re-offered by releaseDue() forever.
+      const interactiveOff = this.options.maxInteractivePerHour === 0;
+      // High priority may skip the spacing between interruptions, but never the
+      // hourly ceiling, quiet hours, an unresolved critical notification, or a
+      // repeated issue. Priority changes pacing, not the budget itself.
+      const highPriority = notification.priority === 'high';
+      const deferred = !critical && (interactiveOff || activeCritical || this.quiet(now) || used >= this.options.maxInteractivePerHour || !highPriority && last && now - Date.parse(last) < this.options.minIntervalMs || repeated);
+      const state = deferred ? interactiveOff || ['informational', 'digest'].includes(notificationClass) ? 'digest' : 'pending' : 'delivered';
+      // A digest row is not waiting for a slot, so it gets no wake-up time;
+      // releaseDue() only selects rows whose not_before has arrived.
+      const notBefore = deferred && !interactiveOff ? iso(Math.max(now + this.options.digestWindowMs, last ? Date.parse(last) + this.options.minIntervalMs : 0)) : null;
       const id = existing?.id || randomUUID();
       this.db.prepare(`INSERT INTO notification_deliveries VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
         class=excluded.class,state=excluded.state,notification_json=excluded.notification_json,created_at=excluded.created_at,
@@ -68,6 +82,9 @@ export class AttentionBudget {
   }
   releaseDue() {
     const rows = this.db.prepare("SELECT * FROM notification_deliveries WHERE state IN ('pending','digest') AND not_before<=? ORDER BY created_at LIMIT 30").all(iso(this.database.now()));
+    const priorityRank = { low: 1, normal: 2, high: 3 };
+    rows.sort((left, right) => (priorityRank[parse(right.notification_json)?.priority] || 2) - (priorityRank[parse(left.notification_json)?.priority] || 2)
+      || String(left.created_at).localeCompare(String(right.created_at)));
     const released = [];
     const revoked = new Set(parse(this.database.get('revoked_connectors', '[]')) || []);
     for (const row of rows) {
@@ -101,6 +118,23 @@ export class AttentionBudget {
       if (![quiet.startHour, quiet.endHour].every(value => Number.isInteger(value) && value >= 0 && value < 24)) throw durableError('INVALID_ATTENTION_POLICY', 'Quiet hours need clock hours 0–23.', 400);
       try { new Intl.DateTimeFormat('en', { timeZone: quiet.timeZone || 'UTC' }); } catch { throw durableError('INVALID_ATTENTION_POLICY', 'Unknown quiet-hours time zone.', 400); }
     }
-    this.database.atomic(() => this.database.set('attention_policy', json(next))); this.options = next; return this.describe();
+    // A zero-length window is not a 24-hour window, so it is never written. But
+    // every save from the settings form resends the stored quietHours, so a
+    // policy already stored that way must stay resaveable — otherwise one legacy
+    // value would lock every attention setting out of the form for good. The
+    // read side treats such a window as "no quiet hours" (see quiet()).
+    const supplied = Object.hasOwn(options, 'quietHours') ? options.quietHours : null;
+    const stored = this.options.quietHours;
+    const sameWindow = (left, right) => Boolean(left && right) && left.startHour === right.startHour
+      && left.endHour === right.endHour && (left.timeZone || 'UTC') === (right.timeZone || 'UTC');
+    const unchangedLegacyWindow = stored && stored.startHour === stored.endHour && sameWindow(stored, supplied);
+    if (supplied && supplied.startHour === supplied.endHour && !unchangedLegacyWindow) throw durableError('INVALID_ATTENTION_POLICY', 'Quiet hours need different start and end hours.', 400);
+    this.database.atomic(() => {
+      this.database.set('attention_policy', json(next));
+      for (const key of ['maxInteractivePerHour', 'minIntervalMs']) if (Object.hasOwn(options, key)) {
+        const current = parse(this.database.get(`rsi_config:${key}`, 'null')) || { version: 0 };
+        this.database.set(`rsi_config:${key}`, json({ version: current.version + 1, proposalId: null }));
+      }
+    }); this.options = next; return this.describe();
   }
 }

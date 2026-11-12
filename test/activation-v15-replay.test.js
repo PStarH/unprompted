@@ -11,7 +11,7 @@ import { SqliteStore } from '../src/durable/store.js';
 import { DurableRuntime } from '../src/durable/runtime.js';
 import { WorkEngine } from '../src/engine.js';
 import { SimulatedMailProvider } from '../src/providers.js';
-import { DurableDatabase, iso } from '../src/durable/database.js';
+import { DurableDatabase, SQLITE_RUNTIME, iso } from '../src/durable/database.js';
 
 const workerPath = fileURLToPath(new URL('./fixtures/durable-worker.mjs', import.meta.url));
 const related = ({ events }) => ({ outcome: 'RELATED_WAIT', summary: 'Waiting for delivery terms.', missingEvidence: ['Delivery date'],
@@ -470,7 +470,7 @@ test('activation v1.5 replay matrix', async t => {
   assert.equal(stored.metrics.networkCalls, 0);
   assert.equal(JSON.stringify(stored.metrics).includes('quotation'), false);
   assert.equal(reportEnv.runtime.database.db.pragma('journal_mode', { simple: true }), 'wal');
-  assert.equal(reportEnv.runtime.database.db.pragma('user_version', { simple: true }), 5);
+  assert.equal(reportEnv.runtime.database.db.pragma('user_version', { simple: true }), SQLITE_RUNTIME.schemaVersion);
   await reportEnv.runtime.privacy.forget({ kind: 'event', id: 'event:cited' });
   assert.equal(reportEnv.runtime.db.prepare('SELECT COUNT(*) n FROM replay_results').get().n, 0);
 });
@@ -478,8 +478,8 @@ test('activation v1.5 replay matrix', async t => {
 test('bounded RSI applies only allowlisted parameters and rolls them back', t => {
   const env = open(t);
   assert.throws(() => env.runtime.rsi.propose({ parameter: 'authorizeSend', value: 1, evidence: { useful: 1 }, replayId: 'replay' }), { code: 'RSI_FORBIDDEN' });
-  env.runtime.database.atomic(() => env.runtime.db.prepare('INSERT INTO replay_results VALUES(?,?,?,?,?)').run('replay:1', 'activation_v15', 1, JSON.stringify({ scenarios: [{ id: '1', passed: true }], externalActions: 0, networkCalls: 0 }), env.at()));
-  const proposal = env.runtime.rsi.propose({ parameter: 'maxPairCandidates', value: 4, evidence: { compared: 2 }, replayId: 'replay:1' });
+  const comparison = env.runtime.rsi.evaluate({ parameter: 'maxPairCandidates', value: 4, datasetVersion: 'pair-limit-v1', cases: [{ ageMs: 1000, rank: 4, expected: true }] });
+  const proposal = env.runtime.rsi.propose({ parameter: 'maxPairCandidates', value: 4, evidence: { compared: 2 }, replayId: comparison.id });
   assert.equal(env.runtime.rsi.noteFeedback('silence').neutral, true);
   const approved = env.runtime.applyRsi(proposal.id, proposal.version);
   assert.equal(env.runtime.maxPairCandidates, 4);

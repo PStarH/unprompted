@@ -14,12 +14,14 @@ import { draftReviewToken } from '../src/draft-review.js';
 import { OpenAiCompatibleReasoner, PiReasoner } from '../src/reasoning.js';
 import { piSupported } from '../src/pi-runtime.js';
 import { LocalSetupStore } from '../src/setup.js';
+import { reminderListId } from '../src/connectors/apple-reminders.js';
+import { parseMailbox } from '../src/connectors/google.js';
 
 const parent = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const json = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
 const scopes = { google: ['https://www.googleapis.com/auth/gmail.compose'], microsoft: ['Mail.ReadWrite'] };
 function connectionFor(id) {
-  const writes = [], records = new Map();
+  const writes = [], records = new Map(), removals = [], deleted = new Set();
   const connector = { id, live: true, config: { gmailDraftsEnabled: true }, auth: { accessToken: async () => 'PRIVATE_TOKEN' },
     folders: [{ accountId: 'notes-account', folderId: 'notes-folder', label: 'Work' }],
     fetchImpl: async (url, options) => {
@@ -33,6 +35,9 @@ function connectionFor(id) {
         return json({ id: recordId });
       }
       const remoteId = target.pathname.split('/').at(-1), record = records.get(remoteId);
+      if (options.method === 'DELETE') { removals.push(target.pathname); records.delete(remoteId); deleted.add(remoteId); return new Response(null, { status: 204 }); }
+      if (options.method === 'PATCH') { removals.push(target.pathname); Object.assign(record, JSON.parse(options.body)); return json({ id: remoteId, ...record }); }
+      if (deleted.has(remoteId)) return new Response('{}', { status: 404 });
       if (id === 'google') return json({ id: remoteId, message: { ...record.message, labelIds: ['DRAFT'] } });
       if (id === 'microsoft') return json({ id: remoteId, isDraft: true, ...record });
       if (target.pathname.endsWith('/children')) {
@@ -49,10 +54,18 @@ function connectionFor(id) {
       async readNotes(folders) {
         return { records: [...records].map(([providerId, content]) => ({ providerId, accountId: folders[0].accountId, folderId: folders[0].folderId,
           title: content.title, content: `${content.title}\n${content.body}\n${content.marker}` })) };
+      },
+      async createReminder(folder, content, { signal }) {
+        signal?.throwIfAborted();
+        const id = `native-${writes.length + 1}`; writes.push({ folder, content }); records.set(id, content); return { id };
+      },
+      async readReminders(folders) {
+        return { records: [...records].map(([id, content]) => ({ id, accountId: folders[0].accountId, folderId: folders[0].folderId,
+          title: content.title, body: `${content.body}\n${content.marker}`, state: 'open' })), errors: [], complete: true };
       }
     }
   };
-  return { connector, accountId: `${id}-account`, scopes: scopes[id] || [], writes, records };
+  return { connector, accountId: `${id}-account`, scopes: scopes[id] || [], writes, records, removals };
 }
 async function fixture(t, id = 'notion', { shadow = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-artifacts-'));
@@ -67,7 +80,7 @@ async function fixture(t, id = 'notion', { shadow = false } = {}) {
   await engine.whenSettled();
   const taskId = 'request:m1';
   assert.equal(store.state.tasks[taskId].status, 'ready_for_approval');
-  const targetId = id === 'notion' ? parent : id === 'apple_notes' ? 'notes-folder' : 'drafts';
+  const targetId = id === 'notion' ? parent : id === 'apple_reminders' ? reminderListId(connection.connector.folders[0]) : id === 'apple_notes' ? 'notes-folder' : 'drafts';
   const grant = await runtime.artifacts.createGrant({ connectorId: id, targetId }, { confirmed: true });
   return { directory, store, engine, runtime, connection, grant, taskId };
 }
@@ -77,7 +90,7 @@ function request(context) {
     ...(context.grant.family === 'email.draft' ? {} : { title: 'Cedar 工作进展', body: 'Project findings\nA source-backed summary.' }) }, { actor: 'user', reviewToken: draftReviewToken(task) });
 }
 
-for (const id of ['google', 'microsoft', 'notion', 'apple_notes']) {
+for (const id of ['google', 'microsoft', 'notion', 'apple_notes', 'apple_reminders']) {
   test(`${id} creates a guarded artifact, verifies it through independent readback and leaves the source task open`, async t => {
     const context = await fixture(t, id);
     const pending = request(context);
@@ -215,10 +228,29 @@ test('Gmail draft permission does not enable sending or Google Docs editing', t 
 test('artifact providers reject targets outside the selected native folders and missing mail write scopes', () => {
   const notes = connectionFor('apple_notes');
   assert.equal(new ArtifactProvider(notes, 'unselected-folder').available(), false);
+  assert.equal(new ArtifactProvider(connectionFor('apple_reminders'), 'unselected-list').available(), false);
   for (const id of ['google', 'microsoft']) {
     const connection = connectionFor(id); connection.scopes = [];
     assert.equal(new ArtifactProvider(connection, 'drafts').available(), false);
   }
+});
+
+test('a changed or completed reminder is not verified as the original creation', async () => {
+  const connection = connectionFor('apple_reminders');
+  const provider = new ArtifactProvider(connection, reminderListId(connection.connector.folders[0]));
+  const payload = { title: 'Call Cedar', body: 'Discuss next steps', idempotencyKey: 'one-operation' };
+  const receipt = await provider.create(payload, { beforeDispatch() {} });
+  assert.equal((await provider.lookup(payload.idempotencyKey, { receiptId: receipt.id, payload })).status, 'found');
+  connection.records.get(receipt.id).body = 'Changed by the user';
+  assert.equal((await provider.lookup(payload.idempotencyKey, { receiptId: receipt.id, payload })).status, 'unknown');
+});
+
+test('Reminders artifact destinations distinguish equal list IDs in different accounts', async () => {
+  const connection = connectionFor('apple_reminders');
+  connection.connector.folders.push({ accountId: 'other-account', folderId: 'notes-folder', label: 'Other Work' });
+  const provider = new ArtifactProvider(connection, reminderListId(connection.connector.folders[1]));
+  await provider.create({ title: 'Follow up', body: 'Check the result', idempotencyKey: 'second-account' }, { beforeDispatch() {} });
+  assert.equal(connection.writes[0].folder.accountId, 'other-account');
 });
 
 test('activation saves the prepared reply automatically without enabling send authorization', async t => {
@@ -254,6 +286,48 @@ test('native Notes script creates only in the exact selected folder and escapes 
   input.folder.folderId = 'unselected';
   assert.equal(JSON.parse(sandbox.run(['create-note'])).ok, false);
   assert.equal(written.length, 1);
+});
+
+test('native Reminders script creates only in the chosen account and list, preserving text as data', () => {
+  const written = [];
+  const list = { id: () => 'list', name: () => 'Work', reminders: { push: item => written.push(item) } };
+  const account = { id: () => 'account', name: () => 'Personal', lists: () => [list] };
+  const reminders = { accounts: () => [account], Reminder: content => ({ ...content, id: () => 'reminder-id' }) };
+  const application = name => { assert.equal(name, 'Reminders'); return reminders; };
+  application.currentApplication = () => ({});
+  const sandbox = vm.createContext({ ObjC: { import: () => {} }, Application: application });
+  vm.runInContext(fs.readFileSync(new URL('../src/native-source-script.jxa.js', import.meta.url), 'utf8'), sandbox);
+  const input = { folder: { accountId: 'account', folderId: 'list' }, title: 'Call <Cedar>', body: 'Review\n<script>text</script>', marker: `unprompted-artifact:${'a'.repeat(64)}` };
+  sandbox.inputJSON = () => input;
+  const result = JSON.parse(sandbox.run(['create-reminder']));
+  assert.equal(result.ok, true); assert.equal(result.id, 'reminder-id');
+  assert.equal(written.length, 1); assert.equal(written[0].name, input.title);
+  assert.equal(written[0].body, `${input.body}\n${input.marker}`);
+  input.folder.accountId = 'different-account';
+  assert.equal(JSON.parse(sandbox.run(['create-reminder'])).ok, false);
+  assert.equal(written.length, 1);
+});
+
+test('native Reminders changes and deletion check the chosen list and exact last modification', () => {
+  let deleted = false;
+  const reminder = { id: () => 'reminder-id', modificationDate: () => new Date('2026-01-01T00:00:00.000Z'), delete() { deleted = true; } };
+  const list = { id: () => 'list', name: () => 'Work', reminders: () => [reminder] };
+  const account = { id: () => 'account', name: () => 'Personal', lists: () => [list] };
+  const application = name => { assert.equal(name, 'Reminders'); return { accounts: () => [account] }; };
+  application.currentApplication = () => ({});
+  const sandbox = vm.createContext({ ObjC: { import: () => {} }, Application: application });
+  vm.runInContext(fs.readFileSync(new URL('../src/native-source-script.jxa.js', import.meta.url), 'utf8'), sandbox);
+  const input = { folder: { accountId: 'account', folderId: 'list' }, reminderId: 'reminder-id', expectedUpdatedAt: '2025-01-01T00:00:00.000Z', changes: { completed: true } };
+  sandbox.inputJSON = () => input;
+  assert.equal(JSON.parse(sandbox.run(['change-reminder'])).ok, false);
+  assert.equal(reminder.completed, undefined);
+  input.expectedUpdatedAt = '2026-01-01T00:00:00.000Z';
+  assert.equal(JSON.parse(sandbox.run(['change-reminder'])).ok, true);
+  assert.equal(reminder.completed, true);
+  input.folder.folderId = 'other-list';
+  assert.equal(JSON.parse(sandbox.run(['delete-reminder'])).ok, false); assert.equal(deleted, false);
+  input.folder.folderId = 'list';
+  assert.equal(JSON.parse(sandbox.run(['delete-reminder'])).ok, true); assert.equal(deleted, true);
 });
 
 test('individual artifact review satisfies require-review while preserving suppression', async t => {
@@ -331,3 +405,231 @@ for (const connectorId of ['apple_notes', 'notion']) {
     }
   });
 }
+
+for (const id of ['google', 'microsoft', 'notion']) {
+  test(`${id} undo removes an unchanged artifact, confirms the removal and records undo feedback`, async t => {
+    const context = await fixture(t, id);
+    request(context); await context.engine.whenSettled();
+    const created = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+    assert.equal(created.status, 'verified');
+    await assert.rejects(context.runtime.artifacts.undo(context.taskId, created.id, { actor: 'activation' }), error => error.code === 'UNDO_NOT_AUTHORIZED');
+    const undone = await context.runtime.artifacts.undo(context.taskId, created.id);
+    assert.equal(undone.status, 'undone');
+    assert.equal(undone.undo.status, 'verified');
+    assert.equal(context.connection.removals.length, 1);
+    assert.equal(context.runtime.db.prepare("SELECT COUNT(*) n FROM feedback_events WHERE kind='undo'").get().n, 1);
+    assert.equal((await context.runtime.artifacts.undo(context.taskId, created.id)).status, 'undone', 'a repeated undo is a no-op');
+    assert.equal(context.connection.removals.length, 1);
+    const lifecycle = context.runtime.artifactLifecycle(context.taskId);
+    assert.equal(lifecycle.published[0].status, 'undone');
+    assert.equal(lifecycle.published[0].reversibility.kind, 'reversible');
+  });
+}
+
+test('undo leaves an artifact the user changed and refuses targets without automatic removal', async t => {
+  const context = await fixture(t, 'microsoft');
+  request(context); await context.engine.whenSettled();
+  const created = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+  const [remoteId, record] = [...context.connection.records][0];
+  context.connection.records.set(remoteId, { ...record, subject: 'Edited by the user' });
+  await assert.rejects(context.runtime.artifacts.undo(context.taskId, created.id), error => error.code === 'UNDO_CHANGED');
+  assert.equal(context.connection.removals.length, 0, 'an edited draft is never removed');
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].undo.status, 'refused');
+
+  const notes = await fixture(t, 'apple_notes');
+  request(notes); await notes.engine.whenSettled();
+  const note = notes.runtime.tasks.get(notes.taskId).artifactRequests[0];
+  await assert.rejects(notes.runtime.artifacts.undo(notes.taskId, note.id), error => error.code === 'UNDO_UNSUPPORTED');
+});
+
+test('mail drafts accept a display name and reject header injection', async t => {
+  for (const [id, recipient, header] of [
+    ['google', 'Alex <alex@example.com>', /^To: Alex <alex@example.com>/m],
+    ['google', '"Alex Chen" <alex@example.com>', /^To: Alex Chen <alex@example.com>/m],
+    ['google', 'Ann; <alex@example.com>', /^To: "Ann;" <alex@example.com>/m],
+    ['google', '=?UTF-8?B?hi?= <alex@example.com>', /^To: =\?UTF-8\?B\?/m],
+    ['google', '陈 <alex@example.com>', null],
+    ['microsoft', 'Ann: Bob <alex@example.com>', null],
+    ['microsoft', '陈 <alex@example.com>', null]
+  ]) {
+    const context = await fixture(t, id);
+    context.store.mutate(state => { state.tasks[context.taskId].draft.to = recipient; });
+    const task = context.runtime.tasks.get(context.taskId);
+    context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id }, { actor: 'user', reviewToken: draftReviewToken(task) });
+    await context.engine.whenSettled();
+    const artifact = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+    assert.equal(artifact.status, 'verified', `${id} ${recipient}`);
+    if (id === 'google') {
+      const raw = Buffer.from(context.connection.writes.at(-1).body.message.raw, 'base64url').toString('utf8');
+      if (header) assert.match(raw, header);
+      else assert.match(raw, /=\?UTF-8\?B\?/);
+      assert.doesNotMatch(raw, /\r\nBcc:/);
+    } else {
+      const posted = context.connection.writes.at(-1).body.toRecipients[0].emailAddress;
+      assert.equal(posted.address, 'alex@example.com');
+      assert.equal(posted.name, parseMailbox(recipient).displayName);
+    }
+  }
+  const context = await fixture(t, 'google');
+  const provider = new ArtifactProvider(context.connection, 'drafts');
+  await assert.rejects(provider.create({ title: 'Cedar', body: 'Hello', to: 'Alex <alex@example.com>\r\nBcc: evil@example.com', idempotencyKey: 'inject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
+  await assert.rejects(provider.create({ title: 'Cedar\nBcc: evil@example.com', body: 'Hello', to: 'alex@example.com', idempotencyKey: 'inject-subject' }, { beforeDispatch() {} }), /Invalid draft recipient/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a new destination grant does not cancel a queued non-mail artifact', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  const version = Number(context.runtime.database.get('context_version'));
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  assert.equal(Number(context.runtime.database.get('context_version')), version + 1);
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.some(item => item.status === 'verified'), true, JSON.stringify(requests));
+  assert.equal(context.connection.writes.length, 1);
+});
+
+test('a changed reply is not retried as an approved draft', async t => {
+  const context = await fixture(t, 'google');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  const approved = task.draft.body;
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  context.store.mutate(state => { state.tasks[context.taskId].draft.body = `${approved}\nUnapproved edit`; });
+  await context.runtime.artifacts.createGrant({ connectorId: 'google', targetId: 'drafts', project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'blocked');
+  assert.match(requests[0].error, /Review it before trying again/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a context retry happens once and does not chain', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseFirst;
+  let releaseSecond;
+  let markStarted;
+  let markSecond;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const second = new Promise(resolve => { markSecond = resolve; });
+  let phase = 'first';
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (phase === 'first') { phase = 'between'; markStarted(); await new Promise(resolve => { releaseFirst = resolve; }); phase = 'retry'; }
+    else if (phase === 'retry') { phase = 'second-wait'; markSecond(); await new Promise(resolve => { releaseSecond = resolve; }); phase = 'done'; }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: draftReviewToken(task) });
+  await started;
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  releaseFirst();
+  await second;
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Other' }, { confirmed: true });
+  releaseSecond();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2);
+  assert.equal(requests.every(item => item.status === 'blocked'), true, JSON.stringify(requests));
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('an automatic draft retry stays non-explicit', async t => {
+  const context = await fixture(t, 'google');
+  const approvals = [];
+  const authorize = context.engine.policy.authorize.bind(context.engine.policy);
+  context.engine.policy.authorize = input => {
+    if (input.actionClass === 'execute_external') approvals.push(input.approval?.permission);
+    return authorize(input);
+  };
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  await started;
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].explicit, false);
+  await context.runtime.artifacts.createGrant({ connectorId: 'google', targetId: 'drafts', project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2, JSON.stringify(requests));
+  assert.equal(requests[0].status, 'blocked');
+  assert.equal(requests[1].explicit, false);
+  assert.equal(requests[1].status, 'verified');
+  assert.deepEqual([...new Set(approvals)], ['pre_authorized']);
+  assert.equal(context.connection.writes.length, 1);
+});
+
+test('a changed review token blocks a non-mail retry', async t => {
+  const context = await fixture(t, 'notion');
+  let releaseToken;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let paused = false;
+  const originalToken = context.connection.connector.auth.accessToken;
+  context.connection.connector.auth.accessToken = async () => {
+    if (!paused) { paused = true; markStarted(); await new Promise(resolve => { releaseToken = resolve; }); }
+    return originalToken();
+  };
+  const task = context.runtime.tasks.get(context.taskId);
+  const approved = draftReviewToken(task);
+  context.runtime.artifacts.request(context.taskId, { grantId: context.grant.id, title: 'Cedar notes', body: 'A source-backed page.' }, { actor: 'user', reviewToken: approved });
+  await started;
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests[0].reviewToken, approved);
+  context.store.mutate(state => { state.tasks[context.taskId].draft.body = `${state.tasks[context.taskId].draft.body}\nUnreviewed edit`; });
+  await context.runtime.artifacts.createGrant({ connectorId: 'notion', targetId: parent, project: 'Cedar' }, { confirmed: true });
+  releaseToken();
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'blocked');
+  assert.equal(requests[0].reviewToken, approved);
+  assert.match(requests[0].error, /Review it before trying again/);
+  assert.equal(context.connection.writes.length, 0);
+});
+
+test('a permission refresh retries a draft that was cancelled before dispatch', async t => {
+  const context = await fixture(t, 'google');
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  await context.engine.whenSettled();
+  const task = context.runtime.tasks.get(context.taskId);
+  assert.equal(task.artifactRequests[0].status, 'verified');
+  context.store.mutate(state => { state.tasks[context.taskId].artifactRequests[0].status = 'blocked'; });
+  context.store.db.prepare("UPDATE tool_executions SET status='cancelled', last_error_class='confirmed_no_effect' WHERE idempotency_key=?").run(task.artifactRequests[0].key);
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests.length, 1, 'an ordinary reassessment does not repeat a blocked draft');
+  context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId), { retryInterrupted: true });
+  await context.engine.whenSettled();
+  const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].status, 'verified');
+});

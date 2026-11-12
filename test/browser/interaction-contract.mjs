@@ -8,7 +8,10 @@ const output = process.env.UNPROMPTED_BROWSER_OUTPUT || 'outputs/human-ux-valida
 fs.mkdirSync(output, { recursive: true });
 const browser=await chromium.launch({ channel: process.env.UNPROMPTED_BROWSER_CHANNEL || undefined, headless: true })
   .catch(async error => { await fixture?.close(); throw error; });
-const page=await browser.newPage({viewport:{width:1440,height:1000},locale:'zh-CN'});
+// This contract resizes while switching language; a running view transition
+// aborts with a page error when the viewport changes, so pin reduced motion as
+// the other browser contracts do.
+const page=await browser.newPage({viewport:{width:1440,height:1000},locale:'zh-CN',reducedMotion:'reduce'});
 const errors=[], checks=[], posts=[];
 page.on('pageerror', error=>errors.push(error.message));
 page.on('request', req=>{if(req.method()==='POST') posts.push(req.url());});
@@ -17,6 +20,14 @@ await page.addInitScript(()=>{
   window.EventSource=class { constructor(){ window.__streams.push(this); setTimeout(()=>this.onopen?.(),0); } close(){} };
 });
 const record=id=>checks.push({id,passed:true});
+async function openTask(id) {
+  const card=page.locator(`#taskContent [data-select-task="${id}"]`);
+  if(!(await card.isVisible())) {
+    const group=await card.evaluate(el=>el.closest('.ws-task-group')?.dataset.group || null);
+    if(group) await page.locator(`#field-panel-${group}-tab`).click();
+  }
+  await card.click();
+}
 let state;
 async function emit(mutate=()=>{}) {
   mutate(state); state.revision++;
@@ -55,15 +66,21 @@ try {
  state.tasks=[a,b]; state.notifications=[];
  await emit();
  assert.equal(await page.locator('#taskContent .wait-form').count(),0);
+ assert.equal(await page.locator('#taskContent .ws-dependency-band').count(),0);
+ assert.equal(await page.locator('#sharedDependencySection [data-dependency-form]').count(),1);
  await page.locator('[data-dependency-answer="dep:human"]').fill('这段答案还没有提交：1200');
  await page.locator('[data-dependency-answer="dep:human"]').evaluate(el=>el.setSelectionRange(3,6));
  await emit(s=>{s.tasks[0].management.dependencies[0].label='补充样本量及来源';});
  assert.equal(await page.locator('[data-dependency-answer="dep:human"]').inputValue(),'这段答案还没有提交：1200');
  assert.deepEqual(await page.locator('[data-dependency-answer="dep:human"]').evaluate(el=>[el.selectionStart,el.selectionEnd,document.activeElement===el]),[3,6,true]);
  record('shared-answer-and-selection-survive-live-update');
- await page.locator('#taskContent [data-select-task="human-a"]').click();
- await page.locator('#taskContent [data-open-task="human-a"]').first().click();
- const wait=page.locator('#taskDialog [data-wait-form="human-a"]');
+ await openTask('human-a');
+ const detailTabs=page.locator('#taskContent .detail-focus-navigation [role="tab"]');
+ const followUpTab=detailTabs.filter({hasText:'跟进设置'});
+ if(await followUpTab.count() && await followUpTab.getAttribute('aria-selected')!=='true') await followUpTab.click();
+ const settings=page.locator('#taskContent details[data-preserve^="ws-management-"]');
+ if(!(await settings.evaluate(el=>el.open))) await settings.locator(':scope > summary').click();
+ const wait=page.locator('#taskContent [data-wait-form="human-a"]');
  await wait.locator('select').selectOption('time');
  await wait.locator('input').fill('2026-10-29T15:45');
  await wait.locator('input').focus();
@@ -73,9 +90,12 @@ try {
  assert.equal(await wait.locator('input').isVisible(),true);
  assert.equal(await wait.locator('input').evaluate(el=>document.activeElement===el),true);
  record('wait-draft-and-focus-survive-live-update');
- const detail=page.locator('#taskDialog details[data-preserve^="full-evidence-"]');
- await detail.locator(':scope > summary').click();
- const note=page.locator('#taskDialog [data-reason-for="human-a"]');
+ const evidenceTab=detailTabs.filter({hasText:'来源依据'});
+ if(await evidenceTab.count() && await evidenceTab.getAttribute('aria-selected')!=='true') await evidenceTab.click();
+ const detail=page.locator('#taskContent details[data-preserve^="full-evidence-"]');
+ if(!(await detail.evaluate(el=>el.open))) await detail.locator(':scope > summary').click();
+ if(await followUpTab.getAttribute('aria-selected')!=='true') await followUpTab.click();
+ const note=page.locator('#taskContent [data-reason-for="human-a"]');
  await note.fill('还在输入中文');
  await note.dispatchEvent('compositionstart',{data:'输入'});
  const retained=await note.elementHandle();
@@ -83,30 +103,36 @@ try {
  assert.equal(await retained.evaluate(el=>el.isConnected),true,'IME composition must not lose its node');
  await note.dispatchEvent('compositionend',{data:'输入'});
  assert.equal(await note.inputValue(),'还在输入中文');
- assert.match(await page.locator('#taskDialog .management-line').innerText(),/核实结果/);
+ assert.match(await page.locator('#taskContent .management-line').innerText(),/核实结果/);
  assert.equal(await detail.evaluate(el=>el.open),true);
  record('chinese-composition-defers-render-and-then-catches-up');
- await page.keyboard.press('Escape');
- // Native dialog closing queues its close event, which restores the opener.
- await page.waitForFunction(()=>!document.querySelector('#taskDialog').open && document.activeElement.dataset.openTask==='human-a');
- assert.equal(await page.evaluate(()=>document.activeElement.dataset.openTask),'human-a');
- record('closing-refreshed-details-restores-task-focus');
- const order=await page.locator('#taskContent .ws-task-row').evaluateAll(nodes=>nodes.map(n=>n.dataset.taskCard));
+ await page.locator('#taskContent [data-close-inspector]').click();
+ assert.equal(await page.locator('#taskContent .ws-inspector').count(),0);
+ assert.equal(await page.evaluate(()=>document.activeElement.dataset.selectTask),'human-a');
+ record('closing-task-page-restores-task-focus');
+ await openTask('human-a');
+ const order=[await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task')];
  await emit(s=>{s.tasks[1].management.priority.score=120; s.tasks.push(make('human-new',150));});
- assert.deepEqual(await page.locator('#taskContent .ws-task-row').evaluateAll(nodes=>nodes.map(n=>n.dataset.taskCard)),[...order,'human-new']);
+ assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'),'human-a');
+ for(const expected of ['human-b','human-new']){
+  await page.locator('#taskContent [data-task-step="1"]').click();
+  assert.equal(await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task'),expected);
+  order.push(expected);
+ }
+ assert.deepEqual(order,['human-a','human-b','human-new']);
  record('priority-changes-and-arrivals-do-not-move-existing-tasks');
  const ready=make('human-ready',180);ready.status='ready_for_approval';
  ready.reviewToken='a'.repeat(64);
  ready.draft={to:'review@example.test',subject:'Re: 项目跟进',body:'这是一段待审阅的原始回复。\n保留用户的原文。',documentVersion:original.assessment?.documentVersion||1};
  ready.management.nextAction={kind:'approve'};
  await emit(s=>{s.tasks.push(ready);});
- await page.locator('#agentStatus [data-go="attention"]').click();
- assert.equal(await page.locator('#viewAttention').isVisible(),false);
+ await page.locator('#taskContent [data-close-inspector]').click();
+ await openTask('human-ready');
+ assert.equal(await page.locator('#viewAttention').count(),0);
  assert.equal(await page.locator('#viewHome').isVisible(),true);
- assert.equal(await page.locator('#taskContent .ws-inspector').count(),0);
- assert.equal(await page.evaluate(()=>document.activeElement.tagName),'H1');
+ assert.equal(await page.locator('#taskContent .ws-inspector[data-inspector-task="human-ready"]').count(),1);
+ assert.equal(await page.evaluate(()=>document.activeElement?.classList.contains('ws-detail-drawer')),true);
  record('overview-decision-entry-has-a-clear-destination-and-focus');
- await page.locator('#taskContent [data-select-task="human-ready"]').click();
  await page.route('**/api/state',route=>route.fulfill({json:state}));
  let reviewedToken;
  await page.route('**/api/tasks/human-ready/approve',route=>{ reviewedToken=route.request().postDataJSON().reviewToken; return route.abort('failed'); });
@@ -143,13 +169,28 @@ try {
  await page.screenshot({path:output+'/after-en-1440.png',fullPage:true,animations:'disabled'});
  await page.selectOption('#languageSelect','zh-CN');
  await page.screenshot({path:output+'/after-zh-1440.png',fullPage:true,animations:'disabled'});
+ await emit(s=>{s.history.unshift({id:'record-task-entry',at:new Date().toISOString(),kind:'verification',text:'已核对任务来源',detail:'从日志进入对应任务',taskId:'human-a'});});
+ await page.locator('[data-view="activity"]').click();
+ const historyTab=page.locator('#homeRecord .page-focus-nav [role="tab"]').filter({hasText:'跟进记录'});
+ if(await historyTab.count() && await historyTab.getAttribute('aria-selected')!=='true') await historyTab.click();
+ const recordEntry=page.locator('#eventContent details.trace-event').filter({has:page.locator('[data-select-task="human-a"]')});
+ await recordEntry.locator('summary').click();
+ await recordEntry.locator('[data-select-task="human-a"]').click();
+ await page.locator('#viewHome').waitFor({state:'visible'});
+ assert.equal(await page.locator('#viewHome').isVisible(),true);
+ assert.equal(await page.locator('#taskContent [data-inspector-task="human-a"]').count(),1);
+ assert.equal(await page.locator('#taskContent .ws-task-page').count(),1);
+ record('activity-record-opens-the-selected-standalone-task-page');
  await page.keyboard.press('Escape');
- await page.locator('#taskContent [data-select-task="human-a"]').click();
- await page.locator('#taskContent [data-proof="human-a"]').click();
- assert.equal(await page.locator('#evidencePeek').isVisible(),true);
- for(let step=0;step<30 && await page.locator('#evidencePeek').isVisible();step++) await page.keyboard.press('Tab');
+ await openTask('human-a');
+ const reopenedEvidenceTab=page.locator('#taskContent .detail-focus-navigation [role="tab"]').filter({hasText:'来源依据'});
+ if(await reopenedEvidenceTab.count() && await reopenedEvidenceTab.getAttribute('aria-selected')!=='true') await reopenedEvidenceTab.click();
+ const reopenedDetail=page.locator('#taskContent details[data-preserve^="full-evidence-"]');
+ if(!(await reopenedDetail.evaluate(el=>el.open))) await reopenedDetail.locator(':scope > summary').click();
+ assert.equal(await reopenedDetail.evaluate(el=>el.open),true);
  assert.equal(await page.locator('#evidencePeek').isVisible(),false);
- record('evidence-peek-closes-when-keyboard-focus-leaves');
+ assert.match(await page.locator('#taskContent details[data-preserve^="full-evidence-"]').innerText(),/原始请求的要求/);
+ record('evidence-explains-requirements-and-source-support-in-the-task-page');
  await page.evaluate(async()=>{
    const {preserveInteraction}=await import('/dom-state.js');
    const root=document.createElement('section');root.id='temporary-contract-root';document.body.append(root);

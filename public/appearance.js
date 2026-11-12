@@ -1,4 +1,4 @@
-import { getLocale } from './i18n.js';
+import { getLocale } from './i18n.js?v=ix2';
 import { readLocal, writeLocal } from './ux-state.js';
 import { APPEARANCE_KEY, PALETTES, COLOR_ROLES, DEFAULT_APPEARANCE, normalizeAppearance, validColor, appearanceTokens } from './appearance-model.js';
 
@@ -27,6 +27,26 @@ export function createAppearance({ icon }) {
     toggle.title = toggle.getAttribute('aria-label');
     const select = document.getElementById('appearanceSelect');
     if (select) select.value = theme;
+    const themes = document.getElementById('appearanceTheme');
+    if (themes) {
+      const options = [
+        ['system', text('跟随系统', 'System')],
+        ['light', text('浅色', 'Light')],
+        ['dark', text('深色', 'Dark')]
+      ];
+      themes.setAttribute('aria-label', text('主题', 'Theme'));
+      if (!themes.querySelector('[data-theme-choice]')) {
+        themes.innerHTML = options.map(([value, label]) => `<button type="button" class="theme-option" role="radio" data-theme-choice="${value}" aria-checked="${theme === value}">${label}</button>`).join('');
+      } else {
+        for (const [value, label] of options) {
+          const button = themes.querySelector(`[data-theme-choice="${value}"]`);
+          if (!button) continue;
+          button.textContent = label;
+          button.setAttribute('aria-checked', String(theme === value));
+        }
+      }
+    }
+    if (select) { select.hidden = true; select.setAttribute('aria-hidden', 'true'); select.tabIndex = -1; }
   }
 
   function render() {
@@ -47,11 +67,14 @@ export function createAppearance({ icon }) {
       <div class="appearance-reset"><span id="appearanceSaveStatus" role="status">${text('偏好保存在当前浏览器', 'Saved in this browser')}</span><button class="text-button" type="button" data-appearance-reset>${text('恢复默认外观', 'Restore defaults')}</button></div>`;
   }
 
-  function save() {
+  function save(notice) {
     const stored = writeLocal(APPEARANCE_KEY, preference) && writeLocal('unprompted:theme', theme);
     apply();
     render();
-    if (!stored) document.getElementById('appearanceSaveStatus').textContent = text('当前会话已应用；浏览器未允许保存', 'Applied for this session; browser storage is unavailable');
+    const status = document.getElementById('appearanceSaveStatus');
+    if (!status) return;
+    if (!stored) status.textContent = text('当前会话已应用；浏览器未允许保存', 'Applied for this session; browser storage is unavailable');
+    else if (notice) status.textContent = notice;
   }
 
   document.addEventListener('click', event => {
@@ -60,14 +83,15 @@ export function createAppearance({ icon }) {
     if (button.dataset.interfaceStyle) preference = { ...preference, style: button.dataset.interfaceStyle };
     else if (button.dataset.palette) preference = { ...preference, palette: button.dataset.palette, colors: [...PALETTES[button.dataset.palette]] };
     else if (button.hasAttribute('data-appearance-reset')) { preference = normalizeAppearance(DEFAULT_APPEARANCE); theme = 'system'; }
-    else if (button.id === 'themeToggle') { theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; apply(); writeLocal('unprompted:theme', theme); return; }
+    else if (button.dataset.themeChoice) { theme = button.dataset.themeChoice; save(text('外观已更新', 'Appearance updated')); document.querySelector(`[data-theme-choice="${theme}"]`)?.focus({ preventScroll: true }); return; }
+    else if (button.id === 'themeToggle') { theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; save(text('外观已更新', 'Appearance updated')); return; }
     else return;
     const selector = button.dataset.interfaceStyle ? `[data-interface-style="${button.dataset.interfaceStyle}"]` : button.dataset.palette ? `[data-palette="${button.dataset.palette}"]` : '[data-appearance-reset]';
-    save();
+    save(button.hasAttribute('data-appearance-reset') ? text('已恢复默认外观', 'Defaults restored') : text('外观已更新', 'Appearance updated'));
     host.querySelector(selector)?.focus({ preventScroll: true });
   });
   document.addEventListener('change', event => {
-    if (event.target.id === 'appearanceSelect') { theme = event.target.value; writeLocal('unprompted:theme', theme); apply(); }
+    if (event.target.id === 'appearanceSelect') { theme = event.target.value; save(text('外观已更新', 'Appearance updated')); }
   });
   host?.addEventListener('input', event => {
     const picker = event.target.dataset.colorPicker, hex = event.target.dataset.colorHex;
@@ -84,7 +108,7 @@ export function createAppearance({ icon }) {
       error.hidden = false; error.textContent = text('请输入完整的 HEX 颜色，例如 #E7E8E4。', 'Enter a six-digit HEX color, such as #E7E8E4.'); return;
     }
     preference = { ...preference, palette: 'custom', colors };
-    save();
+    save(text('外观已更新', 'Appearance updated'));
     host.querySelector('#customColorsForm button[type="submit"]')?.focus({ preventScroll: true });
   });
   system.addEventListener('change', () => { if (theme === 'system') apply(); });

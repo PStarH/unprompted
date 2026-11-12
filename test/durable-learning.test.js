@@ -17,12 +17,12 @@ function setup(t) {
   return { database, jobs, tasks, experiences, ledger, advance: value => { now += value; } };
 }
 function candidate(context, extra = {}) { return context.experiences.create({ kind: 'execution_hint', scopeType: 'project', scopeKey: 'A', directiveKey: 'quote.output.format', effect: { type: 'draft_format', format: 'table' }, instruction: 'Use a concise table.', freshnessClass: 'stable', ...extra }, { sources: [{ kind: 'event', id: 'episode' }] }); }
-function run(context, id, experienceIds = [], extra = {}) {
+function run(context, id, experienceIds = [], extra = {}, relation = 'planner_declared') {
   const created = context.tasks.createOrLoad({ candidateKey: id, data: { request: { subjectEntity: 'A', deliverable: 'report' } } });
   const job = context.jobs.claim('worker'), taskRun = context.tasks.beginRun(job);
   context.tasks.checkpoint(taskRun, job, { expectedInputVersion: 0, plan: {} });
   const step = context.experiences.step({ taskRunId: taskRun.id, logicalStepId: 'draft', stepKind: 'draft_preparation', actionFamily: 'email.send', expectedEffect: { type: 'draft_format', format: 'table' },
-    experiences: experienceIds.map(id => ({ id, relation: 'planner_declared' })), ...extra });
+    experiences: experienceIds.map(id => ({ id, relation })), ...extra });
   return { taskId: created.taskId, run: taskRun, job, step };
 }
 
@@ -30,9 +30,25 @@ test('v0.3/11 an omitted required step can receive rejection attribution without
   const context = setup(t), experience = candidate(context, { kind: 'omission_guard' });
   const current = run(context, 'omission', [experience.id], { stepKind: 'legal_review', status: 'skipped', omissionReason: 'Planner followed the advisory omission.' });
   context.experiences.feedback({ kind: 'explicit_rejection', planStepId: current.step.id });
-  assert.equal(context.experiences.get(experience.id).status, 'cooldown');
+  const cooled = context.experiences.get(experience.id);
+  assert.equal(cooled.status, 'cooldown');
+  assert.equal(cooled.revision, experience.revision + 1, 'a cooldown transition invalidates the prior revision');
   assert.equal(context.database.db.prepare('SELECT COUNT(*) n FROM tool_executions').get().n, 0);
   assert.equal(context.database.db.prepare('SELECT status FROM plan_steps WHERE id=?').get(current.step.id).status, 'rejected');
+});
+
+test('feedback is attributed to the revision that influenced the step, not a later revalidation', t => {
+  const context = setup(t), experience = candidate(context), current = run(context, 'attribution', [experience.id]);
+  context.database.atomic(() => context.database.db.prepare("UPDATE experiences SET status='needs_revalidation' WHERE id=?").run(experience.id));
+  const stale = context.experiences.get(experience.id);
+  const revalidated = context.experiences.revalidate(experience.id, { expectedRevision: stale.revision, userRequested: true });
+  assert.equal(revalidated.revision, experience.revision + 1);
+  context.experiences.feedback({ kind: 'explicit_rejection', planStepId: current.step.id });
+  const evidence = context.database.db.prepare("SELECT experience_revision FROM experience_evidence WHERE experience_id=? AND evidence_kind='explicit_rejection'").all(experience.id);
+  assert.deepEqual(evidence.map(row => row.experience_revision), [experience.revision], 'the rejected step is credited to the revision it used');
+  const cooled = context.experiences.get(experience.id);
+  assert.equal(cooled.status, 'cooldown');
+  assert.equal(cooled.revision, revalidated.revision + 1, 'the current revision is the one that cools');
 });
 
 test('v0.3/12 rejecting a proposed plan suppresses its equivalent action before any write', t => {
@@ -60,7 +76,9 @@ test('v0.3/13 a heavy rewrite followed by verified sending does not reward the o
 test('v0.3/14 independent supervised successes can promote a narrow candidate without granting permission', async t => {
   const context = setup(t), experience = candidate(context), policy = new PermissionPolicy();
   for (let index = 0; index < 3; index++) {
-    const current = run(context, `instance-${index}`, [experience.id]);
+    // Production associates supervised evidence through an explicit trial
+    // (runtime.js user_confirmed), never through planner_declared.
+    const current = run(context, `instance-${index}`, [experience.id], {}, 'user_confirmed');
     context.experiences.transitionStep(current.step.id, 'proposed', 'approved');
     const input = { ...current, provider: 'fixture', tool: 'send', actionFamily: 'email.send', resourceId: `mail-${index}`, key: `approved-${index}`, effect: { type: 'draft_format', format: 'table' }, payload: {}, planStepId: current.step.id };
     assert.throws(() => context.ledger.intent(input), /independent authorization/);
@@ -93,6 +111,25 @@ test('v0.3/16 operational staleness changes eligibility without decaying stable 
   assert.equal(context.experiences.get(operational.id).verified_success_count, 7);
 });
 
+test('an unused operational candidate is retired after the revalidation window', t => {
+  const context = setup(t), stale = candidate(context, { freshnessClass: 'operational' }), stable = candidate(context);
+  context.advance(31 * 86400000);
+  const scopes = [{ type: 'project', key: 'A' }];
+  const retrieved = context.experiences.retrieve({ scopes });
+  assert.equal(context.experiences.get(stale.id).status, 'retired');
+  assert.equal(retrieved.some(item => item.id === stale.id), false);
+  assert.equal(context.experiences.get(stable.id).status, 'candidate');
+  assert.ok(retrieved.some(item => item.id === stable.id));
+});
+
+test('retrieval excludes an Experience whose provenance is no longer active', t => {
+  const context = setup(t), experience = candidate(context);
+  const scopes = [{ type: 'project', key: 'A' }];
+  assert.ok(context.experiences.retrieve({ scopes }).some(item => item.id === experience.id));
+  context.database.atomic(() => context.database.db.prepare("UPDATE source_records SET active=0 WHERE kind='event' AND id='episode'").run());
+  assert.equal(context.experiences.retrieve({ scopes }).some(item => item.id === experience.id), false);
+});
+
 test('v0.3/17 correction cools only declared relevant influence and synchronously queues later analysis', t => {
   const context = setup(t), relevant = candidate(context), merelyAvailable = candidate(context), other = candidate(context);
   const current = run(context, 'scope', [relevant.id]);
@@ -121,4 +158,25 @@ test('silence produces no positive/negative evidence and no compiler job', t => 
   const result = context.experiences.get(experience.id);
   assert.equal(result.positive_evidence_count, 0); assert.equal(result.negative_evidence_count, 0);
   assert.equal(context.jobs.list().filter(job => job.queue_name === 'learning').length, 0);
+});
+
+test('an explicit user confirmation returns a stale Experience to candidate with a clean evidence slate', t => {
+  const context = setup(t), experience = candidate(context);
+  context.database.atomic(() => context.database.db.prepare("UPDATE experiences SET status='needs_revalidation',verified_success_count=4,positive_evidence_count=6,negative_evidence_count=2,last_negative_at=? WHERE id=?").run(iso(context.database.now()), experience.id));
+  const stale = context.experiences.get(experience.id);
+  assert.throws(() => context.experiences.revalidate(experience.id, { expectedRevision: stale.revision }), error => error.code === 'REVALIDATION_CONFIRMATION_REQUIRED');
+  const revalidated = context.experiences.revalidate(experience.id, { expectedRevision: stale.revision, userRequested: true });
+  assert.equal(revalidated.status, 'candidate');
+  assert.equal(revalidated.verified_success_count, 0);
+  assert.equal(revalidated.positive_evidence_count, 0);
+  assert.equal(revalidated.negative_evidence_count, 0);
+  assert.equal(revalidated.last_negative_at, null);
+  assert.throws(() => context.experiences.promote(experience.id, { expectedRevision: revalidated.revision, userRequested: true }), error => error.code === 'PROMOTION_INELIGIBLE');
+});
+
+test('a retired Experience stays terminal and cannot be revalidated', t => {
+  const context = setup(t), experience = candidate(context);
+  const retired = context.experiences.retire(experience.id, experience.revision);
+  assert.throws(() => context.experiences.revalidate(experience.id, { expectedRevision: retired.revision, userRequested: true }), error => error.code === 'REVALIDATION_INELIGIBLE');
+  assert.equal(context.experiences.get(experience.id).status, 'retired');
 });

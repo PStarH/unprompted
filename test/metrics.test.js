@@ -71,6 +71,23 @@ test('metrics are derived from recorded outcomes, with a basis for every number'
   assert.ok(metrics.attention.basis.length > 0);
 });
 
+test('interruptions count delivered notices, not deferred or resolved ones', () => {
+  const state = {
+    tasks: {},
+    notifications: [
+      { kind: 'deadline', deliveryState: 'delivered', deliveryClass: 'interactive', resolvedAt: null },
+      { kind: 'blocker', deliveryState: 'delivered', deliveryClass: 'critical', resolvedAt: '2026-10-16T10:00:00.000Z' },
+      { kind: 'opportunity', deliveryState: 'pending', deliveryClass: 'interactive', resolvedAt: null },
+      { kind: 'risk', deliveryState: 'digest', deliveryClass: 'digest', resolvedAt: null },
+      { kind: 'calibration', deliveryState: 'delivered', deliveryClass: 'digest', resolvedAt: null }
+    ]
+  };
+  const metrics = computeProductMetrics(state, { now: '2026-10-16T00:00:00.000Z' });
+  assert.equal(metrics.attention.interruptions, 2);
+  assert.deepEqual(metrics.attention.byKind, { deadline: 1, blocker: 1 });
+  assert.equal(metrics.attention.unresolved, 4, 'unresolved still describes every open decision');
+});
+
 test('the legacy activity proxy counts prepared and verified work without proving user value', async () => {
   const { engine } = setup();
   engine.ingest(email());
@@ -134,4 +151,21 @@ test('a request the user closed while waiting counts as closed — not noise, no
   assert.equal(metrics.discovery.unservable, 0, 'a closed request is not noise');
   assert.equal(metrics.discovery.valuable, 0);
   assert.ok(metrics.discovery.basis.some(line => /closed =/.test(line)));
+});
+
+test('the metrics report how much finished work is waiting for approval and for how long', () => {
+  const { store } = setup();
+  const daysAgo = days => new Date(Date.now() - days * 86400000).toISOString();
+  store.mutate(state => {
+    state.tasks['request:fresh'] = { id: 'request:fresh', status: 'ready_for_approval', createdAt: daysAgo(0), progress: { at: daysAgo(0) }, request: { subjectEntity: 'A', deliverable: 'report' } };
+    state.tasks['request:old'] = { id: 'request:old', status: 'ready_for_approval', createdAt: daysAgo(4), progress: { at: daysAgo(4) }, request: { subjectEntity: 'B', deliverable: 'report' } };
+    state.tasks['request:done'] = { id: 'request:done', status: 'completed', createdAt: daysAgo(9), request: { subjectEntity: 'C', deliverable: 'report' } };
+  });
+  const metrics = computeProductMetrics(store.state);
+  assert.equal(metrics.attention.awaitingApproval, 2, 'only prepared work counts as waiting on the user');
+  assert.ok(metrics.attention.oldestAwaitingApprovalDays >= 4, 'the age is measured from the last meaningful change');
+  assert.ok(metrics.attention.oldestAwaitingApprovalDays <= 5);
+  // Nothing waiting means no age rather than a misleading zero.
+  store.mutate(state => { delete state.tasks['request:fresh']; delete state.tasks['request:old']; });
+  assert.equal(computeProductMetrics(store.state).attention.oldestAwaitingApprovalDays, null);
 });

@@ -12,7 +12,7 @@ export const ACTIVATION_REPLAY_VERSION = 1;
 
 /** Isolated clock, scripted model, and a connector that records calls. Replay
  * never opens a network socket. External actions are the recorded list. */
-export function openActivationReplay({ at = '2026-10-28T12:00:00.000Z', scripts = {} } = {}) {
+export function openActivationReplay({ at = '2026-10-28T12:00:00.000Z', scripts = {}, runtimeOptions = {} } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-activation-replay-'));
   let now = Date.parse(at);
   const database = new DurableDatabase(path.join(directory, 'workspace.sqlite'), { now: () => now });
@@ -30,7 +30,7 @@ export function openActivationReplay({ at = '2026-10-28T12:00:00.000Z', scripts 
     assessStandingIntent: async input => scripts.intent?.(input) ?? null
   });
   const engine = new WorkEngine(store, { reasoner });
-  const runtime = new DurableRuntime(engine, { tickMs: 100000, connectorFor: id => id === 'google' ? connector : null });
+  const runtime = new DurableRuntime(engine, { tickMs: 100000, connectorFor: id => id === 'google' ? connector : null, ...runtimeOptions });
   return {
     directory, store, engine, runtime, connector, calls,
     at: () => iso(now),

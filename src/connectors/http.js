@@ -23,7 +23,8 @@ export async function providerJSON(url, { provider, origin, fetchImpl = globalTh
       ...(form ? { body: new URLSearchParams(form).toString() } : body != null ? { body: JSON.stringify(body) } : {}) });
     const raw = await readTextBounded(response, maxChars, `${provider} response`);
     let data;
-    try { data = typeof raw === 'string' ? JSON.parse(raw) : raw; }
+    // A successful DELETE answers 204 with no body.
+    try { data = typeof raw === 'string' ? (raw === '' && response.ok ? null : JSON.parse(raw)) : raw; }
     catch {
       if (response.ok) throw new ConnectorError(`${provider} returned an invalid response.`, { connectorId: provider });
       data = null; // Error pages need not be JSON; preserve HTTP classification below.
@@ -46,6 +47,9 @@ export async function providerJSON(url, { provider, origin, fetchImpl = globalTh
     return await Promise.race([work(), stopped]);
   } catch (error) {
     if (error instanceof ConnectorError) throw error;
+    // Only transport failures are rewritten. Other codes, including local run
+    // and policy errors, keep their original message.
+    if (error?.code && !/^(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|EPIPE|UND_ERR_.+|ABORT_ERR)$/.test(error.code)) throw error;
     if (/exceeds \d+ characters/.test(error.message)) throw new ConnectorError(`${provider} returned too much content for one bounded read.`, { connectorId: provider });
     throw new ConnectorError(`${provider} could not be reached or the request timed out.`, { connectorId: provider, retryable: true, timeout: controller.signal.aborted });
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }

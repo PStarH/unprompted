@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { visibleAttentionItems } from '../public/ux-state.js';
-import { taskState, workspaceConnections } from '../public/workspace-model.js';
+import { taskState, stateGroup, workspaceConnections } from '../public/workspace-model.js';
 import { copy as localizedCopy, ui as localizedUi, setLocale } from '../public/i18n.js';
 
 /**
@@ -20,7 +20,7 @@ function extractFunction(name) {
   const start = source.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `${name} not found in public/app.js`);
   const end = source.indexOf('\nfunction ', start + 1);
-  return `const copy = (value, params = {}) => value.replace(/\\{(\\w+)\\}/g, (match, key) => params[key] ?? match); const ui = (parts, ...values) => parts.reduce((result, part, index) => result + part + (index < values.length ? values[index] : ''), ''); const actionErrors = new Map(); const snoozes = {}; const isSnoozed = () => false; const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action);\n` + source.slice(start, end === -1 ? undefined : end);
+  return `const copy = (value, params = {}) => value.replace(/\\{(\\w+)\\}/g, (match, key) => params[key] ?? match); const ui = (parts, ...values) => parts.reduce((result, part, index) => result + part + (index < values.length ? values[index] : ''), ''); const actionErrors = new Map(); const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action);\n` + source.slice(start, end === -1 ? undefined : end);
 }
 
 function extractRawFunction(name) {
@@ -214,8 +214,8 @@ test('a ready reply in the default run says why it is held and how to watch the 
 const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action);
 const needsTaskDecision = task => task.status === 'ready_for_approval' || (task.status === 'blocked' && Boolean(task.action));
 const attentionItems = new Function('visibleAttentionItems', `${extractFunction('attentionItems')}\nreturn attentionItems;`)(visibleAttentionItems);
-const agentPresentation = new Function('needsTaskDecision', 'attentionItems',
-  `${extractFunction('agentPresentation')}\nreturn agentPresentation;`)(needsTaskDecision, attentionItems);
+const agentPresentation = new Function('needsTaskDecision', 'attentionItems', 'taskState', 'stateGroup', 'workspaceConnections', 'setupState',
+  `${extractFunction('agentPresentation')}\nreturn agentPresentation;`)(needsTaskDecision, attentionItems, taskState, stateGroup, workspaceConnections, null);
 const taskPresentation = new Function(`${extractFunction('taskPresentation')}\nreturn taskPresentation;`)();
 const taskTitle = new Function(`${extractFunction('taskTitle')}\nreturn taskTitle;`)();
 const renderTaskAction = new Function('escapeHtml', 'runtime', 'taskTitle', 'taskState', 'workspaceConnections', 'setupState', 'nativeCopy', 'safeLink', 'current', 'sourceFollow',
@@ -235,7 +235,10 @@ test('waiting for evidence has no working state and explains what will resume it
   assert.equal(taskPresentation(task).tone, 'waiting');
   assert.match(taskPresentation(task).description, /1 项要求缺少证据/);
   assert.equal(agentPresentation({ tasks: [task] }, true).tone, 'waiting');
-  assert.equal(agentPresentation({ tasks: [{ status: 'verifying' }] }, true).tone, 'working');
+  // An unconfirmed outcome is in the Needs you zone (taskState → result_unverified);
+  // the status line uses the same classification, so it asks rather than says "working".
+  assert.equal(agentPresentation({ tasks: [{ status: 'verifying' }] }, true).tone, 'needs');
+  assert.equal(agentPresentation({ tasks: [{ status: 'investigating', reasoningWork: { status: 'running' } }] }, true).tone, 'working');
   assert.equal(agentPresentation({ tasks: [{ status: 'completed' }] }, true).tone, 'idle');
 });
 
@@ -247,7 +250,10 @@ test('delivery uncertainty offers reconciliation rather than unconfirmed duplica
   assert.equal(isClosedTask(task), false);
   assert.equal(isClosedTask({ status: 'blocked' }), true);
   assert.equal(attentionItems({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }).length, 0);
-  assert.equal(agentPresentation({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }, true).title, '1 个选择需要你，其余的我来照看。');
+  const needsYou = agentPresentation({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }, true);
+  assert.equal(needsYou.tone, 'needs');
+  assert.equal(needsYou.title, '');
+  assert.equal(needsYou.label, '需要你');
 });
 
 test('standing authority is offered only with a named scope, standard evidence and writable runtime', () => {

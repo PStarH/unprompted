@@ -13,6 +13,14 @@ for the pinned SQLite runtime. The full suite on Node.js 22.19+ includes Pi test
 Pi-specific tests are skipped on Node.js 20.
 Stop unnecessary local servers before running a large suite.
 
+## Browser module imports
+
+`public/` modules are browser modules. Import them in tests with the same
+specifier the page uses, including the `?v=` cache-busting query (for example
+`../public/i18n.js?v=ix2`). A bare path creates a second module instance with
+separate locale, appearance or UX state, so a test can pass while the page still
+uses the other instance.
+
 ## Connector, activation and harness integration
 
 Run `npm run test:connectors` to include transport, authorization, native sources,
@@ -73,6 +81,10 @@ npm run test:browser
 npm run test:first-run
 npm run test:model-onboarding
 npm run test:workspace
+npm run test:page-focus
+npm run test:detail-focus
+npm run test:overview
+npm run test:appearance
 npm run test:mcp
 npm run test:durable-ui
 ```
@@ -100,6 +112,18 @@ also cover task source/memory dialogs, focus return, and independent Memory,
 Connections and Settings routes. The task screenshots
 include controlled concurrent-task fixtures, not real-user work. Results go to
 `outputs/workspace-validation/`.
+
+`test:page-focus` and `test:detail-focus` check one-zone-at-a-time page and
+detail tabs: counts, arrow and keyboard navigation, remembered choices, reload,
+drafts across live updates, Escape focus return and responsive bounds.
+`test:overview` checks that the demo opens without a task prompt, the Activity
+log's follow-up task links and search, the read-only 100-record demo Memory
+search without a fabricated graph, and that the five workspace views are chosen
+only in Settings. Results go to `outputs/quiet-overview/`.
+`test:appearance` checks interface styles, palettes and themes in light and
+dark, custom colors surviving reload, invalid input staying inline, and
+responsive style/language/page combinations. Results go to
+`outputs/appearance/`.
 
 `test:mcp` connects the actual browser to local MCP HTTP and stdio fixtures. It
 checks URL/token and JSON setup, secret clearing, per-tool grants, disable/enable,

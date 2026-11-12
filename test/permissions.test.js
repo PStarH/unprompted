@@ -6,8 +6,17 @@ import path from 'node:path';
 import { JsonStore } from '../src/store.js';
 import { WorkEngine } from '../src/engine.js';
 import { SimulatedMailProvider } from '../src/providers.js';
-import { PermissionPolicy, PermissionDeniedError } from '../src/permissions.js';
+import { PermissionPolicy, PermissionDeniedError, grantInvestigationDecision, shadowAfterFailedSourceRefresh } from '../src/permissions.js';
 import { PERMISSION_KEYS } from '../src/calibration.js';
+
+test('a failed narrowing refresh stays read-only and a draft still dispatching defers investigation', () => {
+  assert.equal(shadowAfterFailedSourceRefresh({ widening: false, previousShadow: false }), true);
+  assert.equal(shadowAfterFailedSourceRefresh({ widening: true, previousShadow: false }), false);
+  assert.equal(shadowAfterFailedSourceRefresh({ widening: true, previousShadow: true }), true);
+  assert.equal(grantInvestigationDecision({ draftExecuting: false, round: 0 }), 'investigate');
+  assert.equal(grantInvestigationDecision({ draftExecuting: true, round: 0 }), 'defer');
+  assert.equal(grantInvestigationDecision({ draftExecuting: true, round: 1 }), 'skip');
+});
 
 const tempFiles = [];
 test.after(() => { for (const dir of tempFiles) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -214,4 +223,18 @@ test('“ask me each time” settles the standing question and still denies auto
   const task = store.state.tasks['request:m1'];
   assert.equal(task.status, 'ready_for_approval');
   assert.equal(store.state.outbox.length, 0, 'only an explicit allow pre-authorises execution');
+});
+
+test('an approval that does not name its task cannot authorise an external write', () => {
+  const policy = new PermissionPolicy();
+  assert.throws(() => policy.authorize({
+    actionClass: 'execute_external',
+    approval: { permission: 'user_approved' },
+    taskId: 'request:m1'
+  }), /different task/);
+  assert.equal(policy.authorize({
+    actionClass: 'execute_external',
+    approval: { permission: 'user_approved', taskId: 'request:m1' },
+    taskId: 'request:m1'
+  }).allowed, true);
 });

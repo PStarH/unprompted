@@ -131,3 +131,13 @@ test('distributed client metadata strips account secrets and rejects a token pas
   assert.doesNotMatch(JSON.stringify(metadata), /PRIVATE_/);
   assert.equal(validPublicClientId('github_pat_inventedCredential'), false);
 });
+
+test('Microsoft additional action scopes are submitted to the actual device authorization endpoint', async t => {
+  const setup = fixture(t), time = clock(); let requested;
+  const oauth = new DeviceOAuth(setup, { ...time, fetchImpl: async (_url, options) => {
+    requested = new URLSearchParams(options.body).get('scope').split(' ');
+    return json({ device_code: 'private', user_code: 'TEST-123', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 5 });
+  } }); t.after(() => oauth.close());
+  await oauth.start('microsoft', { clientId: '11111111-2222-3333-4444-555555555555', scopes: ['Mail.Send', 'Files.ReadWrite'] });
+  assert.ok(requested.includes('Mail.Send')); assert.ok(requested.includes('Files.ReadWrite')); assert.ok(requested.includes('Mail.Read'));
+});

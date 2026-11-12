@@ -44,4 +44,17 @@ export async function readTextBounded(response, maxChars, label = 'Response') {
   return text;
 }
 
-export const boundedApi = { readTextBounded };
+/** Bound the serialized tool envelope, including JSON escaping. Offsets always
+ * describe the actual delivered chunk, so neither harness cuts JSON mid-field. */
+export function jsonTextChunk(metadata, content, offset = 0, { readChars = 4000, maxChars = 5800 } = {}) {
+  const encode = end => ({ ...metadata, offset, content: content.slice(offset, end), nextOffset: end < content.length ? end : null });
+  let low = Math.min(offset, content.length), high = Math.min(content.length, offset + readChars);
+  if (JSON.stringify(encode(low)).length > maxChars) throw new Error('Tool metadata exceeds its bounded response window.');
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (JSON.stringify(encode(mid)).length <= maxChars) low = mid; else high = mid - 1;
+  }
+  return encode(low);
+}
+
+export const boundedApi = { readTextBounded, jsonTextChunk };

@@ -34,7 +34,7 @@ export class MonitoringService {
 
   get hasLiveConnector() {
     return this.connectors.some(connector => connector.live && (
-      connector.id !== 'google' || connector.config?.readGmail !== false || connector.config?.readDrive !== false
+      connector.id !== 'google' || connector.config?.readGmail !== false || connector.config?.readDrive !== false || connector.config?.readCalendar === true
     ));
   }
 
@@ -147,10 +147,8 @@ export class MonitoringService {
     const lastSuccess = this.settings.lastSuccessAt ? Date.parse(this.settings.lastSuccessAt) : null;
     const expiryMs = Math.max(5 * 60_000, intervalMs * 3);
     const expired = lastSuccess != null && Number.isFinite(lastSuccess) && this.now() - lastSuccess > expiryMs;
-    if (expired && this.settings.expiredFor !== this.settings.lastSuccessAt) {
-      this.setup.setMonitoring({ lastExpiredAt: iso(this.now), expiredFor: this.settings.lastSuccessAt });
-      this.settings = this.setup.get().monitoring;
-    }
+    // describe() serves GET /api/setup; a status read must not write setup
+    // state. Expiry is derived from lastSuccessAt on every read instead.
     // Outcome is the authoritative ordering signal: ISO timestamps only have
     // millisecond precision, so a success and failure in one millisecond can
     // otherwise compare equal. Fall back to the error field for old setup files.

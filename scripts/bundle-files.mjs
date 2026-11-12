@@ -3,6 +3,7 @@ import path from 'node:path';
 
 const privateName = /^(?:\.env(?:\..*)?|\.npmrc|credentials\.json|token\.json|mcp\.json|connector-clients\.json|client_secret.*\.json)$/i;
 const privateExtension = /\.(?:pem|key|sqlite(?:-wal|-shm)?|db|log|map|migration-backup)$/i;
+const backupName = /(?:\.(?:bak\d*|backup|orig|rej|swp|swo)|~)$/i;
 
 export function copyApplicationTree(source, destination) {
   const root = path.resolve(source);
@@ -10,7 +11,7 @@ export function copyApplicationTree(source, destination) {
     const relative = path.relative(root, current);
     if (!relative) return true;
     const parts = relative.split(path.sep), name = parts.at(-1);
-    if (parts.some(part => part.startsWith('.')) || privateName.test(name) || privateExtension.test(name)) return false;
+    if (parts.some(part => part.startsWith('.') || backupName.test(part)) || privateName.test(name) || privateExtension.test(name)) return false;
     return !fs.lstatSync(current).isSymbolicLink();
   } });
 }
@@ -23,7 +24,7 @@ export function copyDependencyTree(source, destination) {
     const parts = relative.split(path.sep), name = parts.at(-1);
     if (parts.some(part => ['test', 'tests', 'fixtures', 'examples', '.cache', '__MACOSX'].includes(part))
       || name === '.DS_Store' || name.startsWith('._') || /\.(?:test|spec)(?:\.|$)/i.test(name)
-      || /\.d\.(?:ts|cts|mts)$/i.test(name) || privateName.test(name) || privateExtension.test(name)) return false;
+      || /\.d\.(?:ts|cts|mts)$/i.test(name) || privateName.test(name) || privateExtension.test(name) || parts.some(part => backupName.test(part))) return false;
     if (!fs.lstatSync(current).isSymbolicLink()) return true;
     const target = fs.readlinkSync(current);
     if (path.isAbsolute(target)) throw new Error('A dependency symlink has an absolute target. Reinstall dependencies in a clean directory.');

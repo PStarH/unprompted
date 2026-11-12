@@ -10,7 +10,8 @@ test('application bundle omits ignored local data, credentials, source maps and 
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const source = path.join(directory, 'source'), destination = path.join(directory, 'app');
   fs.mkdirSync(path.join(source, 'durable'), { recursive: true });
-  for (const name of ['server.js', 'durable/schema.sql', '.DS_Store', '.env', 'credentials.json', 'state.sqlite', 'build.log', 'module.js.map']) fs.writeFileSync(path.join(source, name), 'fixture');
+  for (const name of ['server.js', 'durable/schema.sql', '.DS_Store', '.env', 'credentials.json', 'state.sqlite', 'build.log', 'module.js.map', 'i18n.js.bak', 'i18n.js.bak2', 'client.backup', 'server.js~', 'server.js.orig', 'server.js.swp']) fs.writeFileSync(path.join(source, name), 'fixture');
+  fs.mkdirSync(path.join(source, 'old.bak')); fs.writeFileSync(path.join(source, 'old.bak', 'server.js'), 'fixture');
   fs.mkdirSync(path.join(source, '.cache')); fs.writeFileSync(path.join(source, '.cache', 'data'), 'fixture');
   fs.symlinkSync(path.join(source, 'server.js'), path.join(source, 'linked.js'));
   copyApplicationTree(source, destination);
@@ -29,6 +30,7 @@ test('dependency bundle preserves portable links and refuses external links', t 
   fs.writeFileSync(path.join(source, 'package', 'cli.test.js'), 'fixture');
   fs.writeFileSync(path.join(source, 'package', 'cli.test.d.ts'), 'fixture');
   fs.writeFileSync(path.join(source, 'package', 'cli.d.ts'), 'fixture');
+  fs.writeFileSync(path.join(source, 'package', 'cli.js.bak2'), 'fixture');
   fs.writeFileSync(path.join(source, '.DS_Store'), 'fixture');
   fs.writeFileSync(path.join(source, 'package', 'tests', 'sample.js'), 'fixture');
   fs.symlinkSync('../package/cli.js', path.join(source, '.bin', 'cli'));

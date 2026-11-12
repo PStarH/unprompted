@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * Normalized event envelope.
  *
@@ -6,12 +7,12 @@
  * identifiers and timestamps are preserved so evidence can cite them later.
  */
 
-export const EVENT_TYPES = ['email.received', 'issue.updated', 'pull_request.updated', 'content.changed', 'workflow.updated', 'task.observed', 'document.modified', 'document.unavailable', 'record.published', 'experiment.run.completed', 'timer.due'];
+export const EVENT_TYPES = ['email.received', 'issue.updated', 'pull_request.updated', 'content.changed', 'workflow.updated', 'task.observed', 'document.modified', 'document.unavailable', 'email.unavailable', 'record.published', 'experiment.run.completed', 'timer.due'];
 
 /** Registry publications: the generalized name plus the original experiment-only one. */
 export const REGISTRY_EVENT_TYPES = ['record.published', 'experiment.run.completed'];
 
-export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes', 'internal'];
+export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes', 'apple_reminders', 'todoist', 'internal'];
 
 export class EventValidationError extends Error {
   constructor(message) {
@@ -31,13 +32,24 @@ export function validateRecordId(value) {
  * Build a normalized event. The id is namespaced by connector so two providers
  * cannot collide, and re-delivery of the same provider event is detectable.
  */
-export function normalizeEvent({ connectorId = 'local', providerEventId, type, at, payload, source = 'simulated', meta = {} }) {
-  if (!providerEventId) throw new EventValidationError('A normalized event requires a provider event id');
+export function normalizeEvent({ connectorId = 'local', providerEventId, type, at, payload, source = 'simulated', meta = {}, providerRevision = null, providerEtag = null, operation = 'upsert' }) {
+  if (!['string', 'number'].includes(typeof providerEventId) || !String(providerEventId).trim() || String(providerEventId).length > 2048 || typeof providerEventId === 'number' && !Number.isFinite(providerEventId)) throw new EventValidationError('A normalized event requires a provider event id');
   if (!EVENT_TYPES.includes(type)) throw new EventValidationError(`Unsupported event type: ${type}`);
   if (!SOURCES.includes(source)) throw new EventValidationError(`Unsupported event source: ${source}`);
   if (!payload || typeof payload !== 'object') throw new EventValidationError('A normalized event requires a payload');
+  for (const value of [providerRevision, providerEtag]) {
+    if (value != null && (!['string', 'number'].includes(typeof value) || !String(value).length || String(value).length > 2048)) throw new EventValidationError('Invalid provider revision or etag');
+  }
+  if (!['create', 'update', 'upsert', 'delete'].includes(operation)) throw new EventValidationError('Invalid event operation');
+  // Provider record identity and delivery identity are separate. Opaque revisions
+  // identify equality, never ordering. Legacy unversioned deliveries retain IDs.
+  const version = providerRevision ?? providerEtag;
+  const suffix = version == null ? '' : `:revision:${createHash('sha256').update(JSON.stringify([operation, String(version)])).digest('hex')}`;
   return {
-    id: `${connectorId}:${providerEventId}`,
+    id: `${connectorId}:${providerEventId}${suffix}`,
+    ...(providerRevision != null ? { providerRevision: String(providerRevision) } : {}),
+    ...(providerEtag != null ? { providerEtag: String(providerEtag) } : {}),
+    operation,
     providerEventId,
     connectorId,
     type,
@@ -46,6 +58,11 @@ export function normalizeEvent({ connectorId = 'local', providerEventId, type, a
     payload,
     meta
   };
+}
+
+/** SQLite's provider uniqueness key must include revision identity too. */
+export function eventDeliveryKey(event) {
+  return event.providerRevision != null || event.providerEtag != null ? event.id : event.providerEventId || event.id;
 }
 
 export function validateEmailPayload(payload) {
@@ -68,6 +85,17 @@ export function validateDocumentPayload(payload) {
  */
 export function validateDocumentUnavailablePayload(payload) {
   if (!payload?.id) throw new EventValidationError('Document unavailable payload is missing: id');
+  return true;
+}
+
+/**
+ * A message that was deleted, trashed, moved out of the observed folder, or
+ * lost access. Like document.unavailable it carries only the id of the
+ * email.received payload it invalidates, never new content.
+ */
+export function validateEmailUnavailablePayload(payload) {
+  if (!payload?.id) throw new EventValidationError('Email unavailable payload is missing: id');
+  if (payload.reason != null && (typeof payload.reason !== 'string' || payload.reason.length > 80)) throw new EventValidationError('Email unavailable reason is invalid.');
   return true;
 }
 
@@ -101,6 +129,16 @@ export function validateEventPayload(event) {
   }
   if (event.type === 'task.observed') {
     const item = event.payload;
+    if (['todoist', 'apple_reminders'].includes(event.connectorId)) {
+      if (event.source !== event.connectorId || typeof item.accountId !== 'string' || !item.accountId || typeof item.id !== 'string' || !item.id.startsWith(`${event.source}:${item.accountId}:`)
+        || typeof item.documentId !== 'string' || !item.documentId.startsWith(`${event.source}:${item.accountId}:document:`)
+        || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 500 || !['open', 'closed', 'unavailable'].includes(item.state)
+        || !Number.isFinite(Date.parse(item.updatedAt)) || !Number.isSafeInteger(item.sourceObservationRevision) || item.sourceObservationRevision < 1) throw new EventValidationError('Invalid explicit provider task.');
+      let url; try { url = new URL(item.url, 'http://127.0.0.1'); } catch { throw new EventValidationError('Invalid task source URL.'); }
+      if (url.username || url.password || (event.source === 'todoist' ? url.protocol !== 'https:' || url.hostname !== 'app.todoist.com'
+        : url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname) || url.pathname !== `/api/local-sources/documents/${encodeURIComponent(item.documentId)}` || url.search || url.hash)) throw new EventValidationError('Invalid task source URL.');
+      return true;
+    }
     if (!['local_files', 'apple_notes'].includes(event.connectorId) || event.source !== event.connectorId
       || typeof item.id !== 'string' || !item.id.startsWith(`${event.connectorId}:${item.accountId}:`) || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 500
       || !['open', 'closed', 'unavailable'].includes(item.state) || typeof item.documentId !== 'string' || !item.documentId.startsWith(`${event.connectorId}:`)
@@ -125,6 +163,7 @@ export function validateEventPayload(event) {
   if (event.type === 'email.received') return validateEmailPayload(event.payload);
   if (event.type === 'document.modified') return validateDocumentPayload(event.payload);
   if (event.type === 'document.unavailable') return validateDocumentUnavailablePayload(event.payload);
+  if (event.type === 'email.unavailable') return validateEmailUnavailablePayload(event.payload);
   if (REGISTRY_EVENT_TYPES.includes(event.type)) return validateRunPayload(event.payload);
   throw new EventValidationError(`Unsupported event type: ${event.type}`);
 }

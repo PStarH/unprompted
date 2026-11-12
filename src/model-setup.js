@@ -1,4 +1,5 @@
 import { createReasoner } from './reasoning.js';
+import { DEFAULT_MODEL_PROTOCOL, MODEL_PROTOCOLS, isModelProtocol } from './model-protocol.js';
 
 export class ModelSetupError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status; }
@@ -10,14 +11,17 @@ export function normalizeModelSettings(input, previous = {}) {
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new ModelSetupError('MODEL_CONFIG_INVALID', 'Use an HTTP or HTTPS endpoint without credentials, query parameters or fragments.');
   }
-  const baseUrl = url.href.replace(/\/$/, '').replace(/\/chat\/completions$/, '');
+  const protocol = input.protocol || previous.protocol || DEFAULT_MODEL_PROTOCOL;
+  if (!isModelProtocol(protocol)) throw new ModelSetupError('MODEL_CONFIG_INVALID', `Choose a supported API protocol (${MODEL_PROTOCOLS.join(', ')}).`);
+  // Accept a pasted full endpoint for any supported protocol and store its base.
+  const baseUrl = url.href.replace(/\/$/, '').replace(/\/(?:chat\/completions|responses|messages)$/, '');
   const model = typeof input.model === 'string' ? input.model.trim() : '';
   if (!model || model.length > 200 || /[\r\n]/.test(model)) throw new ModelSetupError('MODEL_CONFIG_INVALID', 'Enter the model ID supplied by your provider.');
   const harness = input.harness || 'classic';
   if (!['classic', 'pi'].includes(harness)) throw new ModelSetupError('MODEL_CONFIG_INVALID', 'Choose a supported model harness.');
   const apiKey = input.apiKey === undefined && previous.baseUrl === baseUrl ? previous.apiKey || null : input.apiKey || null;
   if (apiKey !== null && (typeof apiKey !== 'string' || apiKey.length > 8192 || /[\r\n]/.test(apiKey))) throw new ModelSetupError('MODEL_CONFIG_INVALID', 'Enter a valid API key.');
-  return { baseUrl, model, apiKey: apiKey?.trim() || null, harness, role: 'primary' };
+  return { baseUrl, model, apiKey: apiKey?.trim() || null, harness, protocol, role: 'primary' };
 }
 export function modelEnvironment(settings) {
   return {
@@ -25,6 +29,7 @@ export function modelEnvironment(settings) {
     UNPROMPTED_MODEL_NAME: settings.model,
     ...(settings.apiKey ? { UNPROMPTED_MODEL_API_KEY: settings.apiKey } : {}),
     UNPROMPTED_AGENT_HARNESS: settings.harness || 'classic',
+    UNPROMPTED_MODEL_PROTOCOL: settings.protocol || DEFAULT_MODEL_PROTOCOL,
     UNPROMPTED_MODEL_ROLE: settings.role || 'primary'
   };
 }

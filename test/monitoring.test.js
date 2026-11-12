@@ -137,13 +137,41 @@ test('restart resumes a persisted enabled setting with an immediate sync; stale 
   const sync = { async run() { outcomes.push('sync'); return { results: [{ connector: 'google', failed: false }] }; } };
   const monitor = new MonitoringService({ sync, setup: f.setup, connectors: [{ live: true }], now: f.now, setTimer: f.setTimer, clearTimer: f.clearTimer });
   assert.equal(monitor.describe().status, 'expired');
-  assert.ok(f.setup.get().monitoring.lastExpiredAt);
+  assert.equal(f.setup.get().monitoring.lastExpiredAt, null, 'reading the status does not write setup state');
   await monitor.start();
   await monitor.whenIdle();
   assert.deepEqual(outcomes, ['sync']);
   assert.equal(monitor.describe().status, 'watching');
   assert.equal(f.timers.length, 1);
   monitor.stop();
+});
+
+test('a calendar-only Google connection can be observed, and one with every Google read off cannot', async t => {
+  const calendar = fixture(t);
+  let ran = 0;
+  const monitor = new MonitoringService({
+    sync: { async run() { ran += 1; return { results: [{ connector: 'google', failed: false, partial: false }] }; } },
+    setup: calendar.setup,
+    connectors: [{ id: 'google', live: true, config: { readGmail: false, readDrive: false, readCalendar: true } }],
+    now: calendar.now,
+    setTimer: calendar.setTimer,
+    clearTimer: calendar.clearTimer
+  });
+  await monitor.setSettings({ enabled: true });
+  await monitor.whenIdle();
+  assert.equal(ran, 1);
+  assert.equal(monitor.describe().status, 'watching');
+  monitor.stop();
+
+  const closed = fixture(t);
+  const blocked = new MonitoringService({
+    sync: { async run() { throw new Error('must not run'); } },
+    setup: closed.setup,
+    connectors: [{ id: 'google', live: true, config: { readGmail: false, readDrive: false, readCalendar: false } }]
+  });
+  await assert.rejects(blocked.setSettings({ enabled: true }), /Connect and authorize/);
+  assert.equal(closed.setup.get().monitoring.enabled, false);
+  blocked.stop();
 });
 
 test('observation cannot be enabled without a live connector and preserves a closed state on restart', async t => {

@@ -9,10 +9,14 @@ import { evidenceItem, sourceRef, unknownItem } from './evidence.js';
  * experiment runs and can show the document reflects the newest of them.
  *
  * Statuses:
+ *   not_required  - the request does not ask whether the document is current
  *   verified      - a run registry exists and the document reflects the newest run
  *   stale         - the registry knows of a newer run than the one in the document
- *   unverified    - no registry connected, or the document carries no run date
- *   contradictory - the document cites a run the registry does not contain
+ *   unverified    - no registry connected, the document carries no run date, it
+ *                   cites a run the registry does not contain, or the newest run
+ *                   carries no usable date
+ *   contradictory - reserved: no producer emits it. The engine treats any such
+ *                   value as stale if one ever appears.
  */
 
 export function runRecord({ id, label, subjectEntity = null, completedAt, source, metrics = null }) {
@@ -27,6 +31,10 @@ function dateOnly(value) {
   if (iso) return iso;
   const parsed = new Date(text);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+}
+
+function hasClockTime(value) {
+  return /(?:T|\s)\d{1,2}:\d{2}/.test(String(value || ''));
 }
 
 export function relevantRuns(runRecords, subjectEntity) {
@@ -70,7 +78,7 @@ export function determineFreshness({ document, documentRunDate, runRecords, requ
     modificationTimeIsNotFreshnessEvidence: true
   };
 
-  if (!runs.length && !requestAsksForFreshness(request)) {
+  if (!requestAsksForFreshness(request)) {
     return {
       ...base,
       status: 'not_required',
@@ -121,32 +129,84 @@ export function determineFreshness({ document, documentRunDate, runRecords, requ
     kind: 'document', id: document.id, version: document.version, timestamp: document.modifiedAt, url: document.url
   });
 
-  if (newestDate && eventDate < newestDate) {
+  const eventHasTime = hasClockTime(documentRunDate);
+  const newestHasTime = hasClockTime(newest.completedAt);
+  const eventTimestamp = Date.parse(documentRunDate);
+  const newestTimestamp = Date.parse(newest.completedAt);
+  const eventLabel = eventHasTime ? String(documentRunDate) : eventDate;
+  const newestLabel = newestHasTime ? String(newest.completedAt) : newestDate;
+  const newer = eventDate < newestDate || (eventDate === newestDate && eventHasTime && newestHasTime
+    && Number.isFinite(eventTimestamp) && Number.isFinite(newestTimestamp) && eventTimestamp < newestTimestamp);
+
+  if (newestDate && newer) {
     return {
       ...base,
       status: 'stale',
-      reason: `The document reflects the ${eventDate} run, but the registry knows of a newer run completed ${newestDate}.`,
+      reason: `The document reflects the ${eventLabel} run, but the registry knows of a newer run completed ${newestLabel}.`,
       evidence: [
         evidenceItem({ source: runSource, detail: `Newer run available: ${newest.label}`, excerptText: newest.label }),
-        evidenceItem({ source: documentSource, detail: `Document reports the ${eventDate} run`, excerptText: documentRunDate })
+        evidenceItem({ source: documentSource, detail: `Document reports the ${eventLabel} run`, excerptText: documentRunDate })
       ],
       unknowns: [unknownItem({
         id: 'stale_results',
         question: 'Do the newer run results change the conclusion?',
-        reason: `A run completed ${newestDate} is newer than the results in the document (${eventDate}).`,
+        reason: `A run completed ${newestLabel} is newer than the results in the document (${eventLabel}).`,
         whatWouldResolveIt: `Update the document with the ${newest.label} results before claiming the deliverable is current.`
       })]
     };
   }
 
   if (newestDate && eventDate === newestDate) {
+    if (eventHasTime && newestHasTime && Number.isFinite(eventTimestamp) && Number.isFinite(newestTimestamp) && eventTimestamp > newestTimestamp) {
+      return {
+        ...base,
+        status: 'unverified',
+        reason: `The document reports a ${eventLabel} run that the registry does not contain (newest known: ${newestLabel}). It cannot be confirmed as current.`,
+        evidence: [
+          evidenceItem({ source: runSource, detail: `Newest registered run: ${newest.label}`, excerptText: newest.label }),
+          evidenceItem({ source: documentSource, detail: `Document reports the ${eventLabel} run`, excerptText: documentRunDate })
+        ],
+        unknowns: [unknownItem({
+          id: 'unregistered_run',
+          question: `Is the ${eventLabel} run the one the deliverable should report?`,
+          reason: 'The run registry does not contain a run with that time.',
+          whatWouldResolveIt: 'Publish the run to the registry, or correct the time in the document.'
+        })]
+      };
+    }
+    // A date without a time cannot distinguish a morning run from an evening
+    // run. If the registry knows more than one run that day, the document does
+    // not identify which one it reflects.
+    if (!eventHasTime) {
+      const sameDay = runs
+        .filter(record => dateOnly(record.completedAt) === eventDate)
+        .map(record => String(record.completedAt))
+        .filter((value, index, all) => all.indexOf(value) === index);
+      if (sameDay.length > 1) {
+        return {
+          ...base,
+          status: 'unverified',
+          reason: `The document identifies only the ${eventDate} day, but the registry contains ${sameDay.length} runs that day. It cannot be confirmed which run the document reflects.`,
+          evidence: [
+            evidenceItem({ source: runSource, detail: `Newest known run: ${newest.label}`, excerptText: newest.label }),
+            evidenceItem({ source: documentSource, detail: `Document reports the ${eventDate} day`, excerptText: documentRunDate })
+          ],
+          unknowns: [unknownItem({
+            id: 'ambiguous_same_day_run',
+            question: `Which ${eventDate} run produced these results?`,
+            reason: 'The document states a date but not a run time or run identifier, and more than one run completed that day.',
+            whatWouldResolveIt: 'State the run time or run id in the document.'
+          })]
+        };
+      }
+    }
     return {
       ...base,
       status: 'verified',
-      reason: `The document reflects the ${eventDate} run, which is the newest run in the registry.`,
+      reason: `The document reflects the ${eventLabel} run, which is the newest run in the registry.`,
       evidence: [
         evidenceItem({ source: runSource, detail: `Newest known run: ${newest.label}`, excerptText: newest.label }),
-        evidenceItem({ source: documentSource, detail: `Document reports the ${eventDate} run`, excerptText: documentRunDate })
+        evidenceItem({ source: documentSource, detail: `Document reports the ${eventLabel} run`, excerptText: documentRunDate })
       ],
       unknowns: []
     };

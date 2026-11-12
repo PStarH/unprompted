@@ -141,7 +141,7 @@ test('Forget reconciles an independent in-flight write when its shared Situation
   await runtime.privacy.forget({ kind: 'event', id: 'event:initial' });
   assert.equal(runtime.ledger.get(intent.execution.id).status, 'unknown');
   assert.equal(store.db.prepare('SELECT claim_state FROM resource_claims WHERE current_execution_id=?').get(intent.execution.id).claim_state, 'unresolved');
-  assert.ok(store.db.prepare("SELECT 1 FROM jobs WHERE queue_name='effects' AND job_type='reconcile_execution' AND state='queued'").get());
+  assert.ok(store.db.prepare("SELECT 1 FROM jobs WHERE queue_name='reconcile' AND job_type='reconcile_execution' AND state='queued'").get());
   release();
   await assert.rejects(dispatch);
   assert.equal(runtime.ledger.get(intent.execution.id).status, 'unknown');

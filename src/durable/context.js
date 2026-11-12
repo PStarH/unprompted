@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { durableError, iso, json, parse } from './database.js';
+import { eligibleMemoryIds } from './memory.js';
 
 // This registry is runtime code, never a learned or model-editable record.
 const DEFINITIONS = Object.freeze({
@@ -109,7 +110,9 @@ export class ActivationPolicies {
   hotContext(expectedVersion = Number(this.database.get('context_version'))) {
     const current = Number(this.database.get('context_version'));
     if (expectedVersion !== current) throw durableError('CONTEXT_CHANGED', 'Hot Context is stale.');
-    return { version: current, items: this.db.prepare('SELECT origin_kind,origin_id,projection_json FROM hot_context_items').all().map(row => ({ kind: row.origin_kind, id: row.origin_id, ...parse(row.projection_json) })) };
+    const rows = this.db.prepare('SELECT origin_kind,origin_id,projection_json FROM hot_context_items').all();
+    const eligible = eligibleMemoryIds(this.database, rows.filter(row => row.origin_kind === 'memory').map(row => row.origin_id));
+    return { version: current, items: rows.filter(row => row.origin_kind !== 'memory' || eligible.has(row.origin_id)).map(row => ({ kind: row.origin_kind, id: row.origin_id, ...parse(row.projection_json) })) };
   }
   list() { return this.db.prepare('SELECT id FROM activation_policies ORDER BY created_at,id').all().map(row => this.get(row.id)); }
   disable(id, expectedVersion) {

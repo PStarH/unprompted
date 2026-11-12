@@ -28,7 +28,9 @@ const GITHUB_WORK = {
 /** Track provider facts as native work; external closure is never agent success. */
 export function ingestGitHubWork(store, event) {
   const spec = GITHUB_WORK[event.type];
-  const work = event.payload, id = `${spec.prefix}:${work.id}`;
+  const work = event.payload;
+  const previousReview = event.type === 'pull_request.updated' ? Object.values(store.state.tasks || {}).find(task => task.kind === 'external_review' && task.externalSource?.accountId === work.accountId && task.externalSource?.repository === work.repository && task.externalSource?.number === work.number) : null;
+  const id = previousReview?.id || `${spec.prefix}:${work.id}`;
   let created = false;
   store.mutate(state => {
     state.events.push(event);

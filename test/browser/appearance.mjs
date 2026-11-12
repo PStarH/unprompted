@@ -18,6 +18,7 @@ try {
   await page.locator('[data-view="preferences"]').click();
   assert.equal(await page.locator('html').getAttribute('data-style'), 'space');
   assert.equal(await page.locator('html').getAttribute('data-palette'), 'mist');
+  await page.locator('#viewPreferences .settings-page .page-focus-nav [role="tab"]').filter({ hasText: /Appearance|外观/ }).click();
   await page.locator('[data-interface-style="classic"]').click();
   await page.locator('[data-palette="sage"]').click();
   await page.reload();
@@ -52,7 +53,7 @@ try {
   for (const palette of ['mist', 'sage', 'sand', 'graphite']) {
     await page.locator(`[data-palette="${palette}"]`).click();
     for (const theme of ['light', 'dark']) {
-      await page.selectOption('#appearanceSelect', theme);
+      await page.locator(`[data-theme-choice="${theme}"]`).click();
       assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
       await page.screenshot({ path: `${output}/${palette}-${theme}.png`, animations: 'disabled' });
     }
