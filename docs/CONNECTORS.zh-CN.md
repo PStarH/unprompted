@@ -18,6 +18,9 @@
 | 本地文件夹 | macOS 文件夹选择器；其他系统输入路径 | 选定文件夹中的 Markdown 和 UTF-8 文本，可识别明确写出的待办 | 只读 |
 | Apple 备忘录 | 仅 macOS。自动化权限，然后选择备忘录文件夹。只在 Mac 上推荐；其他系统若已连接才会显示，以便断开 | 所选文件夹中的纯文本；不读取锁定的备忘录和附件 | 单独授权后可在指定文件夹新建备忘录；真实账号和签名应用仍待人工验收 |
 | Apple 提醒事项 | macOS 自动化授权，选择列表 | 所选列表的明确提醒事项、完成状态和到期时间 | 单独授权的已选列表中可新建、修改、完成或删除提醒事项 |
+| Apple 日历 | 仅 macOS。自动化权限，然后选择日历。非 Mac 上仅在已连接时显示，以便断开 | 所选日历中即将到来和最近的日程及其变化。窗口为过去 14 天到未来 60 天，最多 500 条 | 只读。修改关闭。不创建、不编辑、不删除 |
+| Apple 邮件 | 仅 macOS。自动化权限，然后在各账号中选择邮箱 | 所选邮箱最近 7 天的邮件，每个邮箱最多 40 封、合计最多 200 封，正文有长度上限 | 只读。不发送、不删除、不修改 |
+| Apple 通讯录 | 仅 macOS。自动化权限，然后选择群组（或全部联系人） | 所选联系人，用于证据和按姓名、邮箱、电话查找。观察最多 400 人，查找最多 20 条 | 只读。不修改通讯录 |
 | Todoist 原生 | 个人 API token；不需要开发者应用 | 分页读取待办，完整扫描后停止跟进已移除项目 | 单独允许平台行动后，可使用 token 授予的 API 权限 |
 | Google Workspace | 桌面应用 OAuth 授权 | Gmail、Docs、Sheets、Slides；可选主日历 | 单独授权后可保存 Gmail 草稿；发送邮件和修改 Docs 使用独立授权 |
 | GitHub | 官方设备授权 | 分配给当前用户的 issue、提及你的 issue 标题与正文、需要该用户评审或处理评审意见的 pull request、最近三天内每个仓库最新的五次提交，以及同一窗口内每个仓库最新的十次 Actions 运行 | 单独允许平台行动后，可使用安装和用户实际授予的 API 权限，包括获准的评论、修改和其他操作 |
@@ -65,7 +68,7 @@ Outlook 的增量检查点过期时，应用会重新分页读取收件箱，不
 运行 `npm ci --include=optional` 安装客户端依赖，重启应用，然后打开
 **连接 → MCP**。
 
-**Fetch** 不需要账号，并且默认开启，使用随应用附带的 Node，不再需要安装 `uvx` 或 Python。它读取有大小上限的公开网页文本，不执行网页 JavaScript，不访问本地／私网地址。**Notion**、**Linear**、**Jira 与 Confluence**（Atlassian）和 **Todoist** 使用服务商登录页：选择**登录并连接**。不需要粘贴 Client Secret 或 API Token。**Brave Search** 和 **Firecrawl** 仍然需要 API Key。也可以填写 HTTPS 地址，或粘贴 `mcpServers` 配置。
+**Fetch** 不需要账号，并且默认开启。它使用当前进程的 Node 和随应用附带的脚本。如果保存的配置仍指向另一台电脑的 Node 或 `mcp-fetch-server.js`，启动时会改写。它不再需要 `uvx` 或 Python。它读取有大小上限的公开网页文本，不执行网页 JavaScript，不访问本地／私网地址。**Git**（`uvx mcp-server-git`）的 `--repository` 只能指定一个仓库，所以你填写的每个目录都会单独连接（`git`、`git-2`……）。`git_status`、`git_log`、`git_diff`、`git_show`、`git_branch` 可以读取。`git_add`、`git_commit`、`git_reset`、`git_checkout` 和 `git_create_branch` 保持关闭。**Filesystem**（`npx -y @modelcontextprotocol/server-filesystem`）只读取你填写的目录。能创建或修改文件的工具默认关闭，需要在**工具与权限**里逐项允许。**Time**（`uvx mcp-server-time`）提供这台电脑当前时区的时间。**DeepWiki** 连接 `https://mcp.deepwiki.com/mcp`，不需要登录。这些预设都不需要 API Key 或 OAuth 应用。路径必须是已存在的目录，每行一个，不能是文件系统根目录或你的主目录。预设校验只针对预设自己的服务名；自定义名称即使运行同一条命令也不会按预设检查。如果本机没有 `uvx` 或 `npx`，预设会停在清楚的不可用状态并说明要安装什么，而不是直接失败。连接页上的预设、命令和字段都来自本应用。**Notion**、**Linear**、**Jira 与 Confluence**（Atlassian）和 **Todoist** 使用服务商登录页：选择**登录并连接**。不需要粘贴 Client Secret 或 API Token。**Brave Search** 和 **Firecrawl** 仍然需要 API Key。也可以填写 HTTPS 地址，或粘贴 `mcpServers` 配置。
 
 - 远程 Streamable HTTP：`url`，可选 `headers`。远程地址使用 HTTPS，本机允许 HTTP。
 - 本机 stdio：`command`、`args` 数组，可选 `env` 与绝对路径 `cwd`。
@@ -111,6 +114,19 @@ Unprompted 只观察你选定的文件夹。支持 `.md`、`.markdown` 和 `.txt
 `☐`。普通描述不会被当成待办。备忘录接口无法可靠判断原生勾选框的完成状态，
 因此不会把它们当作完成信号。来源待办被勾选或删除，也不会被视为 Agent 已完成。
 
+日历、邮件和通讯录使用同一条 JavaScript 自动化桥。它们只在 macOS 上推荐；
+其他系统若已经连接，卡片会保留以便断开。三者都不需要 API Key、OAuth 客户端
+或“完全磁盘访问”。第一次读取时，macOS 会分别询问是否允许当前应用（终端运行
+`npm start` 时是终端，打包后是 Unprompted）控制“日历”“邮件”或“通讯录”。
+请在“系统设置 → 隐私与安全性 → 自动化”中允许。如果被拒绝，连接会显示这段说明，
+已经读到的证据会标为不可用，允许后重试即可恢复。这三个连接器不会创建、编辑、
+发送或删除。日历观察与过去 14 天到未来 60 天有重叠的日程。邮件观察所选邮箱
+（Mail 里的各个账号）最近 7 天的邮件。通讯录查找只在所选群组内按姓名、邮箱或
+电话匹配，不会把通讯录备注当成待办。任务里的「查找联系人」会调用这次查找。
+超时、响应过大，或除 macOS 自动化拒绝（错误号 `-1743`）以外的读取失败，都会保留
+已有证据并记为部分读取。只有自动化拒绝才会把这些证据标为不可用。仅有
+“not authorized”字样而没有该错误号时，按读取失败处理，不会撤回证据。
+
 选中的本地内容与云端内容一样，可能会发送给你配置的模型。引用本地文件的链接
 只在当前电脑可用；Agent 不会把本机地址作为对外文档链接发送。断开或移除范围后，
 对应证据会失效，历史工作记录仍保留在本机工作区。
@@ -125,7 +141,7 @@ Slack 和 Notion 使用浏览器授权码。Slack 的回调地址是
 `<broker origin>/v1/notion/callback`；`http://localhost:53682/oauth/notion`
 只是桌面端接收 broker 交接的本机地址，owner-private 自托管仍可直接注册它。
 Slack 需要开启 PKCE，默认只申请用户私信读取权限，不申请 Bot 或发送权限。连接时可勾选频道访问，额外申请 `channels:read`、`channels:history`、`groups:read`、`groups:history`，已有账号可在管理连接中重新授权。
-Notion 使用公开集成；每个用户在授权时自己选择可访问的页面。公开发行时，桌面端通过发行方的 broker 完成授权，发行方 Client Secret 只留在服务器；owner-private 自托管仍可在本机使用自己的 Client ID 和 Client Secret。
+Notion 使用公开集成；每个用户在授权时自己选择可访问的页面。公开发行时，桌面端通过发行方的 broker 完成授权，发行方 Client Secret 只留在服务器；owner-private 自托管仍可在本机使用自己的 Client ID 和 Client Secret，本机交换不能视为保密服务端部署。
 
 首次发布前，项目维护者注册一次应用身份。GitHub 需要启用 device flow；只观察时配置 Issues、Pull requests、Contents、Actions 和 Metadata 读取权限，需要行动时为相应仓库能力配置写权限。Contents 只用来
 列出提交和变更路径，不保存补丁或文件正文。Outlook 需要注册移动和桌面平台回调 `http://localhost/oauth/microsoft`，以及 delegated `User.Read`、`Mail.Read` 和
@@ -147,7 +163,7 @@ Google、Microsoft、Slack 可在连接表单填写附加 OAuth scopes。GitHub 
 
 Notion、Linear、Jira / Confluence、Todoist 工具能力可通过内置 MCP 登录获得，不必为这些托管 MCP 注册开发者应用。但 MCP 不会自动轮询来源，原生自动观察仍需各自连接。
 
-Slack PKCE 仅需 Client ID；Google 用独立 Desktop JSON；GitHub / Microsoft 仅需各自 Client ID。Notion 公开发行只携带不含 Secret 的 broker 描述符，发行方 Secret 留在服务器；owner-private 自托管仍可在本机使用 Client Secret。broker 的注册和 HTTPS 部署仍需发行方完成。面向所有用户公开发行的边界及替代方案见完整教程。
+Slack PKCE 仅需 Client ID；Google 用独立 Desktop JSON；GitHub / Microsoft 仅需各自 Client ID。Notion 公开发行只携带不含 Secret 的 broker 描述符，发行方 Secret 留在服务器；owner-private 自托管仍可在本机使用 Client Secret，但不能视为保密服务端部署。broker 的注册和 HTTPS 部署仍需发行方完成。面向所有用户公开发行的边界及替代方案见完整教程。
 
 用户操作：进入 **连接 → 创建工作成果**，先为 Gmail／Outlook 点击草稿权限授权，
 然后选择草稿箱、Notion 父页面或备忘录文件夹；可限定项目，勾选自动创建并保存。
@@ -220,7 +236,7 @@ Apple 提醒事项通过公开脚本接口读取所选列表，单轮最多 500 
 | GitHub | 公开 GitHub App、device flow、只读 Issues／PRs／Contents／Actions／Metadata、Client ID | 安装到所选仓库并授权 | 组织管理员可能需要批准安装 |
 | Outlook | Entra 多租户＋个人账号、public client/浏览器 PKCE、delegated User.Read／Mail.Read／offline_access、Client ID | 登录授权 | 发布者验证与租户管理员策略；草稿另申请 Mail.ReadWrite |
 | Slack | 开启 PKCE、Client ID、用户私信和可选频道 scopes、注册生产回调 | 选择工作区授权 | 跨工作区分发／Marketplace、管理员策略及生产 redirect 可用性 |
-| Notion 原生 | Public integration、Any workspace、Read content／user info；要创建页面再加 Insert content；公开发行使用不含 Secret 的 `{clientId, brokerUrl}`，owner-private 自托管可用 ID＋Secret | 选择页面 | broker 注册与 HTTPS 部署仍需发行方完成；尚未部署发行方身份 |
+| Notion 原生 | Public integration、Any workspace、Read content／user info；要创建页面再加 Insert content；公开发行使用不含 Secret 的 `{clientId, brokerUrl}`，owner-private 自托管可用 ID＋Secret | 选择页面 | broker 注册与 HTTPS 部署仍需发行方完成；尚未部署发行方身份；本机交换不能视为保密服务端部署 |
 | 本地文件／备忘录／提醒事项 | 打包并签名 Mac 应用；无需云端注册 | 选文件夹／列表，确认系统权限 | 实际签名应用权限验收 |
 | Notion／Linear／Atlassian／Todoist MCP | 客户端无需注册私有应用 | 官方登录页授权 | 服务商可用性、组织管理员策略；不替代原生后台观察 |
 | Todoist 原生 | 无需应用注册 | 粘贴一次个人 token | token 在服务商处权限较广，应用仅调用读取 |

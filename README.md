@@ -7,8 +7,9 @@
 Unprompted is an agent that works in the background. It watches the sources you
 authorize, notices work nobody assigned it,
 checks the evidence, and prepares the next action. You don't write prompts or
-manage it. You open it when something needs you. Every conclusion points back
-to a source, and freshness is checked when the request requires it.
+manage it. You open it when something needs you. Every result it reports has
+been verified, not assumed, and every conclusion points back to a source, with
+freshness checked when the request requires it.
 
 [简体中文](README.zh-CN.md) · [Quick start](#quick-start) · [Docs](docs/README.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/PStarH/unprompted/issues/new/choose)
 
@@ -18,7 +19,7 @@ to a source, and freshness is checked when the request requires it.
 
 [Build status](https://github.com/PStarH/unprompted/actions/workflows/ci.yml)
 
-<p align="center"><img src="docs/assets/ui-work.png" alt="Updated Work interface in English: focused state tabs, a reply ready for review, watched sources and recent work." width="100%"></p>
+<p align="center"><img src="docs/assets/ui-work.png" alt="The Work page: one count, a status sentence, four state zones, and what the agent is watching and recently did." width="100%"></p>
 
 *A real screen from the disposable local demo. The reply is ready; you make the call.*
 
@@ -54,20 +55,23 @@ An email arrives → a commitment is discovered → evidence changes
 
 The interface is built to take as little of your attention as possible.
 
-- **Work** gives you a task count and focused tabs: *Needs you*, *In motion*,
-  *Waiting*, and *Watching · paused · done*. Open one state at a time, then
-  glance below for watched sources, recent work and remembered context.
+- **Work** is one task count and one sentence about what the agent is doing,
+  with focused tabs: *Needs you*, *In motion*, *Waiting*, and
+  *Watching · paused · done*. Open one state at a time, then glance below for
+  watched sources, recent work and remembered context.
 - **A task** opens as its own page, with tabs for the overview, evidence,
-  assessment, history and follow-up. Review the proposed result, check each
-  requirement, or steer the next step. An unconfirmed result stays unconfirmed;
-  the left/right arrow keys move between tasks.
+  assessment, history and follow-up. On wide screens a compact task index stays
+  beside it, and the left/right arrow keys move between tasks. The outcome comes
+  first; review the proposed result, check each requirement, or steer the next
+  step. An unconfirmed result stays unconfirmed.
 - **Memory** lets you search what the agent learned, inspect its sources and
-  explore recorded relationships. You can edit, delete or restore memories
-  in your own workspace; the demo preview is read-only.
+  explore recorded relationships, grouped by project and deliverable. You can
+  edit, delete or restore memories in your own workspace; the demo preview is
+  read-only.
 - **Connections** states each source's access in words: read on, modify on or
   off. Read access is the starting permission.
 
-<p align="center"><img src="docs/assets/ui-task.png" alt="Updated task page in English: a proposed reply, checked requirements and source evidence ready for review." width="100%"></p>
+<p align="center"><img src="docs/assets/ui-task.png" alt="An opened task: the verified outcome on the left, each requirement with its evidence excerpt and the task history on the right." width="100%"></p>
 
 *Open a task to review the proposed reply and the evidence behind it.*
 
@@ -80,12 +84,12 @@ Follow the context back to its source. Search, inspect, and explore before
 correcting what the agent remembers.
 </details>
 
-New tasks and live updates never open details, steal
+Nothing moves on its own. New tasks and live updates never open details, steal
 focus or interrupt typing.
 
 ## Quick start
 
-Version **0.4.0** runs as a self-hosted web application on macOS and Windows (Linux can also run the Node service). No desktop app, Docker or paid hosting is required. Install Node.js 22 or newer, then run the commands below in Terminal or Windows PowerShell. Windows runtime acceptance is pending; Apple Notes and Reminders require macOS.
+Version **0.4.0** runs as a self-hosted web application on macOS and Windows (Linux can also run the Node service). No desktop app, Docker or paid hosting is required. Install Node.js 22 or newer, then run the commands below in Terminal or Windows PowerShell. Installation, local persistence and browser startup are covered by hosted Windows CI; real Windows runtime acceptance is pending, and Apple sources require macOS.
 
 **Try it without any account:**
 
@@ -179,7 +183,7 @@ process. Real-world usefulness and error rates still need user feedback.
 | --- | --- |
 | Context | Email requests, GitHub issues, pull requests, commits, Actions runs, document updates and run records |
 | Local sources | Selected Markdown/text folders (explicit to-dos) and macOS Notes; note creation requires a separate folder grant, and real-account acceptance is pending |
-| GitHub | Device OAuth; issues, reviews, commits and Actions runs; observation is read-only by default, with separately granted platform actions |
+| GitHub | Device OAuth; assigned issues, review requests, repository commits and Actions runs; observation is read-only by default, with separately granted platform actions |
 | Microsoft Outlook | Browser OAuth with PKCE, inbox delta sync and model-backed request discovery; draft creation requires separate authorization |
 | Slack | Browser OAuth with PKCE, direct and group direct messages; platform actions require the corresponding scopes and a separate local grant |
 | Notion | Browser OAuth, pages selected during consent; child-page creation requires a separate parent-page grant |

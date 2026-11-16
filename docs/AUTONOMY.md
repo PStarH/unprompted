@@ -21,7 +21,7 @@ payload, version, privacy, connection, and verification checks. Paused tasks and
 tasks requiring review of changed guidance do not automatically proceed.
 Shadow mode refuses YOLO writes.
 
-Automatic approval drives the existing prepared mail-send and
+Automatic approval currently drives the existing prepared mail-send and
 source-backed document-patch adapters. A transaction allowance can also constrain
 a separately authorized paid platform or MCP tool. It does not add new write adapters or
 grant provider access. Artifact destination grants and read-only MCP tools keep

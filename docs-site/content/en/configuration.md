@@ -54,7 +54,7 @@ GitHub, Outlook, Slack, and Notion can live in gitignored `connector-clients.jso
 
 Google uses `google-oauth-client.json`, `--google-client`, or `UNPROMPTED_GOOGLE_DESKTOP_CLIENT_ID` and `UNPROMPTED_GOOGLE_DESKTOP_CLIENT_SECRET`. The macOS app builder accepts `--connector-clients` and `--google-client`, keeps that metadata, and drops account tokens. While a Google app is in Testing, refresh tokens last about seven days, and only listed test users can connect.
 
-A public Notion build carries no publisher secret: the app receives a secretless broker descriptor, and the secret stays on the broker server. An owner-private self-host can still provide its own Notion client ID and secret locally and register the loopback redirect directly. Broker registration and HTTPS deployment remain publisher tasks. Registration steps are in the repository's [connector guide](https://github.com/PStarH/unprompted/blob/main/docs/CONNECTORS.md) and its Notion broker operator guide.
+A public Notion build carries no publisher secret: the app receives a secretless broker descriptor, and the secret stays on the broker server. An owner-private self-host can still provide its own Notion client ID and secret locally and register the loopback redirect directly. That local exchange is not a confidential-server deployment: the secret travels with the local setup. Broker registration and HTTPS deployment remain publisher tasks. Registration steps are in the repository's [connector guide](https://github.com/PStarH/unprompted/blob/main/docs/CONNECTORS.md) and its Notion broker operator guide.
 
 ## Stop and reset
 

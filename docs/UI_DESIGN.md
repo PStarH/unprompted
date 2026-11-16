@@ -26,8 +26,9 @@ reserved for decisions and errors. Status must also be written in text.
   when there is one. The four statuses are tabs with their counts always
   visible: Needs you, In motion, Waiting, and Watching · paused · done. One
   zone shows at a time and the last choice is remembered; an empty zone is one
-  line. A task is a quiet line with a status mark, its title and what is
-  happening now. Zones that mix states also name the state in text.
+  line. On phones the zone area stacks. A task is a quiet line with a status
+  mark, its title and what is happening now. Zones that mix states also name
+  the state in text.
 - Below the zones, a background panel shows what the agent is doing, from
   recorded state only: the sources it watches (with item counts and last
   observation), its four most recent actions, and how many memories it keeps.

@@ -66,9 +66,11 @@ try {
   const followUpSettings = page.locator('#taskContent details[data-preserve^="ws-management-"]');
   assert.equal(await followUpSettings.count(), 1);
   await detailTab('跟进设置');
+  assert.equal(await followUpSettings.evaluate(node => node.open), true);
   assert.equal(await followUpSettings.locator('[data-wait-form]').count(), 1);
   const evidenceDetails = page.locator('#taskContent details[data-preserve^="full-evidence-"]');
   await detailTab('来源依据');
+  assert.match(await evidenceDetails.locator('summary').innerText(), /要求与来源依据/);
   assert.match(await evidenceDetails.innerText(), /原始请求的要求.*来源中的对应内容/);
   await detailTab('概览');
   check('one-task-page-keeps-evidence-and-follow-up-settings-without-a-duplicate-record-dialog-or-snooze');
@@ -130,6 +132,7 @@ try {
   await page.waitForFunction(() => !document.querySelector('#taskContent .ws-direction-receipt'));
   check('direction-replans-invalidates-old-draft-and-undo-restores-without-memory');
   await input().fill('Include a budget breakdown.');
+  await openDirection();
   await page.locator('#taskContent .ws-composer [data-task-context="memory"]').click();
   await page.locator('#taskContextDialog [data-memory-scope="similar"]').click();
   await page.locator('#taskContextDialog .secondary-button[data-context-close]').click();

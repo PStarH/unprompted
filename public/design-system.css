@@ -191,7 +191,7 @@ details > summary:hover { color: var(--ink); }
 
 /* ---------- 10. Motion: none that is decorative ---------- */
 .connection-pulse, .ws-loading span { animation-duration: 1.6s; }
-.evidence-peek, .select-menu { animation: none !important; }
+.evidence-peek, .decision-receipt, .select-menu { animation: none !important; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
@@ -229,9 +229,23 @@ details > summary:hover { color: var(--ink); }
 }
 
 /* ---------- 14. Legacy green palette (interactions.css) → tokens ---------- */
-.proof-mode { background: var(--surface-quiet) !important; border-color: var(--line) !important; }
-.proof-mode button { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
-.proof-mode button[aria-pressed="true"] { background: var(--surface) !important; color: var(--ink) !important; box-shadow: 0 0 0 1px var(--line) !important; }
+.decision-modebar > div, .proof-mode { background: var(--surface-quiet) !important; border-color: var(--line) !important; }
+.decision-modebar button, .proof-mode button { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.decision-modebar button[aria-pressed="true"], .proof-mode button[aria-pressed="true"] { background: var(--surface) !important; color: var(--ink) !important; box-shadow: 0 0 0 1px var(--line) !important; }
+.decision-modebar > span, #decisionPosition, .deck-keyboard { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.deck-nav .icon-button { background: var(--surface) !important; color: var(--muted) !important; border: 1px solid var(--line) !important; }
+.deck-nav .icon-button:hover:not(:disabled), .decision-preview:hover { background: var(--hover) !important; color: var(--ink) !important; }
+#decisionDeckCurrent .task-card, #decisionDeckCurrent .decision-card { border-color: var(--line) !important; box-shadow: none !important; }
+.decision-preview { background: var(--surface) !important; border-color: var(--line) !important; color: var(--muted) !important; box-shadow: none !important; }
+
+.decision-receipt { background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: var(--ds-radius) !important; }
+.receipt-mark { background: var(--green-light) !important; color: var(--green) !important; }
+.decision-receipt strong { color: var(--ink) !important; font-size: var(--ds-text-sm) !important; }
+.decision-receipt p { color: var(--muted) !important; font-size: var(--ds-text-xs) !important; }
+.decision-receipt .icon-button { color: var(--muted) !important; }
+.decision-receipt[data-status="uncertain"] { background: var(--amber-light) !important; border-color: color-mix(in srgb, var(--amber) 25%, var(--line)) !important; }
+.decision-receipt[data-status="uncertain"] strong { color: var(--amber) !important; }
+.decision-receipt[data-status="uncertain"] .receipt-mark { background: var(--surface) !important; color: var(--amber) !important; }
 
 .proof-trigger { color: var(--muted) !important; }
 .proof-trigger > span { border-bottom-color: var(--line-strong) !important; }

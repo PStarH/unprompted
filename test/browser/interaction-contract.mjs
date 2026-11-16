@@ -110,6 +110,8 @@ try {
  assert.equal(await page.locator('#taskContent .ws-inspector').count(),0);
  assert.equal(await page.evaluate(()=>document.activeElement.dataset.selectTask),'human-a');
  record('closing-task-page-restores-task-focus');
+ await emit(s=>{s.tasks[1].management.priority.score=119;});
+ assert.equal(await page.locator('#taskContent [data-inspector-task]').count(),0,'Live updates must not reopen a closed task');
  await openTask('human-a');
  const order=[await page.locator('#taskContent [data-inspector-task]').getAttribute('data-inspector-task')];
  await emit(s=>{s.tasks[1].management.priority.score=120; s.tasks.push(make('human-new',150));});

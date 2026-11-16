@@ -12,7 +12,7 @@ export const EVENT_TYPES = ['email.received', 'issue.updated', 'pull_request.upd
 /** Registry publications: the generalized name plus the original experiment-only one. */
 export const REGISTRY_EVENT_TYPES = ['record.published', 'experiment.run.completed'];
 
-export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes', 'apple_reminders', 'todoist', 'internal'];
+export const SOURCES = ['simulated', 'google', 'github', 'microsoft', 'slack', 'notion', 'local_files', 'apple_notes', 'apple_reminders', 'apple_calendar', 'apple_mail', 'apple_contacts', 'todoist', 'internal'];
 
 export class EventValidationError extends Error {
   constructor(message) {

@@ -1,3 +1,4 @@
+import { revealPanel } from './navigation.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -99,6 +100,7 @@ try {
   await server.locator('[data-mcp-action="enable"]').click();
   await server.locator('[data-status="connected"]').waitFor();
   check('disable-and-enable-close-and-reconnect-the-service');
+  await revealPanel(page, page.locator('[data-mcp-add]'));
   await page.locator('[data-mcp-add]').click();
   await dialog.locator('[data-mcp-mode="json"]').click();
   await dialog.locator('[name=config]').fill('{bad');
@@ -130,6 +132,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#languageSelect').selectOption('zh-CN');
   if (await page.evaluate(() => document.documentElement.dataset.theme !== 'dark')) await page.locator('#themeToggle').click();
+  await revealPanel(page, page.locator('[data-mcp-add]'));
   await page.locator('[data-mcp-add]').click();
   assert.equal(await dialog.locator('[name=name]').isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);

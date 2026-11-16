@@ -54,7 +54,7 @@ GitHub、Outlook、Slack 和 Notion 可以写在被 Git 忽略的 `connector-cli
 
 Google 使用 `google-oauth-client.json`、`--google-client`，或 `UNPROMPTED_GOOGLE_DESKTOP_CLIENT_ID` 与 `UNPROMPTED_GOOGLE_DESKTOP_CLIENT_SECRET`。macOS 应用构建接受 `--connector-clients` 和 `--google-client`，保留这些元数据，并丢弃账号令牌。Google 应用处于测试状态时，刷新令牌大约七天有效，只有被列入的测试用户可以连接。
 
-Notion 公开发行不会把发行方 Secret 放进构建：应用只携带不含 Secret 的 broker 描述符，Secret 留在 broker 服务器。owner-private 自托管仍可在本机提供自己的 Notion Client ID 和 Client Secret，并直接注册本机回调。broker 的注册和 HTTPS 部署仍需发行方完成。登记步骤见仓库中的[连接器说明](https://github.com/PStarH/unprompted/blob/main/docs/CONNECTORS.md)和仓库内的 Notion broker 操作指南。
+Notion 公开发行不会把发行方 Secret 放进构建：应用只携带不含 Secret 的 broker 描述符，Secret 留在 broker 服务器。owner-private 自托管仍可在本机提供自己的 Notion Client ID 和 Client Secret，并直接注册本机回调；这种本机交换不是保密服务端部署，Secret 会随本机设置一起存在。broker 的注册和 HTTPS 部署仍需发行方完成。登记步骤见仓库中的[连接器说明](https://github.com/PStarH/unprompted/blob/main/docs/CONNECTORS.md)和仓库内的 Notion broker 操作指南。
 
 ## 停止和重置
 

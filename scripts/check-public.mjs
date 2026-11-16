@@ -10,7 +10,7 @@ export function publicFiles() {
   const names = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8' });
   return [...new Set(names.split('\0').filter(Boolean))].filter(name => fs.existsSync(path.join(root, name))).sort();
 }
-const privatePath = /(^|\/)(?:\.internal|outputs|data|films|\.workbuddy-ai|\.freebuff|\.browser-cache|node_modules|\.aws|\.codex|\.agents)(\/|$)|^docs\/evidence\/|^docs\/(?:ACTIVATION-.*|CONNECTOR-AUDIT|RELIABILITY-AUDIT)\.md$/;
+const privatePath = /(^|\/)(?:\.internal|outputs|data|films|ui-archive|\.workbuddy-ai|\.freebuff|\.browser-cache|node_modules|\.aws|\.codex|\.agents)(\/|$)|^docs\/evidence\/|^docs\/(?:ACTIVATION-.*|CONNECTOR-AUDIT|RELIABILITY-AUDIT)\.md$/;
 const credentialPath = /(^|\/)(?:\.env(?:\..*)?|client_secret[^/]*\.json|credentials\.json|token\.json|[^/]+\.(?:pem|key))$/i;
 const secrets = [
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/, /ya29\.[A-Za-z0-9_-]{15,}/,

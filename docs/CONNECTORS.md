@@ -17,6 +17,9 @@ Sources use periodic incremental checks on this computer by default. Observation
 | Local folders | Native folder picker on macOS; absolute path on other systems | Markdown and UTF-8 text inside selected folders; explicit text to-dos | Read-only |
 | Apple Notes | macOS only. Automation consent, then choose Notes folders. Offered on a Mac; hidden elsewhere unless already connected | Plain text in selected folders; locked notes and attachments excluded | New notes in explicitly authorized folders; real-account acceptance pending |
 | Apple Reminders | macOS Automation consent, then choose lists | Explicit reminders, completion and due dates in selected lists | Create, edit, complete and delete reminders in separately authorized selected lists |
+| Apple Calendar | macOS only. Automation consent, then choose calendars. Hidden off a Mac unless already connected | Upcoming and recent events in the selected calendars, and later changes. A bounded window (14 days back, 60 days ahead, at most 500 events) | Read only. Modify off. No create, edit, or delete |
+| Apple Mail | macOS only. Automation consent, then choose mailboxes across accounts | Messages in the selected mailboxes from the last 7 days, at most 40 per mailbox and 200 overall, with bounded body text | Read only. Sending, deleting, and editing stay off |
+| Apple Contacts | macOS only. Automation consent, then choose groups (or All Contacts) | Selected people, for evidence and name/email/phone lookup. At most 400 people observed and 20 lookup matches | Read only. The address book is not modified |
 | Todoist native | Personal API token; no developer app | Active tasks with paginated snapshots; removed tasks stop being followed | Authorized API actions after a separate local grant, within the token’s actual permissions |
 | Google Workspace | Desktop OAuth with PKCE | Gmail; Docs, Sheets (first sheet as CSV), Slides; optional primary Calendar | Draft creation after separate authorization; Gmail sending and Docs editing require independent approval |
 | GitHub | Official device OAuth | Assigned issues, issue mentions (title/body), pull requests awaiting the user's review or response, the newest five commits per repository from the last three days, and the newest ten Actions runs per repository from that window | Authorized platform API actions within installation and user permissions |
@@ -96,7 +99,7 @@ the remaining cursor for the next check.
 Install the optional client with `npm ci --include=optional`, then restart the
 app. Open **Connections → MCP**.
 
-**Fetch** needs no account and is on by default. It runs with the bundled Node runtime, so it does not require Python, `uvx`, or an npm download. It reads bounded public text pages, blocks private/local network destinations, and returns plain text; it does not render JavaScript. **Notion**, **Linear**,
+**Fetch** needs no account and is on by default. It runs with the bundled Node runtime, resolved from the current process rather than a path saved on a developer’s machine, so it does not require Python, `uvx`, or an npm download. A saved Fetch config that still points at another computer’s Node or `mcp-fetch-server.js` is rewritten on startup. It reads bounded public text pages, blocks private/local network destinations, and returns plain text; it does not render JavaScript. **Git** (`uvx mcp-server-git`) accepts one `--repository`. Each directory you enter becomes its own server (`git`, `git-2`, …). Read tools (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`) are allowed. `git_add`, `git_commit`, `git_reset`, `git_checkout` and `git_create_branch` stay off. **Filesystem** (`npx -y @modelcontextprotocol/server-filesystem`) reads only the directories you enter. Its tools that can create or change files stay off until you enable each one under **Tools and access**. **Time** (`uvx mcp-server-time`) reports the current time in the computer’s time zone. **DeepWiki** connects to `https://mcp.deepwiki.com/mcp` with no sign-in. None of these ask for an API key or an OAuth app. Paths must be existing directories, one per line, and cannot be the filesystem root or your home directory. Preset checks apply to the preset’s own server name. A custom name that happens to run the same command is not checked. If `uvx` or `npx` is not installed, the preset stays in a clear unavailable state and tells you what to install instead of failing closed. The Connections page takes these presets from the app, including the command and fields. **Notion**, **Linear**,
 **Jira and Confluence** (Atlassian), and **Todoist** use the vendor sign-in
 page: choose **Sign in and connect**. You do not paste a client secret or an
 API token. **Brave Search** and **Firecrawl** still need an API key. Their bounded read tools also run with bundled Node: Brave web search and Firecrawl single-page Markdown scraping need no `npx` or package installation. You can
@@ -185,6 +188,25 @@ The Notes bridge uses Apple's public scripting interface, not the private Notes
 database. Automated tests use injected Notes responses; a real Notes account and
 the signed distribution's permission prompt still need manual acceptance.
 
+Calendar, Mail, and Contacts use the same JavaScript for Automation bridge.
+Each is offered only on macOS, and an existing connection stays visible on
+other systems so it can be disconnected. None needs an API key, an OAuth
+client, or Full Disk Access. The first read asks macOS for Automation
+permission for Calendar, Mail, or Contacts. The prompt names the app that is
+running Unprompted (Terminal for `npm start`, or the Unprompted app). Allow it
+in System Settings → Privacy & Security → Automation. If macOS denies access,
+the connection shows that message and previously read evidence is marked
+unavailable until you allow access and retry. These three connectors do not
+create, edit, send, or delete. Calendar covers events that overlap the last 14
+days and the next 60 days. Mail covers the last 7 days in the mailboxes you
+select, across every account Mail.app shows. Contacts lookup searches the
+groups you select and does not turn an address-book note into a task. During a
+task, **Look up a contact** calls that search. A timeout, an oversized response,
+or any read failure other than a macOS Automation denial (`-1743`) keeps the
+previous evidence and reports a partial read. Only an Automation denial marks
+that evidence unavailable. Wording such as “not authorized” without that error
+number is a failed read, not a permission retraction.
+
 ## Provision applications once for a distribution
 
 For the full publisher-to-user procedure, scope recipes and packaging commands, see the [complete setup tutorial (Chinese)](CONNECTOR_SETUP.zh-CN.md).
@@ -193,7 +215,7 @@ The publisher registers each application once. End users then authorize their ow
 accounts. Tokens stay on that computer. A self-hosted installation without
 provisioned clients asks for the application identity, not a user access token.
 
-GitHub uses device authorization. Outlook uses browser authorization with PKCE and a public Client ID. Slack uses a public Client ID with PKCE and needs no client secret. Notion uses browser authorization. A public build registers the provider callback `<broker origin>/v1/notion/callback` and carries only a secretless broker descriptor (`clientId` plus `brokerUrl`); the desktop loopback `http://localhost:53682/oauth/notion` is only the handoff, the publisher client secret stays on the broker server, and an owner-private self-host can still register that loopback redirect directly. This repository does not deploy or register the broker publisher identity.
+GitHub uses device authorization. Outlook uses browser authorization with PKCE and a public Client ID. Slack uses a public Client ID with PKCE and needs no client secret. Notion uses browser authorization. A public build registers the provider callback `<broker origin>/v1/notion/callback` and carries only a secretless broker descriptor (`clientId` plus `brokerUrl`); the desktop loopback `http://localhost:53682/oauth/notion` is only the handoff, the publisher client secret stays on the broker server, and an owner-private self-host can still register that loopback redirect directly. A locally supplied native Notion secret is exchanged on this computer; it is extractable and is not a confidential-client deployment. This repository does not deploy or register the broker publisher identity.
 
 For GitHub, register a GitHub App, enable its device flow and grant read access
 to Issues, Pull requests, Contents, Actions, and Metadata for observation. Configure write permissions for the actions offered by your product. Install it in the
@@ -277,7 +299,7 @@ in task details. Automated coverage uses scripted providers; real account OAuth,
 macOS Automation and provider publication approval still require acceptance tests.
 
 Application client metadata is provisioned once, but users authorize their own
-accounts. Slack PKCE requires no secret. A public Notion build carries only the secretless broker descriptor `{clientId, brokerUrl}`; the publisher secret stays on the broker server, and the public app builder rejects Notion client-secret metadata. An owner-private installation can still exchange its own locally supplied secret. Use the official Notion MCP for interactive lookups without registering an app; native background observation requires the public integration and, for public builds, a deployed broker. Broker registration and HTTPS deployment remain publisher tasks.
+accounts. Slack PKCE requires no secret. A public Notion build carries only the secretless broker descriptor `{clientId, brokerUrl}`; the publisher secret stays on the broker server, and the public app builder rejects Notion client-secret metadata. An owner-private installation can still exchange its own locally supplied secret; that local exchange is not a confidential-client deployment because a bundled secret is extractable. Use the official Notion MCP for interactive lookups without registering an app; native background observation requires the public integration and, for public builds, a deployed broker. Broker registration and HTTPS deployment remain publisher tasks.
 The [Chinese setup walkthrough](CONNECTORS.zh-CN.md#为所有用户配置可执行的原生连接器)
 includes registration steps and the user flow.
 
@@ -294,7 +316,7 @@ by `UNPROMPTED_CONNECTOR_CLIENTS_FILE`:
 }
 ```
 
-The `broker.example.test` origin is a reserved, nonfunctional placeholder.
+The `broker.example.test` origin is a reserved, nonfunctional placeholder. An owner-private self-host can use `clientSecret` instead of `brokerUrl`.
 Environment names are `UNPROMPTED_GITHUB_CLIENT_ID`, `UNPROMPTED_MICROSOFT_CLIENT_ID`,
 `UNPROMPTED_SLACK_CLIENT_ID`, `UNPROMPTED_SLACK_CLIENT_SECRET`,
 `UNPROMPTED_NOTION_CLIENT_ID`, `UNPROMPTED_NOTION_BROKER_URL` and
@@ -330,9 +352,7 @@ that happened during the outage. Gmail history discovery reads the newest messag
 matching its bootstrap query (default `newer_than:14d -in:chats -in:sent`), so it
 cannot claim to recover every old message; incremental observation defaults to
 `newer_than:3d -in:chats -in:sent`. Set `GOOGLE_GMAIL_QUERY` to use one query for
-both. Sent, Trash and Draft messages are excluded from new work.
-`GOOGLE_DOCUMENT_LIST_LIMIT` sets the target
-listing count per pull (1–500, default 20); provider pages are never truncated after
+both. Sent, Trash and Draft messages are excluded from new work. `GOOGLE_DOCUMENT_LIST_LIMIT` sets the target listing count per pull (1–500, default 20); provider pages are never truncated after
 receiving a continuation token. Sheets export is CSV for the first sheet, not a
 whole workbook reader. Slides export supplies text without images.
 

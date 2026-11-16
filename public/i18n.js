@@ -1,6 +1,12 @@
 // Only authored UI literals are translated. Interpolated mail, names and evidence stay untouched.
 const messages = {
   "读取 Todoist 中的待办；个人 API token，无需注册开发者应用。": "Read Todoist tasks with your personal API token; no developer app registration is needed.",
+  "要求与来源的对应内容": "Requirements and matching sources",
+  "还没有连接来源": "No sources connected yet",
+  "连接一个来源": "Connect a source",
+  "还没有记录": "Nothing recorded yet",
+  "自动观察中": "Watching automatically",
+  "未开始观察": "Not watching yet",
   "待你处理": "To review",
   "记录": "Record",
   "日志": "Log",

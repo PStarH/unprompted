@@ -270,14 +270,16 @@ test('built-in MCP presets offer Fetch, hosted sign-in, and API-key search', t =
   const { manager } = managerFor(t);
   const status = manager.describe();
   assert.ok(Array.isArray(status.presets));
-  assert.equal(status.presets.length, 7);
+  assert.equal(status.presets.length, 11);
   const ids = status.presets.map(item => item.id);
-  assert.deepEqual(ids, ['fetch', 'notion', 'linear', 'atlassian', 'todoist', 'brave-search', 'firecrawl']);
+  assert.deepEqual(ids, ['fetch', 'git', 'filesystem', 'time', 'deepwiki', 'notion', 'linear', 'atlassian', 'todoist', 'brave-search', 'firecrawl']);
   const fetchPreset = status.presets.find(item => item.id === 'fetch');
   assert.equal(fetchPreset.defaultEnabled, true);
   assert.equal(fetchPreset.requiresAuth, false);
   assert.equal(fetchPreset.auth, 'none');
   assert.equal(fetchPreset.connection.type, 'stdio');
+  assert.equal(fetchPreset.connection.command, process.execPath);
+  assert.equal(fetchPreset.connection.args[0], fileURLToPath(new URL('../src/mcp-fetch-server.js', import.meta.url)));
   const searchPreset = status.presets.find(item => item.id === 'brave-search');
   assert.equal(searchPreset.defaultEnabled, false);
   assert.equal(searchPreset.requiresAuth, true);
@@ -382,4 +384,16 @@ test('an oversized MCP tool page stays connected and keeps the prefix that fits'
   assert.equal(server.tools[0].name, 'read_0');
   assert.equal(options.listMaxPages, MCP_LIMITS.tools);
   assert.deepEqual(requestInit, { headers: {} });
+});
+
+test('saved Fetch configs that point at another machine are rewritten to this process', () => {
+  const saved = { type: 'stdio', command: '/old-machine/runtime/node', args: ['/old-machine/unprompted/src/mcp-fetch-server.js'], enabled: false, allowDeclaredRead: true };
+  const manager = new McpManager({ configStore: { get: () => ({ fetch: saved }) }, executableLookup: () => null });
+  assert.equal(manager.configs.fetch.command, process.execPath);
+  assert.ok(fs.existsSync(manager.configs.fetch.args[0]));
+  assert.ok(manager.configs.fetch.args[0].endsWith(`${path.sep}src${path.sep}mcp-fetch-server.js`));
+  assert.equal(manager.configs.fetch.args[0], fileURLToPath(new URL('../src/mcp-fetch-server.js', import.meta.url)));
+  const legacy = new McpManager({ configStore: { get: () => ({ fetch: { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'], enabled: false, allowDeclaredRead: true } }) }, executableLookup: () => null });
+  assert.equal(legacy.configs.fetch.command, process.execPath);
+  assert.ok(!legacy.configs.fetch.args.includes('mcp-server-fetch'));
 });

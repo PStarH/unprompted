@@ -41,6 +41,8 @@ try {
   await page.waitForFunction(() => !document.querySelector('#durableDialog').open);
   await page.waitForFunction(() => !document.querySelector('.memory-inspector'));
   assert.equal(await page.locator('.memory-search-result').count(), 0);
+  assert.equal(await page.locator('.memory-space-node').count(), 0);
+  assert.equal(await page.locator('.memory-result-open').count(), 0);
   assert.match(await page.locator('.memory-empty').innerText(), /A place for what matters to remember|No matching memories/);
   checks.push('Forget previews dependencies and actually removes a saved memory');
   await page.goto(fixture.base + '/#preferences');

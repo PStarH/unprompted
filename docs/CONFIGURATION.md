@@ -83,7 +83,7 @@ Notion broker registers its provider callback `<broker origin>/v1/notion/callbac
 `http://localhost:53682/oauth/notion` is only the desktop handoff, and an
 owner-private self-host can still register that loopback redirect directly. End users authorize their own accounts.
 Access tokens are not pasted into the app. Refresh tokens stay in private local
-setup. Observation is the default; platform actions require provider-granted scopes and explicit local authorization. With a broker descriptor, the Notion publisher secret stays on the broker server; an owner-private installation can still exchange its own locally supplied secret. The official Notion MCP is separate from native observation. See [Connectors](CONNECTORS.md), the [Notion broker operator guide](NOTION_BROKER.md) and the [complete setup tutorial (Chinese)](CONNECTOR_SETUP.zh-CN.md) for registration, scopes, distribution boundaries and supported behavior.
+setup. Observation is the default; platform actions require provider-granted scopes and explicit local authorization. With a broker descriptor, the Notion publisher secret stays on the broker server; an owner-private installation can still exchange its own locally supplied secret. Native Notion exchanges its supplied secret locally, so bundling it does not create a confidential client. The official Notion MCP is separate from native observation. See [Connectors](CONNECTORS.md), the [Notion broker operator guide](NOTION_BROKER.md) and the [complete setup tutorial (Chinese)](CONNECTOR_SETUP.zh-CN.md) for registration, scopes, distribution boundaries and supported behavior.
 
 ## Google client provisioning
 

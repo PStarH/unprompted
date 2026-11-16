@@ -60,6 +60,7 @@ const DEFAULT_PRESETS = [
 
 const presetAuth = preset => preset.auth || (preset.fields?.length ? 'key' : 'none');
 const presetRecipe = preset => preset.connection || (preset.command ? { type: 'stdio', command: preset.command, args: preset.args || [] } : null);
+const serverPresets = setup => Array.isArray(setup?.mcp?.presets) ? setup.mcp.presets : [];
 
 export function createMcpPanel({ update, post, context, refresh, notify }) {
   let busy = false, error = '', mode = 'url', targetPresetId = '';
@@ -72,7 +73,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     const setup = context();
     panel.hidden = setup.demo === true;
     const servers = setup.mcp?.servers || [];
-    const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const presets = serverPresets(setup).length ? serverPresets(setup) : DEFAULT_PRESETS;
     const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
     const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
     const status = value => ({ connected: t('已连接', 'Connected'), connecting: t('连接中', 'Connecting'), failed: t('连接失败', 'Connection failed'), disconnected: t('已断开', 'Disconnected') })[value] || value;
@@ -89,6 +90,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           const label = preset.signedIn ? t('重新登录', 'Sign in again') : t('登录并连接', 'Sign in and connect');
           actions = `${configured ? `<span class="mcp-status" data-status="${esc(configured.status)}">${configured.enabled ? status(configured.status) : t('已停用', 'Disabled')}</span>` : ''}<button type="button" class="secondary-button" data-mcp-oauth="${esc(preset.id)}" ${busy || signingIn.has(preset.id) ? 'disabled' : ''}>${label}</button>`;
         }
+      } else if (preset.runtime && preset.runtime.available === false && !configured) {
+        actions = `<p class="setup-note">${esc(t(preset.runtime.hintZh, preset.runtime.hintEn))}</p>`;
       } else if (configured) {
         actions = `<span class="mcp-status" data-status="${esc(configured.status)}">${configured.enabled ? status(configured.status) : t('已停用', 'Disabled')}</span><button type="button" class="text-button" data-mcp-preset-open="${esc(preset.id)}">${t('修改', 'Configure')}</button>`;
       } else if (preset.id === 'fetch') {
@@ -103,6 +106,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
             <span class="mcp-preset-tag">${esc(t(preset.tagZh || '内置推荐', preset.tagEn || 'Preset'))}</span>
             <div><strong>${esc(preset.name)}</strong> · <small>${esc(t(preset.titleZh, preset.titleEn))}</small></div>
             <p>${esc(t(preset.descriptionZh, preset.descriptionEn))}</p>
+            ${presetAuth(preset) === 'none' ? `<p class="connection-permissions"><span>${t('读取 开', 'Read on')}</span><span>${configured?.tools?.some(tool => tool.writeTool && tool.allowed) ? t('修改 开', 'Modify on') : t('修改 关', 'Modify off')}</span></p>` : ''}
             ${oauthError ? `<p class="mcp-error" role="status">${esc(localError(oauthError))}</p>` : ''}
           </div>
           <div class="mcp-preset-card-footer">${actions}</div>
@@ -119,7 +123,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           const items = presets.filter(preset => presetAuth(preset) === auth);
           if (!items.length) return '';
           return `<h3 class="mcp-preset-group-title">${title}</h3>${note ? `<p class="muted mcp-preset-group-note">${note}</p>` : ''}${items.map(card).join('')}`;
-        }).join('')}
+        }).join('')}${presets.length ? '' : `<p class="muted">${t('内置推荐由本应用提供。刷新连接页后再选择。', 'Built-in presets come from this app. Refresh Connections, then choose one.')}</p>`}
       </div>
     `;
 
@@ -212,7 +216,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
   function renderForm() {
     const setup = context();
     const servers = setup.mcp?.servers || [];
-    const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const presets = serverPresets(setup).length ? serverPresets(setup) : DEFAULT_PRESETS;
     const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
     const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
 
@@ -249,7 +253,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
             return `
               <div class="mcp-preset-form-item" data-preset-item="${esc(preset.id)}">
                 <label class="mcp-preset-checkbox-label">
-                  <input type="checkbox" name="preset_${esc(preset.id)}" data-preset-toggle="${esc(preset.id)}" ${isChecked ? 'checked' : ''}>
+                  <input type="checkbox" name="preset_${esc(preset.id)}" data-preset-toggle="${esc(preset.id)}" ${preset.runtime && preset.runtime.available === false ? 'disabled' : ''} ${isChecked && !(preset.runtime && preset.runtime.available === false) ? 'checked' : ''}>
                   <div>
                     <strong>${esc(preset.name)}</strong> · <span>${esc(t(preset.titleZh, preset.titleEn))}</span>
                     <small class="muted">${esc(t(preset.descriptionZh, preset.descriptionEn))}</small>
@@ -257,10 +261,17 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
                 </label>
                 ${preset.fields && preset.fields.length ? `
                   <div class="mcp-preset-fields" data-preset-fields="${esc(preset.id)}" ${isChecked ? '' : 'hidden'}>
-                    ${preset.fields.map(f => `
+                    ${preset.runtime && preset.runtime.available === false ? `<p class="setup-note">${esc(t(preset.runtime.hintZh, preset.runtime.hintEn))}</p>` : ''}
+                    ${preset.fields.map(f => f.type === 'paths' ? `
                       <label>
                         <span>${esc(t(f.labelZh || f.label, f.labelEn || f.label))}</span>
-                        <input name="field_${esc(preset.id)}_${esc(f.key)}" type="${esc(f.type || 'text')}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">
+                        <textarea name="field_${esc(preset.id)}_${esc(f.key)}" rows="3" placeholder="${esc(f.placeholder || '')}" autocomplete="off"></textarea>
+                        ${f.helpZh || f.helpEn ? `<small class="muted">${esc(t(f.helpZh, f.helpEn))}</small>` : ''}
+                      </label>
+                    ` : `
+                      <label>
+                        <span>${esc(t(f.labelZh || f.label, f.labelEn || f.label))}</span>
+                        <input name="field_${esc(preset.id)}_${esc(f.key)}" type="${esc(f.type === 'password' ? 'password' : 'text')}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">
                       </label>
                     `).join('')}
                   </div>
@@ -306,6 +317,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       'MCP request failed. Check the server configuration and reconnect.': 'MCP 请求失败，请检查服务配置后重连。',
       'MCP authentication failed. Check the authorization header or server credentials.': '认证失败，请检查访问令牌或服务凭据。',
       'MCP executable not found. Check the command and installation.': '找不到本机命令，请检查安装和命令路径。',
+      'uvx was not found. Install uv, then retry. No API key or OAuth app is required.': '未找到 uvx。安装 uv 后重试即可，不需要 API Key 或 OAuth 应用。',
+      'npx was not found. Install Node.js, then retry. No API key is required.': '未找到 npx。安装 Node.js 后重试即可，不需要 API Key。',
       'MCP connection timed out. Check the server and reconnect.': '连接超时，请检查服务后重连。',
       'MCP SDK unavailable. Run npm ci --include=optional and restart.': 'MCP 依赖未安装，请运行 npm ci --include=optional 后重启。',
       'Invalid MCP JSON.': '配置不是有效的 JSON。',
@@ -407,8 +420,13 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       if (busy) return;
       busy = true;
       try {
-        const preset = (context().mcp?.presets || DEFAULT_PRESETS).find(item => item.id === 'fetch');
+        const availablePresets = serverPresets(context());
+        const preset = (availablePresets.length ? availablePresets : DEFAULT_PRESETS).find(item => item.id === 'fetch');
         const recipe = presetRecipe(preset) || { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'] };
+        if (!recipe?.command && !recipe?.url) {
+          notify(t('Fetch 由本应用的运行时提供。请刷新连接页后再试。', 'Fetch is provided by this app. Refresh Connections and try again.'), true);
+          busy = false; render(); return;
+        }
         const config = { mcpServers: { fetch: recipe.type === 'http' ? { url: recipe.url } : { command: recipe.command, args: recipe.args } } };
         await post('/api/mcp/import', { config, allowDeclaredRead: true });
         await refresh();
@@ -502,7 +520,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     if (busy) return;
     const form = new FormData(event.target);
     const setup = context();
-    const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const presets = serverPresets(setup).length ? serverPresets(setup) : DEFAULT_PRESETS;
     const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
     const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
     const servers = setup.mcp?.servers || [];
@@ -522,8 +540,23 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           continue;
         }
         const env = {};
+        const args = [...(recipe.args || [])];
         for (const f of (preset.fields || [])) {
           const val = String(form.get(`field_${preset.id}_${f.key}`) || '').trim();
+          if (f.type === 'paths') {
+            const paths = val.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+            if (!paths.length) {
+              document.getElementById('mcpFormError').textContent = t(`请填写 ${preset.name} 的绝对路径。`, `Enter absolute paths for ${preset.name}.`);
+              return;
+            }
+            if (paths.some(item => !item.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(item))) {
+              document.getElementById('mcpFormError').textContent = t('请使用绝对路径，每行一个。', 'Use absolute paths, one per line.');
+              return;
+            }
+            if (f.flag) for (const item of paths) args.push(f.flag, item);
+            else args.push(...paths);
+            continue;
+          }
           if (!val) {
             const existing = servers.find(s => s.id === preset.id);
             if (!existing) {
@@ -537,7 +570,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
         }
         mcpServers[preset.id] = {
           command: recipe.command,
-          args: recipe.args,
+          args,
           ...(Object.keys(env).length ? { env } : {})
         };
       }
