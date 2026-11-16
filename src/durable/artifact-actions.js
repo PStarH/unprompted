@@ -5,6 +5,7 @@ import { durableError, iso, json, parse } from './database.js';
 import { effectDigest } from './experience.js';
 import { draftReviewToken } from '../draft-review.js';
 import { reminderListId } from '../connectors/apple-reminders.js';
+import { linkOperation, operationContext } from './reasoning-sessions.js';
 
 const fail = (message, code = 'ARTIFACT_NOT_AUTHORIZED', status = 403) => durableError(code, message, status);
 const activeTask = task => task && !task.privacyInvalidated && !task.control?.paused && !task.yieldState
@@ -91,6 +92,11 @@ export class ArtifactActions {
     const task = this.runtime.tasks.get(taskId), grant = this.grants().find(item => item.id === input.grantId);
     if (!task) throw fail('Task not found.', 'MISSING_TASK', 404);
     if (!grant) throw fail('Choose an active user authorization.');
+    const operation = operationContext();
+    if (operation?.sessionId) {
+      const priorOperation = (task.artifactRequests || []).find(item => item.operationId === operation.operationId);
+      if (priorOperation) return publicRequest(priorOperation);
+    }
     const explicit = actor === 'user';
     if (!explicit && !this.runtime.contextReady(taskId)) throw fail('Read the deferred task context before preparing an artifact.', 'CONTEXT_READ_REQUIRED', 409);
     if (!explicit && (actor !== 'activation' && (this.runtime.current()?.taskId !== taskId || !isCurrent()))) throw fail('A current task harness is required.');
@@ -111,17 +117,27 @@ export class ArtifactActions {
     const interrupted = prior?.status === 'blocked' && !['dispatched', 'accepted', 'unknown', 'verified'].includes(executionStatus);
     if (prior && !(explicit && interrupted) && !(retryInterrupted && interrupted)) return publicRequest(prior);
     if ((task.artifactRequests || []).length >= 50) throw fail('This task reached its artifact limit.', 'ARTIFACT_LIMIT', 400);
-    const id = randomUUID(), key = `artifact:${id}`;
+    const id = randomUUID(), key = operation?.sessionId ? `artifact:${operation.operationId}` : `artifact:${id}`;
     const request = { id, key, grantId: grant.id, grantVersion: grant.version, accountId: grant.accountId, targetId: grant.targetId,
       connectorId: grant.connectorId, family: grant.family, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch,
       contextVersion: Number(this.database.get('context_version')), payload: { ...payload, idempotencyKey: key },
       ...(grant.family === 'email.draft' ? { draftToken: draftReviewToken(task) } : {}),
       ...(explicit ? { reviewToken } : {}),
       ...(contextRetry ? { contextRetry: true } : {}),
+      ...(operation?.sessionId ? { operationId: operation.operationId } : {}),
       explicit, status: 'queued', createdAt: iso(this.database.now()) };
+    let linked = false;
     this.engine.store.mutate(state => {
       state.tasks[taskId].artifactRequests = [...(state.tasks[taskId].artifactRequests || []), request];
       this.runtime.jobs.enqueue({ queue: 'effects', type: 'artifact_publish', taskId, key, payload: { taskId, requestId: id } });
+    }, {
+      // The artifact request, its effects job and the private session pointer
+      // to the exact local row must commit as one SQLite transaction.
+      afterSync: () => {
+        if (!operation?.sessionId) return;
+        linked = linkOperation(this.database, { ...operation, localRef: `artifact_request:${id}`, status: 'intent' });
+        if (!linked) throw durableError('SESSION_OPERATION_MISSING', 'The private operation correlation could not be recorded with the queued artifact request.', 409);
+      }
     });
     this.runtime.kick(); this.engine.changed();
     return publicRequest(request);
@@ -277,7 +293,13 @@ export class ArtifactActions {
     const task = taskId && this.runtime.tasks.get(taskId);
     const grants = this.grants().filter(grant => grant.status === 'active' && grant.automatic && this.provider(grant) && (!task || this.covers(grant, task))).slice(0, 12);
     if (!grants.length) return [];
-    return [{ name: 'create_work_artifact', label: 'Create an authorized work artifact',
+    return [{ name: 'create_work_artifact', label: 'Create an authorized work artifact', effect: 'write', managedOperation: true,
+      sources: grants.map(grant => ({ kind: 'connector', id: grant.connectorId })),
+      recoverOperation: ({ operationId }) => {
+        const current = this.runtime.tasks.get(taskId);
+        const request = (current?.artifactRequests || []).find(item => item.operationId === operationId);
+        return request ? publicRequest(request) : null;
+      },
       description: `Queue a work artifact in a user-authorized destination. This does not send mail or complete the task. Mail uses the current prepared reply; omit title/body for mail. Available destinations: ${json(grants.map(grant => ({ grantId: grant.id, connector: grant.connectorId, target: grant.targetId })))}`,
       parameters: { type: 'object', properties: { grantId: { type: 'string', enum: grants.map(grant => grant.id) }, title: { type: 'string', maxLength: 500 }, body: { type: 'string', maxLength: 64000 } }, required: ['grantId'], additionalProperties: false },
       execute: async (_id, input, signal) => {

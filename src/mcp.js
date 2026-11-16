@@ -1,3 +1,5 @@
+import { financialInput, normalizeFinancialTools, mintMcpFinancialContract, financialContractDigest } from './mcp-financial.js';
+import { runMcpToolDispatch, guardedMcpSend, guardedMcpFetch } from './mcp-dispatch-boundary.js';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -5,16 +7,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readRegularFile } from './local-files.js';
 import { MCP_PRESETS, publicPresetConnection } from './mcp-presets.js';
+import { registerToolFallback } from './tool-catalog.js';
 
 export { MCP_PRESETS };
 
 /** A write-tool update widens access only when it adds a tool or turns a disabled server on. */
-export function mcpWritesWidened(previous, { writeTools, enabled } = {}) {
+export function mcpWritesWidened(previous, { writeTools, enabled, financialTools } = {}) {
   const oldTools = new Set(previous?.writeTools || []);
   const nextTools = Array.isArray(writeTools) ? writeTools : [...oldTools];
   const addsTool = nextTools.some(tool => !oldTools.has(tool));
   const enables = enabled === true && previous?.enabled !== true;
-  return addsTool || enables;
+  const addsFinancial=financialTools && Object.entries(financialTools).some(([name,value])=>value && ['monetaryGrantId','amountMicrosPointer','currencyPointer'].some(key=>previous?.financialTools?.[name]?.[key]!==value[key]));
+  return Boolean(addsTool || enables || addsFinancial);
 }
 
 
@@ -31,7 +35,72 @@ const fail = (message, status = 400) => Object.assign(new Error(message), { stat
 const validId = id => typeof id === 'string' && id === id.trim() && /^[\p{L}\p{N}_][\p{L}\p{N}_. -]{0,63}$/u.test(id) && !['constructor', 'prototype', '__proto__'].includes(id);
 const strings = (value, max = 64) => Array.isArray(value) && value.length <= max && value.every(item => typeof item === 'string' && item.length <= 4096 && !item.includes('\0'));
 const resourceId = uri => createHash('sha256').update(uri).digest('hex');
+const stableJson = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+/** Transfer declarations bind a user's "never moves money" confirmation to
+ * the exact remote tool definition it was made against. */
+function freezeArguments(value) {
+  const pending=[value],seen=new WeakSet();
+  while(pending.length){const item=pending.pop();if(!item || typeof item!=='object' || seen.has(item))continue;seen.add(item);pending.push(...Object.values(item));Object.freeze(item);}
+  return value;
+}
+const toolDigest = tool => createHash('sha256').update(stableJson({ name: tool.name, inputSchema: tool.inputSchema, annotations: tool.annotations })).digest('hex');
+/** A declaration is valid only for the server identity it was made against.
+ * Identity binds the transport and every value that can change which server or
+ * principal answers: HTTP/SSE URL, headers, OAuth resource/client registration
+ * and access token, and stdio command/args/cwd/env. A rotated access token can
+ * authenticate a different principal and there is no principal proof to
+ * compare, so token changes invalidate every declaration until the user
+ * confirms again. Only this digest is stored. */
+export function mcpServerIdentity(config) {
+  const identity = config.type === 'stdio'
+    ? { type: 'stdio', command: config.command || '', args: config.args || [], cwd: config.cwd || '', env: config.env || {} }
+    : { type: config.type, url: config.url || '', headers: config.headers || {},
+        oauth: config.oauth ? { resourceUrl: config.oauth.resourceUrl || '', clientId: config.oauth.clientInformation?.client_id || '', accessToken: config.oauth.tokens?.access_token || '' } : null };
+  return createHash('sha256').update(stableJson(identity)).digest('hex');
+}
+/** A declaration is also bound to the connection that actually answered it.
+ * A remote initialize serverInfo can change at an unchanged endpoint and
+ * schema; a stdio child is the same executable/config but can still initialize
+ * as a different server, and it also inherits PATH/HOME and the default cwd.
+ * Every transport therefore binds the discovered initialize identity, and
+ * stdio additionally binds the effective launch environment. A caller that has
+ * already launched a child passes the frozen snapshot it gave the transport, so
+ * the digest cannot be recomputed from process state that changed after an
+ * await. Only the digest is kept; inherited values are never stored or
+ * described. An absent or malformed initialize identity, or a malformed launch
+ * snapshot, returns null so callers fail closed instead of treating an unknown
+ * server as stable. */
+export function mcpConnectionIdentity(config, { serverInfo = null, defaultEnv = {}, launch = null } = {}) {
+  const info = object(serverInfo) && typeof serverInfo.name === 'string' && serverInfo.name.trim().length > 0
+    && serverInfo.name.length <= 256 && (serverInfo.version == null || (typeof serverInfo.version === 'string' && serverInfo.version.length <= 256)) ? serverInfo : null;
+  if (!info) return null;
+  let launchSnapshot = null;
+  if (config?.type === 'stdio' && launch != null) {
+    if (!object(launch) || typeof launch.cwd !== 'string' || !object(launch.env)) return null;
+    launchSnapshot = launch;
+  }
+  const identity = config?.type === 'stdio'
+    ? { type: 'stdio', command: config.command || '', args: config.args || [], cwd: launchSnapshot ? launchSnapshot.cwd : (config.cwd || process.cwd()), env: launchSnapshot ? launchSnapshot.env : stdioEnvironment(defaultEnv, config.env || {}), serverInfo: info }
+    : { type: config?.type, serverInfo: info };
+  return createHash('sha256').update(stableJson(identity)).digest('hex');
+}
+const declarationCurrent = (config, tool, connection) => {
+  if (!config || connection?.status !== 'connected' || typeof config.nonfinancialConnection !== 'string') return false;
+  const current = mcpServerIdentity(config);
+  // A live connection keeps the fingerprint of the config it really connected
+  // with. If config or auth changed without a reconnect, the stale connection
+  // cannot carry a declaration forward.
+  return connection.configIdentity === current && config.nonfinancialIdentity === current
+    && config.nonfinancialConnection === connection.connectionIdentity
+    && config.nonfinancialTools?.[tool.name] === toolDigest(tool);
+};
 
+function financialDeclaration(config,tool,connection) {
+  const value=Object.hasOwn(config?.financialTools || {},tool.name) ? config.financialTools[tool.name] : null;
+  return value && connection?.status==='connected' && value.schemaDigest===toolDigest(tool)
+    && value.configIdentity===mcpServerIdentity(config) && connection.configIdentity===value.configIdentity
+    && value.connectionIdentity===connection.connectionIdentity ? value : null;
+}
 function stringMap(value, headers = false) {
   if (value == null) return {};
   if (!object(value) || Object.keys(value).length > 64) throw fail('Invalid MCP environment or headers.');
@@ -81,6 +150,10 @@ function mergeOAuth(current, patch) {
 export function normalizeMcpConfig(id, value, { oauth = 'keep' } = {}) {
   if (!validId(id) || !object(value)) throw fail('Invalid MCP server name or configuration.');
   if (oauth === 'reject' && Object.hasOwn(value, 'oauth')) throw fail('MCP OAuth state cannot be imported.');
+  if (oauth === 'reject' && Object.hasOwn(value, 'financialTools')) throw fail('MCP financial declarations cannot be imported.');
+  if (oauth === 'reject' && Object.hasOwn(value, 'nonfinancialTools')) throw fail('MCP transfer declarations cannot be imported.');
+  if (oauth === 'reject' && Object.hasOwn(value, 'nonfinancialIdentity')) throw fail('MCP transfer declarations cannot be imported.');
+  if (oauth === 'reject' && Object.hasOwn(value, 'nonfinancialConnection')) throw fail('MCP transfer declarations cannot be imported.');
   for (const flag of ['enabled', 'allowDeclaredRead']) if (value[flag] != null && typeof value[flag] !== 'boolean') throw fail('Invalid MCP permission value.');
   const type = value.type || value.transport || (value.url ? 'http' : 'stdio');
   const config = { type: type === 'streamable-http' ? 'http' : type, enabled: value.enabled !== false,
@@ -88,10 +161,25 @@ export function normalizeMcpConfig(id, value, { oauth = 'keep' } = {}) {
     // annotation is a server claim, so this is shown explicitly in the form.
     allowDeclaredRead: value.allowDeclaredRead === true, readTools: strings(value.readTools, MCP_LIMITS.tools) ? [...new Set(value.readTools)] : [],
     writeTools: strings(value.writeTools, MCP_LIMITS.tools) ? [...new Set(value.writeTools)] : [],
-    readResources: strings(value.readResources, MCP_LIMITS.tools) ? [...new Set(value.readResources)] : [] };
+    readResources: strings(value.readResources, MCP_LIMITS.tools) ? [...new Set(value.readResources)] : [], nonfinancialTools: {} };
   if (value.writeTools != null && !strings(value.writeTools, MCP_LIMITS.tools)) throw fail('Invalid MCP action tool permissions.');
   if (value.readTools != null && !strings(value.readTools, MCP_LIMITS.tools)) throw fail('Invalid MCP read tool permissions.');
   if (value.readResources != null && (!strings(value.readResources, MCP_LIMITS.tools) || value.readResources.some(id => !/^[a-f0-9]{64}$/.test(id)))) throw fail('Invalid MCP resource permissions.');
+  if (value.financialTools != null) config.financialTools=normalizeFinancialTools(value.financialTools);
+  if (value.nonfinancialTools != null) {
+    const declarations = value.nonfinancialTools;
+    if (!object(declarations) || Object.keys(declarations).length > MCP_LIMITS.tools
+      || Object.entries(declarations).some(([name, schemaDigest]) => typeof name !== 'string' || typeof schemaDigest !== 'string' || !/^[a-f0-9]{64}$/.test(schemaDigest))) throw fail('Invalid MCP nonfinancial tool declarations.');
+    config.nonfinancialTools = { ...declarations };
+  }
+  if (value.nonfinancialIdentity != null) {
+    if (typeof value.nonfinancialIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(value.nonfinancialIdentity)) throw fail('Invalid MCP transfer identity.');
+    config.nonfinancialIdentity = value.nonfinancialIdentity;
+  }
+  if (value.nonfinancialConnection != null) {
+    if (typeof value.nonfinancialConnection !== 'string' || !/^[a-f0-9]{64}$/.test(value.nonfinancialConnection)) throw fail('Invalid MCP connection identity.');
+    config.nonfinancialConnection = value.nonfinancialConnection;
+  }
   if (config.type === 'stdio') {
     if (typeof value.command !== 'string' || !value.command.trim() || value.command.length > 4096 || value.command.includes('\0') || (value.args != null && !strings(value.args))) throw fail('Invalid MCP command or arguments.');
     if (value.cwd != null && (typeof value.cwd !== 'string' || !path.isAbsolute(value.cwd) || value.cwd.includes('\0'))) throw fail('MCP cwd requires an absolute path.');
@@ -187,7 +275,8 @@ export class McpManager {
         status: connection?.status || 'disconnected', lastError: connection?.lastError || null,
         allowDeclaredRead: config.allowDeclaredRead,
         tools: (connection?.tools || []).filter(tool => this.redact(String(tool.name)) === tool.name).map(tool => ({ name: tool.name, description: this.redact(String(tool.description || '')).slice(0, 500), inputSchema: this.redactMetadata(tool.inputSchema),
-          declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: this.isWrite(tool), allowed: this.allowed(config, tool) })),
+          declaredReadOnly: tool.annotations?.readOnlyHint === true, writeTool: this.isWrite(tool,config), allowed: this.allowed(config, tool),
+          nonfinancial: declarationCurrent(config, tool, connection), financialKnown:Object.hasOwn(config.financialTools || {},tool.name), financial:config.financialTools?.[tool.name] ? {...Object.fromEntries(['monetaryGrantId','amountMicrosPointer','currencyPointer'].map(key=>[key,config.financialTools[tool.name][key]])),current:Boolean(financialDeclaration(config,tool,connection))}:null })),
         resources: (connection?.resources || []).map(resource => ({ id: resourceId(resource.uri), name: this.redact(String(resource.name || '').slice(0, 300)), description: this.redact(String(resource.description || '').slice(0, 500)), allowed: config.enabled && config.readResources.includes(resourceId(resource.uri)) })) };
     }), presets: MCP_PRESETS.map(preset => ({
       id: preset.id, name: preset.name, category: preset.category, auth: preset.auth || (preset.requiresAuth ? 'key' : 'none'),
@@ -200,10 +289,10 @@ export class McpManager {
       enabled: this.configs[preset.id]?.enabled ?? false, ...this.oauthStatus(preset.id)
     })), limits: MCP_LIMITS };
   }
-  isWrite(tool) { return tool.annotations?.readOnlyHint !== true || tool.annotations?.destructiveHint === true; }
+  isWrite(tool,config=null) { return Object.hasOwn(config?.financialTools || {},tool.name) || tool.annotations?.readOnlyHint !== true || tool.annotations?.destructiveHint === true; }
   allowed(config, tool) {
     if (!config.enabled) return false;
-    if (this.isWrite(tool)) return (config.writeTools || []).includes(tool.name);
+    if (this.isWrite(tool,config)) return (config.writeTools || []).includes(tool.name);
     return config.readTools.includes(tool.name) || config.allowDeclaredRead === true;
   }
   async exclusive(fn) {
@@ -223,9 +312,18 @@ export class McpManager {
       for (const [id, config] of Object.entries(incoming)) {
         const previous = this.configs[id];
         const next = { ...config };
+        // Removing/reimporting a known paid declaration cannot turn it into a read.
+        if(previous?.financialTools)next.financialTools=previous.financialTools;
         if (previous?.type === 'stdio' && next.type === 'stdio' && !Object.keys(next.env || {}).length && Object.keys(previous.env || {}).length) next.env = previous.env;
         for (const key of ['writeTools', 'readTools', 'readResources']) {
           if (previous && previous[key]?.length && !next[key]?.length) next[key] = previous[key];
+        }
+        const previousDeclarations = previous?.nonfinancialTools;
+        if (Object.keys(previousDeclarations || {}).length && !Object.keys(next.nonfinancialTools || {}).length && previous.nonfinancialIdentity === mcpServerIdentity(next)) {
+          next.nonfinancialTools = previousDeclarations; next.nonfinancialIdentity = previous.nonfinancialIdentity;
+          // Keep local connection provenance only for an unchanged config; a
+          // legacy entry without it stays unusable (declarationCurrent fails closed).
+          if (typeof previous.nonfinancialConnection === 'string') next.nonfinancialConnection = previous.nonfinancialConnection;
         }
         merged[id] = next;
       }
@@ -235,15 +333,52 @@ export class McpManager {
       return this.describe();
     });
   }
-  async update(id, { enabled, readTools, writeTools, readResources, allowDeclaredRead, remove = false, reconnect = false }) {
+  async update(id, { enabled, readTools, writeTools, readResources, allowDeclaredRead, nonfinancialTools, financialTools, financialConfirmed=false, remove = false, reconnect = false }) {
     if (typeof remove !== 'boolean' || typeof reconnect !== 'boolean') throw fail('Invalid MCP update value.');
     if (!Object.hasOwn(this.configs, id)) throw fail('Unknown MCP server.', 404);
     return this.exclusive(async () => {
       const merged = { ...this.configs };
+      let declarations = null, financial = null;
+      const entry = this.connections.get(id);
+      if (!remove && nonfinancialTools != null) {
+        if (!Array.isArray(nonfinancialTools) || nonfinancialTools.length > MCP_LIMITS.tools || nonfinancialTools.some(name => typeof name !== 'string' || name.length > 4096 || name.includes('\0'))) throw fail('Invalid MCP nonfinancial tool declarations.');
+        const connectedTools = entry?.status === 'connected' ? entry.tools : [];
+        declarations = {};
+        for (const name of new Set(nonfinancialTools)) {
+          const tool = connectedTools.find(item => item.name === name);
+          if (!tool || !this.isWrite(tool,this.configs[id])) throw fail('MCP nonfinancial declarations must name a connected write tool.');
+          declarations[name] = toolDigest(tool);
+        }
+      }
+      if (!remove && financialTools != null) {
+        if(object(financialTools) && Object.values(financialTools).some(Boolean) && financialConfirmed!==true)throw fail('Confirm the financial tool, amount units, currency and funds allowance.',403);
+        if (!object(financialTools) || Array.isArray(financialTools) || Object.keys(financialTools).length>MCP_LIMITS.tools) throw fail('Invalid MCP financial declarations.');
+        financial=Object.fromEntries(Object.entries(financialTools).map(([name,value])=>{
+          const tool=entry?.status==='connected' && entry.tools.find(item=>item.name===name);
+          if(!tool || typeof entry.connectionIdentity!=='string')throw fail('Financial declarations require an identified connected tool.');
+          if(value===null)return [name,null];
+          const spec=financialInput(value);
+          return [name,{...spec,schemaDigest:toolDigest(tool),configIdentity:mcpServerIdentity(this.configs[id]),connectionIdentity:entry.connectionIdentity}];
+        }));
+        financial={...(this.configs[id].financialTools || {}),...financial};
+      }
       if (remove) delete merged[id];
-      else merged[id] = normalizeMcpConfig(id, { ...merged[id], ...(enabled != null ? { enabled } : {}), ...(readTools != null ? { readTools } : {}), ...(writeTools != null ? { writeTools } : {}), ...(readResources != null ? { readResources } : {}), ...(allowDeclaredRead != null ? { allowDeclaredRead } : {}) });
+      else {
+        merged[id] = normalizeMcpConfig(id, { ...merged[id], ...(enabled != null ? { enabled } : {}), ...(readTools != null ? { readTools } : {}), ...(writeTools != null ? { writeTools } : {}), ...(readResources != null ? { readResources } : {}), ...(allowDeclaredRead != null ? { allowDeclaredRead } : {}), ...(declarations ? { nonfinancialTools: declarations } : {}), ...(financial ? {financialTools:financial}: {}) });
+        if (declarations) {
+          merged[id].nonfinancialTools = declarations;
+          if (Object.keys(declarations).length) {
+            merged[id].nonfinancialIdentity = mcpServerIdentity(merged[id]);
+            // Bind the declaration to the connection that was actually
+            // inspected, not merely to the config being written.
+            if (entry?.status === 'connected' && typeof entry.connectionIdentity === 'string') merged[id].nonfinancialConnection = entry.connectionIdentity;
+            else delete merged[id].nonfinancialConnection;
+          } else { delete merged[id].nonfinancialIdentity; delete merged[id].nonfinancialConnection; }
+        }
+      }
+      if (!remove && Object.keys(merged[id].financialTools || {}).some(name=>merged[id].financialTools[name] && Object.hasOwn(merged[id].nonfinancialTools || {},name))) throw fail('A tool cannot be declared both financial and nonfinancial.');
       this.configStore.write(merged); this.configs = merged;
-      const permissionsChanged = readTools != null || writeTools != null || readResources != null || allowDeclaredRead != null;
+      const permissionsChanged = readTools != null || writeTools != null || readResources != null || allowDeclaredRead != null || nonfinancialTools != null || financialTools != null;
       if (remove || !merged[id].enabled || reconnect || permissionsChanged) await this.disconnect(id);
       if (merged[id]?.enabled && (reconnect || enabled === true || permissionsChanged)) await this.connect(id);
       return this.describe();
@@ -253,7 +388,7 @@ export class McpManager {
     const base = normalizeMcpConfig(id, { type: 'http', url, enabled: false, allowDeclaredRead: true });
     return this.exclusive(async () => {
       const previous = this.configs[id];
-      const next = { ...base };
+      const next = { ...base, ...(previous?.financialTools ? { financialTools: previous.financialTools } : {}) };
       if (previous?.url === base.url && previous.oauth) next.oauth = previous.oauth;
       const merged = { ...this.configs, [id]: next };
       if (Object.keys(merged).length > MCP_LIMITS.servers || JSON.stringify(merged).length > MCP_LIMITS.configBytes) throw fail('Too many MCP servers or configuration too large.');
@@ -308,7 +443,7 @@ export class McpManager {
     if (this.closed || !this.configs[id]?.enabled) return;
     const existing = this.connections.get(id);
     if (existing?.status === 'connected' || existing?.status === 'connecting') return;
-    const config = this.configs[id], entry = { status: 'connecting', tools: [], resources: [], client: null, transport: null, controller: new AbortController() };
+    const config = this.configs[id], entry = { status: 'connecting', configIdentity: mcpServerIdentity(config), tools: [], resources: [], client: null, transport: null, controller: new AbortController() };
     this.connections.set(id, entry); this.onChange();
     let timer;
     try {
@@ -331,16 +466,32 @@ export class McpManager {
         } } }
       });
       const authProvider = config.type === 'stdio' ? null : this.bearerAuth(id);
+      const defaultEnv = config.type === 'stdio' ? sdk.getDefaultEnvironment() : null;
+      // Freeze the inherited launch identity before the transport is constructed
+      // or any await can yield. The child receives exactly this snapshot, and
+      // the post-initialize digest uses the same object instead of rereading
+      // process.cwd()/process.env after connect has run.
+      const launch = config.type === 'stdio'
+        ? Object.freeze({ cwd: config.cwd || process.cwd(), env: Object.freeze(stdioEnvironment(defaultEnv, config.env || {})) })
+        : null;
       const transport = config.type === 'stdio'
-        ? new sdk.StdioClientTransport({ command: config.command, args: config.args, env: stdioEnvironment(sdk.getDefaultEnvironment(), config.env), ...(config.cwd ? { cwd: config.cwd } : {}), stderr: 'ignore', maxBufferSize: 1024 * 1024 })
-        : new (config.type === 'sse' ? sdk.SSEClientTransport : sdk.StreamableHTTPClientTransport)(new URL(config.url), { requestInit: { headers: config.headers }, ...(authProvider ? { authProvider } : {}), fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([entry.controller.signal, ...(init?.signal ? [init.signal] : [])]) }) });
+        ? new sdk.StdioClientTransport({ command: config.command, args: config.args, env: launch.env, cwd: launch.cwd, stderr: 'ignore', maxBufferSize: 1024 * 1024 })
+        : new (config.type === 'sse' ? sdk.SSEClientTransport : sdk.StreamableHTTPClientTransport)(new URL(config.url), { requestInit: { headers: config.headers }, ...(authProvider ? { authProvider } : {}), fetch: (url, init) => guardedMcpFetch(entry,url,{ ...init, redirect:'error', signal:AbortSignal.any([entry.controller.signal,...(init?.signal?[init.signal]:[])]) },fetch) });
+      const send = transport.send?.bind(transport);
+      if(send)transport.send=message=>guardedMcpSend(entry,message,send,{stdio:config.type==='stdio'});
       entry.client = client; entry.transport = transport;
+      // Fingerprint what actually launches or answers, not just the requested
+      // config. Redirects are rejected by the fetch wrapper above so the
+      // effective endpoint cannot move away from the attested configured URL.
+      // The initialize identity is only known after connect(), so no connection
+      // identity (and therefore no transfer attestation) exists before then.
       client.onclose = () => { if (this.connections.get(id) === entry && entry.status !== 'failed') { entry.status = 'disconnected'; entry.tools = []; entry.resources = []; this.onChange(); } };
       // Remote exceptions and logs are intentionally never printed.
       client.onerror = () => {};
       const timeout = new Promise((_, reject) => { timer = setTimeout(() => { entry.controller.abort(); reject(fail('MCP connection timed out. Check the server and reconnect.', 504)); }, this.timeoutMs); });
       await Promise.race([(async () => {
         await client.connect(transport, { timeout: this.timeoutMs });
+        entry.connectionIdentity = mcpConnectionIdentity(config, { serverInfo: client.getServerInfo?.() ?? client.getServerVersion?.() ?? null, ...(launch ? { launch } : {}) });
         const list = async (method, key) => {
           const items = [], seen = new Set(); let cursor;
           do {
@@ -380,27 +531,33 @@ export class McpManager {
       for (const tool of entry.tools) {
         if (this.redact(String(tool.name)) !== tool.name || !this.allowed(config, tool) || tools.length >= (includeDispatcher ? MCP_LIMITS.tools : exposedLimit)) continue;
         const name = `mcp_${createHash('sha256').update(`${serverId}\0${tool.name}`).digest('hex').slice(0, 16)}`;
-        tools.push({ name, effect: this.isWrite(tool) ? 'write' : 'read', label: `${serverId} · ${tool.name}`, description: this.redact(`${serverId} / ${tool.name}: ${tool.description || ''}`).slice(0, 1000), parameters: this.redactMetadata(tool.inputSchema),
+        tools.push({ name, effect: this.isWrite(tool,config) ? 'write' : 'read', managedOperation: this.isWrite(tool,config), source: { kind: 'mcp', id: serverId }, label: `${serverId} · ${tool.name}`, description: this.redact(`${serverId} / ${tool.name}: ${tool.description || ''}`).slice(0, 1000), parameters: this.redactMetadata(tool.inputSchema),
           execute: async (_id, args, signal) => {
             if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
             if (!object(args) || JSON.stringify(args).length > 8000) throw fail('Invalid MCP tool arguments.');
+            args=structuredClone(args);
             try {
               if (typeof entry.schemaValidator !== 'function') throw new Error('Validator unavailable');
               const validation = await entry.schemaValidator(tool.inputSchema)['~standard'].validate(args);
               if (validation.issues) throw new Error('Invalid arguments');
             } catch { throw fail('MCP tool arguments do not match the advertised schema.'); }
             if (this.closed || !isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || entry.status !== 'connected' || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP tool access is no longer current.', 409);
-            const check = () => !signal?.aborted && !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.tools.includes(tool) && entry.status === 'connected' && this.allowed(this.configs[serverId] || { enabled: false }, tool);
-            const invoke = async dispatchSignal => {
+            freezeArguments(args);
+            const schemaDigest = toolDigest(tool), write=this.isWrite(tool,this.configs[serverId]);
+            const paid=()=>financialDeclaration(this.configs[serverId],tool,entry);
+            const approvedFinancial=paid(), approvedFinancialDigest=approvedFinancial ? financialContractDigest(approvedFinancial) : null;
+            const declared = () => declarationCurrent(this.configs[serverId], tool, entry);
+            const check = () => !signal?.aborted && !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.tools.includes(tool) && toolDigest(tool)===schemaDigest && entry.status === 'connected' && this.isWrite(tool,this.configs[serverId])===write && this.allowed(this.configs[serverId] || { enabled:false },tool) && (!write || (approvedFinancialDigest ? paid() && financialContractDigest(paid())===approvedFinancialDigest : declared()));
+            const invoke = async (dispatchSignal,beforeDispatch=null) => {
               if (!check()) throw fail('MCP action permission changed before dispatch.', 409);
             if (this.inFlight >= MCP_LIMITS.maxConcurrent) throw fail('MCP read concurrency limit reached. Retry later.', 429);
             this.inFlight++;
             const startedAt = new Date().toISOString();
             let status = 'failed', text = '', error = null;
             try {
-              const result = await entry.client.callTool({ name: tool.name, arguments: args }, {
+              const result = await runMcpToolDispatch(entry,{name:tool.name,args,isCurrent:check,beforeDispatch,write},()=>entry.client.callTool({ name: tool.name, arguments: args }, {
                 timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs, signal: AbortSignal.any([entry.controller.signal, ...(dispatchSignal instanceof AbortSignal ? [dispatchSignal] : [])])
-              });
+              }));
               if (!isCurrent() || this.connections.get(serverId) !== entry || !entry.tools.includes(tool) || !this.allowed(this.configs[serverId] || { enabled: false }, tool)) throw fail('MCP task or connection changed during the call.', 409);
               if (result.isError) throw fail('MCP tool reported an error.');
               // Text and structured data only. Never fetch returned image/resource URLs.
@@ -411,9 +568,9 @@ export class McpManager {
             } catch (cause) { error = errorMessage(cause); throw fail(error, 502); }
             finally { this.inFlight--; onCall({ id: randomUUID(), serverId, tool: tool.name, status, startedAt, finishedAt: new Date().toISOString(), ...(error ? { error } : { text }) }); }
             };
-            if (this.isWrite(tool)) {
+            if (write) {
               if (!taskId || typeof executeWrite !== 'function') throw fail('MCP actions require an authorized durable task.', 403);
-              const result = await executeWrite({ taskId, serverId, tool: tool.name, args, isCurrent, check, invoke });
+              const result = await executeWrite({ taskId, serverId, tool: tool.name, args, isCurrent, check, invoke, transfer: approvedFinancial ? 'paid' : declared() ? 'nonfinancial' : 'unknown', financialContract:approvedFinancial ? mintMcpFinancialContract({...approvedFinancial,serverId,tool:tool.name},check):null, schemaDigest });
               return { content: [{ type: 'text', text: JSON.stringify(result).slice(0, MCP_LIMITS.resultChars) }], details: {} };
             }
             return invoke(signal);
@@ -426,7 +583,7 @@ export class McpManager {
         const current = () => !this.closed && isCurrent() && this.connections.get(serverId) === entry && entry.status === 'connected'
           && entry.resources.includes(resource) && this.configs[serverId]?.enabled && this.configs[serverId].readResources.includes(id);
         tools.push({ name: `mcp_${createHash('sha256').update(`${serverId}\0resource\0${id}`).digest('hex').slice(0, 16)}`,
-          label: `${serverId} · ${this.redact(resource.name).slice(0, 200)}`,
+          effect: 'read', source: { kind: 'mcp', id: serverId }, label: `${serverId} · ${this.redact(resource.name).slice(0, 200)}`,
           description: `Read authorized MCP resource ${this.redact(resource.name).slice(0, 200)}: ${this.redact(resource.description || '').slice(0, 500)}`,
           parameters: { type: 'object', properties: {}, additionalProperties: false },
           execute: async (_callId, args, signal) => {
@@ -448,23 +605,73 @@ export class McpManager {
           } });
       }
     }
-    if (!includeDispatcher || tools.length <= exposedLimit) return tools.slice(0, exposedLimit);
-    const all = () => this.tools({ taskId, isCurrent, onCall, executeWrite, exposedLimit: MCP_LIMITS.tools, includeDispatcher: false });
-    const find = { name: 'find_connected_tools', contextProvider: 'workspace', label: 'Find connected service capabilities',
-      description: 'Find authorized tools beyond the inline tool catalog. Returns exact schemas and whether a tool can change data. Use call_connected_tool with the returned name.',
-      parameters: { type: 'object', properties: { query: { type: 'string', maxLength: 200 } }, additionalProperties: false },
+    if (!includeDispatcher) return tools.slice(0, exposedLimit);
+    const group = { owner: this, build: () => this.dispatcher({ taskId, isCurrent, onCall, executeWrite }) };
+    const exposed = tools.length <= exposedLimit ? tools.slice(0, exposedLimit)
+      : [...tools.slice(0, Math.max(0, exposedLimit - 2)), ...group.build()];
+    registerToolFallback(exposed, group);
+    return exposed;
+  }
+  /** One bounded find/call pair per manager. The finder re-reads the current
+   * authorized catalog; the caller resolves the exact returned name there and
+   * executes the original tool chain (including its write ledger and schema). */
+  dispatcher({ taskId = null, isCurrent = () => false, onCall = () => {}, executeWrite = null } = {}) {
+    const all = () => this.tools({ taskId, isCurrent, onCall, executeWrite, exposedLimit: MCP_LIMITS.servers * MCP_LIMITS.tools, includeDispatcher: false });
+    const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const find = { name: 'find_connected_tools', contextProvider: 'workspace', effect: 'read', label: 'Find connected service capabilities',
+      description: 'Find currently authorized tools. Follow catalogOffset with catalogDigest for more matches. For an oversized tool use name with schemaOffset and schemaDigest to read its exact JSON schema in bounded fragments. Reassemble schemaJsonPart before calling call_connected_tool; discovery never grants write permission.',
+      parameters: { type: 'object', properties: {
+        query: { type: 'string', maxLength: 200 }, catalogOffset: { type: 'integer', minimum: 0 }, catalogDigest: { type: 'string', maxLength: 64 },
+        name: { type: 'string', maxLength: 500 }, schemaOffset: { type: 'integer', minimum: 0 }, schemaDigest: { type: 'string', maxLength: 64 }
+      }, additionalProperties: false },
       execute: async (_id, args, signal) => {
-        signal?.throwIfAborted(); if (!isCurrent() || !object(args) || Object.keys(args).some(key => key !== 'query') || args.query != null && typeof args.query !== 'string') throw fail('Invalid tool search.');
+        signal?.throwIfAborted();
+        const allowed = ['query','catalogOffset','catalogDigest','name','schemaOffset','schemaDigest'];
+        if (!isCurrent() || !object(args) || Object.keys(args).some(key => !allowed.includes(key))
+          || args.query != null && (typeof args.query !== 'string' || args.query.length > 200)) throw fail('Invalid tool search.');
+        const offsetFor = key => { const offset = args[key] ?? 0; if (!Number.isSafeInteger(offset) || offset < 0) throw fail('Invalid discovery offset.'); return offset; };
+        if (args.name != null) {
+          if (typeof args.name !== 'string' || args.name.length > 500 || ['query','catalogOffset','catalogDigest'].some(key => Object.hasOwn(args,key))) throw fail('Use either tool search or named schema fragments.');
+          const tool = all().find(item => item.name === args.name);
+          if (!tool) throw fail('This tool is not currently authorized.', 403);
+          const schema = JSON.stringify(tool.parameters), schemaDigest = digest(tool.parameters), offset = offsetFor('schemaOffset');
+          if (offset > schema.length || offset > 0 && args.schemaDigest !== schemaDigest || args.schemaDigest != null && args.schemaDigest !== schemaDigest) throw fail('The tool schema changed; restart discovery at offset zero.', 409);
+          let length = Math.min(2000, schema.length - offset);
+          const fragment = () => ({ name:tool.name, schemaDigest, offset, totalChars:schema.length, schemaJsonPart:schema.slice(offset,offset+length), nextOffset:offset+length < schema.length ? offset+length : null });
+          while (JSON.stringify(fragment()).length > MCP_LIMITS.resultChars && length > 0) length = Math.floor(length / 2);
+          if (offset < schema.length && length === 0) throw fail('The schema fragment cannot fit the discovery budget.', 413);
+          return { content:[{type:'text',text:JSON.stringify(fragment())}],details:{} };
+        }
+        if (Object.hasOwn(args,'schemaOffset') || Object.hasOwn(args,'schemaDigest')) throw fail('A schema fragment requires an exact tool name.');
         const query = (args.query || '').toLowerCase().split(/\s+/).filter(Boolean);
         const matches = all().filter(tool => query.every(word => `${tool.name} ${tool.label} ${tool.description}`.toLowerCase().includes(word)));
-        const selected = []; for (const tool of matches.slice(0, 10)) { const item = { name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters, effect: tool.effect || 'read' }; if (JSON.stringify([...selected,item]).length <= 12000) selected.push(item); }
-        return { content: [{ type: 'text', text: JSON.stringify({ tools: selected, total: matches.length }) }], details: {} };
+        const total = matches.length, selected = [], offset = offsetFor('catalogOffset');
+        const catalogDigest = digest(matches.map(tool => [tool.name,tool.label,tool.description,tool.effect,digest(tool.parameters)]));
+        if (offset > total || offset > 0 && args.catalogDigest !== catalogDigest || args.catalogDigest != null && args.catalogDigest !== catalogDigest) throw fail('The authorized catalog changed; restart discovery at offset zero.', 409);
+        const envelope = candidate => {
+          const next = offset + candidate.length;
+          return {tools:candidate,total,...(next < total || offset > 0 ? {catalogDigest}: {}),...(next < total ? {omitted:total-next,nextOffset:next}: {nextOffset:null}),
+            ...(candidate.some(item=>item.oversized) ? {oversized:candidate.filter(item=>item.oversized).length}: {})};
+        };
+        const size = candidate => JSON.stringify(envelope(candidate)).length;
+        for (const tool of matches.slice(offset,offset+10)) {
+          const item = { name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters, effect: tool.effect || 'read' };
+          if (size([...selected, item]) <= MCP_LIMITS.resultChars) { selected.push(item); continue; }
+          const compact = { name:tool.name, label:String(tool.label).slice(0,160), parameters:tool.parameters, effect:tool.effect || 'read' };
+          if (size([...selected,compact]) <= MCP_LIMITS.resultChars) { selected.push(compact); continue; }
+          const reduced = { name: tool.name, label: String(tool.label).slice(0, 160), effect: tool.effect || 'read', oversized: true,
+            note: 'Read the complete schema with name and schemaOffset. Later fragments require the returned schemaDigest.' };
+          if (size([...selected, reduced]) > MCP_LIMITS.resultChars) break;
+          selected.push(reduced);
+        }
+        if (offset < total && !selected.length) throw fail('A tool identifier cannot fit the discovery budget.', 413);
+        return { content: [{ type: 'text', text: JSON.stringify(envelope(selected)) }], details: {} };
       } };
-    const call = { name: 'call_connected_tool', contextProvider: 'workspace', effect: 'write', label: 'Use an authorized connected service tool',
+    const call = { name: 'call_connected_tool', contextProvider: 'workspace', effect: 'write', managedOperation: true, label: 'Use an authorized connected service tool',
       description: 'Execute a tool returned by find_connected_tools using its exact schema. Read tools retain their grants; action tools use the durable write ledger. Acceptance alone is not verified completion.',
       parameters: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } }, required: ['name','arguments'], additionalProperties: false },
       execute: async (id, args, signal) => { signal?.throwIfAborted(); if (!isCurrent() || !object(args) || Object.keys(args).some(key => !['name','arguments'].includes(key)) || typeof args.name !== 'string') throw fail('Invalid connected tool call.'); const tool = all().find(item => item.name === args.name); if (!tool) throw fail('This tool is not currently authorized.', 403); return tool.execute(id, args.arguments, signal); } };
-    return [...tools.slice(0, Math.max(0, exposedLimit - 2)), find, call];
+    return [find, call];
   }
   redactMetadata(value, depth = 0) {
     if (depth > 16) return '[truncated]';

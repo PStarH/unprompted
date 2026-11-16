@@ -1,3 +1,5 @@
+import { sourceRepairMarkup } from './source-health.js';
+import { modelControlsMarkup, bindModelControls, invalidateModelControls, parseMajor, formatMajor } from './model-controls.js';
 import { createInteractions } from './interactions.js?v=ix3';
 import './select-menu.js?v=ix2';
 import { createWorkspace } from './workspace.js';
@@ -630,9 +632,10 @@ function renderAutonomyControls(task = null) {
     ? Date.parse(grant.expiresAt) > Date.now() : !task || grant.taskId === task.id);
   return `<details class="management-explanation" data-preserve="yolo-${escapeHtml(task?.id || 'workspace')}"><summary>${nativeCopy('限时自动跟进', 'Timed automatic follow-up')}${grants.length ? ` · ${nativeCopy('已开启', 'On')}` : ''}</summary>
     <p>${nativeCopy('授权存续期间会自动批准已准备的回复发送和来源文档修改，不扩充来源权限；仍受来源权限与结果核验限制。限时范围是整个工作区；单件范围在这件事完成或取消后结束。已发出的操作不能通过停止自动跟进撤回。', 'While the authorization lasts, prepared replies may be sent and source documents patched automatically; this does not expand source permissions and still follows source limits and result checks. A time limit covers the workspace; a single task ends when that task is done or cancelled. Stopping automatic follow-up cannot recall an operation the provider already accepted.')}</p>
-    ${grants.map(grant => `<div class="grant-row"><span>${grant.mode === 'time' ? nativeCopy('自动跟进至', 'Automatic follow-up until') + ' ' + escapeHtml(time(grant.expiresAt)) : nativeCopy('这件自动跟进', 'Following this task') + ' · ' + escapeHtml(current.tasks?.find(item => item.id === grant.taskId)?.request?.subjectEntity || grant.taskId)}</span><button type="button" class="secondary-button" data-yolo-revoke="${escapeHtml(grant.id)}">${nativeCopy('停止自动跟进', 'Stop automatic follow-up')}</button></div>`).join('')}
+    ${grants.map(grant => `<div class="grant-row"><span>${grant.mode === 'time' ? nativeCopy('自动跟进至', 'Automatic follow-up until') + ' ' + escapeHtml(time(grant.expiresAt)) : nativeCopy('这件自动跟进', 'Following this task') + ' · ' + escapeHtml(current.tasks?.find(item => item.id === grant.taskId)?.request?.subjectEntity || grant.taskId)}${grant.moneyBudget?.available ? `<small class="setup-note autonomy-money-summary">${escapeHtml(grant.moneyBudget.currency)} · ${nativeCopy('累计上限 / 剩余 / 未知占额', 'Cumulative cap / remaining / unknown holds')}: ${formatMajor(grant.moneyBudget.capMicros)} / ${formatMajor(grant.moneyBudget.remainingMicros)} / ${formatMajor(grant.moneyBudget.unknownMicros)} · ${nativeCopy('金额许可至', 'Money permission until')} ${escapeHtml(new Date(grant.moneyBudget.expiresAt).toLocaleString(getLocale()))}</small>` : ''}</span><button type="button" class="secondary-button" data-yolo-revoke="${escapeHtml(grant.id)}">${nativeCopy('停止自动跟进', 'Stop automatic follow-up')}</button></div>`).join('')}
+    <p class="setup-note">${nativeCopy('资金转移默认上限为 0；金额许可不增加工具权限。模型/API 费用另受模型预算与费率控制。续期不会重置已用金额或未知占额。', 'Funds transfers default to a zero cap; a money allowance adds no tool permission. Model/API fees have separate model budgets and prices. Renewal preserves spending and unknown holds.')}</p>
     <div class="action-row">${task ? `<button type="button" class="secondary-button" data-yolo-task="${escapeHtml(task.id)}">${nativeCopy('这件自动跟进', 'Follow this automatically')}</button>` : ''}</div>
-    <form data-yolo-time data-preserve="yolo-duration-${escapeHtml(task?.id || 'workspace')}"><label>${nativeCopy('时长（分钟）', 'Minutes')} <input type="number" name="durationMinutes" min="1" max="1440" value="30" required></label><button type="submit" class="secondary-button">${nativeCopy('开启限时自动跟进', 'Start timed follow-up')}</button></form>
+    <form data-yolo-time data-preserve="yolo-duration-${escapeHtml(task?.id || 'workspace')}"><label>${nativeCopy('时长（分钟）', 'Minutes')} <input type="number" name="durationMinutes" min="1" max="1440" value="30" required></label><div class="model-fields"><label>${nativeCopy('资金币种', 'Funds currency')}<select name="moneyCurrency"><option>USD</option><option>CNY</option><option>EUR</option></select></label><label>${nativeCopy('资金累计上限', 'Cumulative funds cap')}<input name="moneyMajor" inputmode="decimal" value="0" required></label><label>${nativeCopy('金额许可时长（分钟）', 'Money permission minutes')}<input type="number" name="moneyMinutes" min="1" max="1440" value="30" required></label></div><label class="setup-toggle"><input type="checkbox" name="moneyConfirmed"><span>${nativeCopy('确认该累计资金上限；仍需具体工具、账号和目标授权。', 'Confirm this cumulative funds cap; tool, account and target permission is still required.')}</span></label><button type="submit" class="secondary-button">${nativeCopy('开启限时自动跟进', 'Start timed follow-up')}</button></form>
   </details>`;
 }
 
@@ -903,7 +906,7 @@ function renderCloudCard(id, { home = false } = {}) {
     account: google.accountEmail ? { label: google.accountEmail } : null, oauth: setupState.oauth || {},
     readOnly: !(setupState.artifacts?.enabled && setupState.artifacts.grants?.some(grant => grant.connectorId === 'google' && grant.status === 'active' && grant.available)) && !(setupState.connectorActions?.enabled && setupState.connectorActions.grants?.some(grant => grant.connectorId === 'google' && grant.status === 'active' && grant.available)),
     healthy: google.connectionStatus === 'sync_failed' ? false : google.connectionStatus === 'sync_ok' ? true : null,
-    lastSyncAt: google.lastSyncAt, lastSuccessAt: google.lastSuccessAt, lastError: google.lastValidationError, counts: setupState.workspace?.observed || {} } : setupState.connections?.[id] || {};
+    lastSyncAt: google.lastSyncAt, lastSuccessAt: google.lastSuccessAt, lastError: google.lastError || google.lastValidationError, repair: google.repair, retryAt: google.retryAt, counts: setupState.workspace?.observed || {} } : setupState.connections?.[id] || {};
   const grantedCloudScopes = setupState.connectorActions?.platforms?.find(item => item.connectorId === id)?.grantedScopes || [];
   const oauth = source.oauth || {}, waiting = ['starting', 'authorizing', 'verifying', 'connecting'].includes(oauth.phase);
   const failed = ['failed', 'expired', 'activation_failed'].includes(oauth.phase) || source.healthy === false;
@@ -919,10 +922,10 @@ function renderCloudCard(id, { home = false } = {}) {
   const browser = browserAuthorization && waiting ? ui`<div class="device-authorization" role="status"><p>${copy('在浏览器中登录你自己的账号并授权。完成后会自动开始观察。')}</p>${oauth.authorizeUrl ? ui`<a class="primary-button" href="${escapeHtml(oauth.authorizeUrl)}" target="_blank" rel="noopener">${copy('打开官方授权页面')} ↗</a>` : ui`<p>${copy('正在确认账号身份并应用连接。')}</p>`}<button type="button" class="text-button" data-provider-operation="cancel" data-provider="${id}">${copy('取消连接')}</button></div>` : '';
   const notionPreset = setupState.mcp?.presets?.find(item => item.id === 'notion');
   const notionMcp = id === 'notion' && selected && !source.configured && !source.connected && !waiting ? ui`<div class="connection-card-form"><p>${nativeCopy('直接登录 Notion，即可在任务中使用已授权的 MCP 工具；此方式不会自动观察页面变化。', 'Sign in to Notion to use authorized MCP tools in tasks. This does not automatically observe page changes.')}</p>${notionPreset?.oauthPhase === 'authorizing' && notionPreset.authorizeUrl ? ui`<a class="secondary-button" href="${escapeHtml(notionPreset.authorizeUrl)}" target="_blank" rel="noopener noreferrer">${nativeCopy('打开 Notion 登录页', 'Open Notion sign-in')}</a><button type="button" class="text-button" data-mcp-oauth-cancel="notion">${nativeCopy('取消', 'Cancel')}</button>` : ui`<button type="button" class="secondary-button" data-mcp-oauth="notion">${notionPreset?.signedIn ? nativeCopy('重新连接 Notion', 'Reconnect Notion') : nativeCopy('通过 Notion 登录', 'Sign in with Notion')}</button>`}</div>` : '';
-  const showCodeCredentials = code && !source.connected && (!source.configured || ['failed', 'expired'].includes(oauth.phase));
+  const showCodeCredentials = code && source.authMode !== 'broker' && !source.connected && (!source.configured || ['failed', 'expired'].includes(oauth.phase));
   const codeFields = showCodeCredentials ? ui`<label class="setup-field">${copy('应用 Client ID')}<input name="clientId" required maxlength="512" autocomplete="off" value="${escapeHtml(source.clientId || '')}" placeholder="Client ID"></label>${id === 'slack' ? '' : ui`<label class="setup-field">${copy('应用 Client Secret')}<input name="clientSecret" type="password" ${source.configured || id === 'slack' ? '' : 'required'} maxlength="512" autocomplete="off" value=""></label>`}<p class="setup-note">${id === 'slack' ? nativeCopy('发行版尚未预置此应用。填写已开启 PKCE 的 Client ID 即可。', 'Enter the Client ID of your PKCE-enabled Slack app.') : copy('发行版尚未预置此应用。自托管时填写一次 Client ID 和 Client Secret，它们只保存在这台电脑上。')}</p>` : '';
   const deviceFields = !personalToken && !code && !source.configured ? ui`<label class="setup-field">${copy('应用 Client ID')}<input name="clientId" required maxlength="512" autocomplete="off" value="${escapeHtml(source.clientId || '')}" placeholder="${id === 'github' ? 'GitHub App client ID' : 'Microsoft application (client) ID'}"></label><p class="setup-note">${copy('发行版尚未预置此应用。自托管时只需填写一次注册应用的公开 Client ID，不需要访问令牌或 Client Secret。')}</p>` : '';
-  const form = selected && id !== 'google' && !waiting && (!source.connected || ['slack', 'microsoft', 'notion', 'github'].includes(id)) ? ui`<div class="connection-card-form"><form data-connection-form="${id}" data-preserve="connection-${id}">${id === 'slack' ? ui`<label class="setup-toggle"><input type="checkbox" name="channels" ${grantedCloudScopes.some(scope => /^(channels|groups):/.test(scope)) ? 'checked' : ''}><span>${nativeCopy('同时读取我加入的频道和线程（需要新增授权）', 'Also read channels I joined and their threads (additional consent)')}</span></label>` : ''}${['slack', 'microsoft'].includes(id) ? ui`<label class="setup-field">${nativeCopy('附加 OAuth 权限（空格分隔）', 'Additional OAuth scopes (space separated)')}<input name="scopes" autocomplete="off" value="${escapeHtml(grantedCloudScopes.join(' '))}" placeholder="${id === 'slack' ? 'chat:write' : 'Mail.ReadWrite Mail.Send'}"></label>` : ''}${personalToken ? ui`<label class="setup-field">Todoist API token<input name="token" type="password" required autocomplete="off" maxlength="512"></label><a class="text-button" href="https://app.todoist.com/app/settings/integrations/developer" target="_blank" rel="noopener">${nativeCopy('打开个人 API token 设置', 'Open personal API token settings')} ↗</a>` : code ? codeFields : deviceFields}<label class="setup-toggle"><input name="observe" type="checkbox" checked><span><strong>${copy('连接后持续观察')}</strong><small>${copy('立即检查一次，之后默认每 5 分钟检查变化，可以随时暂停。')}</small></span></label><p class="connection-disclosure">${copy('观察只读取内容；行动需要单独允许，且受平台授权范围限制。工作上下文可能交给你选择的模型理解。')}</p><button class="primary-button" type="submit">${browserAuthorization || personalToken ? nativeCopy('连接', 'Connect') : copy('获取授权码')} ${providerNames[id]}</button><p class="setup-error" data-provider-error="${id}" role="alert" ${connectionErrors.has(id) ? '' : 'hidden'}>${escapeHtml(connectionErrors.get(id) || '')}</p></form></div>` : '';
+  const form = selected && id !== 'google' && !waiting && (!source.connected || source.repair?.action === 'reauthorize' || ['slack', 'microsoft', 'notion', 'github'].includes(id)) ? ui`<div class="connection-card-form"><form data-connection-form="${id}" data-preserve="connection-${id}">${id === 'slack' ? ui`<label class="setup-toggle"><input type="checkbox" name="channels" ${grantedCloudScopes.some(scope => /^(channels|groups):/.test(scope)) ? 'checked' : ''}><span>${nativeCopy('同时读取我加入的频道和线程（需要新增授权）', 'Also read channels I joined and their threads (additional consent)')}</span></label>` : ''}${['slack', 'microsoft'].includes(id) ? ui`<label class="setup-field">${nativeCopy('附加 OAuth 权限（空格分隔）', 'Additional OAuth scopes (space separated)')}<input name="scopes" autocomplete="off" value="${escapeHtml(grantedCloudScopes.join(' '))}" placeholder="${id === 'slack' ? 'chat:write' : 'Mail.ReadWrite Mail.Send'}"></label>` : ''}${personalToken ? ui`<label class="setup-field">Todoist API token<input name="token" type="password" required autocomplete="off" maxlength="512"></label><a class="text-button" href="https://app.todoist.com/app/settings/integrations/developer" target="_blank" rel="noopener">${nativeCopy('打开个人 API token 设置', 'Open personal API token settings')} ↗</a>` : code ? codeFields : deviceFields}<label class="setup-toggle"><input name="observe" type="checkbox" checked><span><strong>${copy('连接后持续观察')}</strong><small>${copy('立即检查一次，之后默认每 5 分钟检查变化，可以随时暂停。')}</small></span></label><p class="connection-disclosure">${copy('观察只读取内容；行动需要单独允许，且受平台授权范围限制。工作上下文可能交给你选择的模型理解。')}</p><button class="primary-button" type="submit">${browserAuthorization || personalToken ? nativeCopy('连接', 'Connect') : copy('获取授权码')} ${providerNames[id]}</button><p class="setup-error" data-provider-error="${id}" role="alert" ${connectionErrors.has(id) ? '' : 'hidden'}>${escapeHtml(connectionErrors.get(id) || '')}</p></form></div>` : '';
   const access = copy(cloudAccess[id] || '邮件与文档');
   const write = source.readOnly === false || google.allowExternalWrites && id === 'google' ? copy('按你的授权行动') : copy('不修改来源');
   const lastSuccessAt = source.lastSuccessAt || (source.healthy === true ? source.lastSyncAt : null);
@@ -935,7 +938,7 @@ function renderCloudCard(id, { home = false } = {}) {
   const footerActions = source.connected ? actions : '';
   return {
     id, state,
-    html: ui`<article class="source-connection-card${selected ? ' selected' : ''}" data-connection-card="${id}" data-state="${state}" data-selected="${selected}"><div class="source-connection-heading"><span class="source-mark-slot" aria-hidden="true">${sourceMark(id)}</span><div class="source-connection-copy"><h3>${providerNames[id]}</h3><p>${source.account?.label ? `${escapeHtml(source.account.label)} · ` : ''}${explanationForCloud(id, description)}</p>${countLine}</div><span class="state-badge ${failed ? 'offline' : source.connected ? 'done' : 'waiting'}">${label}</span>${headingActions}</div>${detail}${notice}${device}${browser}${notionMcp}${form}${footerActions}</article>`
+    html: ui`<article class="source-connection-card${selected ? ' selected' : ''}" data-connection-card="${id}" data-state="${state}" data-selected="${selected}"><div class="source-connection-heading"><span class="source-mark-slot" aria-hidden="true">${sourceMark(id)}</span><div class="source-connection-copy"><h3>${providerNames[id]}</h3><p>${source.account?.label ? `${escapeHtml(source.account.label)} · ` : ''}${explanationForCloud(id, description)}</p>${countLine}</div><span class="state-badge ${failed ? 'offline' : source.connected ? 'done' : 'waiting'}">${label}</span>${headingActions}</div>${detail}${notice}${sourceRepairMarkup(id, source, { language: getLocale(), selected, externallyConfigured: id === 'google' && google.credentialsConfiguredExternally })}${device}${browser}${notionMcp}${form}${footerActions}</article>`
   };
 }
 
@@ -1061,14 +1064,27 @@ function renderPlatformAccess(id) {
   const platform = access?.platforms?.find(item => item.connectorId === id);
   if (!platform) return '';
   const grants = (access.grants || []).filter(item => item.connectorId === id && item.status === 'active');
-  return ui`<section class="connection-card-form"><h3>${nativeCopy('平台行动权限', 'Platform action access')}</h3><p>${id === 'apple_reminders' ? nativeCopy('允许在已选择的提醒事项列表中创建、修改、完成或删除提醒事项。', 'Allow creating, editing, completing or deleting reminders in selected lists.') : nativeCopy('可使用平台实际授予的 API 权限。允许行动后，Agent 可以在指定范围发送、创建、修改或删除内容。', 'Use API permissions granted by the platform. Action access permits sending, creating, editing and deleting within your selected scope.')}</p>${grants.map(grant => ui`<p><code>${escapeHtml(grant.pathPrefix)}</code> · ${escapeHtml(grant.methods.join(', '))} <button type="button" class="text-button" data-revoke-platform-grant="${escapeHtml(grant.id)}">${nativeCopy('撤销', 'Revoke')}</button></p>`).join('')}<form data-platform-grant="${id}"><label class="setup-field">${nativeCopy('API 路径范围', 'API path scope')}<input name="pathPrefix" value="/" required></label><label class="setup-toggle"><input type="checkbox" name="confirmed" required><span>${nativeCopy('允许此账号在上述范围执行所有平台已授权的动作', 'Allow this account to perform all platform-authorized actions within this scope')}</span></label><button type="submit" class="secondary-button">${nativeCopy('允许行动', 'Allow actions')}</button></form></section>`;
+  const funds=(current?.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
+  return ui`<section class="connection-card-form"><h3>${nativeCopy('平台行动权限', 'Platform action access')}</h3><p>${id === 'apple_reminders' ? nativeCopy('允许在已选择的提醒事项列表中创建、修改、完成或删除提醒事项。', 'Allow creating, editing, completing or deleting reminders in selected lists.') : nativeCopy('可使用平台实际授予的 API 权限。允许行动后，Agent 可以在指定范围发送、创建、修改或删除内容。', 'Use API permissions granted by the platform. Action access permits sending, creating, editing and deleting within your selected scope.')}</p>${grants.map(grant => ui`<p><code>${escapeHtml(grant.pathPrefix)}</code> · ${escapeHtml(grant.methods.join(', '))} · ${grant.transfer === 'nonfinancial' ? nativeCopy('不涉及资金', 'No money movement') : grant.transfer === 'paid' ? nativeCopy('受累计资金上限约束','Bound to a cumulative funds cap') : nativeCopy('可能涉及资金，需明确审核', 'May move money — needs explicit review')} <button type="button" class="text-button" data-revoke-platform-grant="${escapeHtml(grant.id)}">${nativeCopy('撤销', 'Revoke')}</button></p>`).join('')}<form data-platform-grant="${id}"><label class="setup-field">${nativeCopy('API 路径范围', 'API path scope')}<input name="pathPrefix" value="/" required></label><label class="setup-toggle"><input type="checkbox" name="confirmed" required><span>${nativeCopy('允许此账号在上述范围执行所有平台已授权的动作', 'Allow this account to perform all platform-authorized actions within this scope')}</span></label><label class="setup-toggle"><input type="checkbox" name="transfer"><span>${nativeCopy('这些操作不会产生任何资金流动（付款、转账、购买）', 'These operations never move money (no payments, transfers, purchases)')}</span></label><details data-preserve="platform-money-${id}"><summary>${nativeCopy('资金操作限制','Funds operation limits')}</summary><p class="setup-note">${nativeCopy('选择已确认的累计资金授权，并确认请求中的微单位金额和币种路径。未配置可信金额时仍需逐次审核。','Choose a confirmed cumulative funds allowance and the request pointers for integer micros and currency. Without a trusted amount mapping, individual review is still required.')}</p>${funds.length ? `<label class="setup-toggle"><input type="checkbox" name="platformPaid"><span>${nativeCopy('在资金上限内允许这些操作','Permit these operations within the funds cap')}</span></label><label class="setup-field">${nativeCopy('资金授权','Funds allowance')}<select name="platformMoneyGrant">${funds.map(grant=>`<option value="${escapeHtml(grant.moneyBudget.grantId)}">${escapeHtml(grant.moneyBudget.currency)} ${formatMajor(grant.moneyBudget.remainingMicros)} · ${grant.mode==='task'?nativeCopy('单件任务','Single task'):nativeCopy('工作区','Workspace')}</option>`).join('')}</select></label><label class="setup-field">${nativeCopy('微单位金额请求路径','Amount-in-micros request pointer')}<input name="platformAmountPointer" value="/request/body/amountMicros"></label><label class="setup-field">${nativeCopy('币种请求路径','Currency request pointer')}<input name="platformCurrencyPointer" value="/request/body/currency"></label><label class="setup-toggle"><input type="checkbox" name="platformFinancialConfirmed"><span>${nativeCopy('确认金额单位、币种和操作范围与资金授权一致','Confirm amount units, currency and action scope match the allowance')}</span></label>` : `<p class="setup-note">${nativeCopy('先在自动跟进设置中确认资金上限。默认上限为 0。','First confirm a funds cap in automatic follow-up settings. The default cap is zero.')}</p>`}</details><button type="submit" class="secondary-button">${nativeCopy('允许行动', 'Allow actions')}</button></form></section>`;
 }
 
 document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-platform-grant]'); if (!form) return;
   event.preventDefault(); const data = new FormData(form);
-  try { await postJSON('/api/connector-grants', { connectorId: form.dataset.platformGrant, pathPrefix: data.get('pathPrefix'), confirmed: data.has('confirmed') }); await refreshSetup({ quiet: true }); }
+  try {
+    const paid=data.has('platformPaid'), selected=(current?.autonomy?.grants || []).find(grant=>grant.moneyBudget?.grantId===data.get('platformMoneyGrant'));
+    if(paid && data.has('transfer'))throw new Error(nativeCopy('请选择不涉及资金或资金上限其中一种。','Choose either no money movement or a funds allowance.'));
+    await postJSON('/api/connector-grants', { connectorId: form.dataset.platformGrant, pathPrefix: data.get('pathPrefix'), transfer:paid?'paid':data.has('transfer')?'nonfinancial':'unknown', confirmed:data.has('confirmed'),
+      ...(paid?{monetaryGrantId:data.get('platformMoneyGrant'),amountMicrosPointer:data.get('platformAmountPointer'),currencyPointer:data.get('platformCurrencyPointer'),financialConfirmed:data.has('platformFinancialConfirmed'),...(selected?.mode==='task'?{taskId:selected.taskId}:{})}:{}) });
+    await refreshSetup({quiet:true});
+  }
   catch (error) { toast(error.message, true); }
+});
+document.addEventListener('input',event=>{
+  const form=event.target.closest('[data-platform-grant]');if(!form || event.target.name==='platformFinancialConfirmed')return;
+  const confirmation=form.querySelector('[name="platformFinancialConfirmed"]');if(confirmation)confirmation.checked=false;
+  if(event.target.name==='platformPaid' && event.target.checked)form.querySelector('[name="transfer"]').checked=false;
+  if(event.target.name==='transfer' && event.target.checked){const paid=form.querySelector('[name="platformPaid"]');if(paid)paid.checked=false;}
 });
 document.addEventListener('click', async event => {
   const button = event.target.closest('[data-revoke-platform-grant]'); if (!button) return;
@@ -1426,7 +1442,7 @@ function renderModelPanel() {
   const form = config.externallyConfigured
     ? ui`<p class="setup-note">${copy('模型由启动环境配置。修改环境变量并重启，或移除它们后在这里连接。')}</p>`
     : ui`<form data-model-form data-preserve="model-connection"><div class="model-fields"><label><span class="model-field-heading">${copy('接口地址')}</span><input name="baseUrl" type="url" required value="${escapeHtml(config.baseUrl || '')}" placeholder="https://your-provider.example/v1" autocomplete="off"></label><label><span class="model-field-heading">${copy('模型 ID')}</span><input name="model" required maxlength="200" value="${escapeHtml(config.model || '')}" placeholder="your-model-id" autocomplete="off"></label><label><span class="model-field-heading">API Key <small>${copy('本地模型可留空')}</small></span><input name="apiKey" type="password" autocomplete="new-password" placeholder="${config.hasApiKey ? copy('已保存在本机，留空保持不变') : copy('粘贴提供方的 API Key')}" maxlength="8192"></label></div><details class="model-advanced" data-preserve="model-advanced"><summary>${copy('高级选项')}</summary><label>${copy('API 协议')}<select name="protocol"><option value="chat-completions" ${config.protocol !== 'responses' && config.protocol !== 'messages' ? 'selected' : ''}>OpenAI Chat Completions</option><option value="responses" ${config.protocol === 'responses' ? 'selected' : ''}>OpenAI Responses</option><option value="messages" ${config.protocol === 'messages' ? 'selected' : ''}>Anthropic Messages</option></select></label><label>${copy('推理内核')}<select name="harness"><option value="classic" ${config.harness !== 'pi' ? 'selected' : ''}>Standard</option><option value="pi" ${config.harness === 'pi' ? 'selected' : ''}>Pi · read tools</option></select></label><p class="setup-note">${copy('协议决定请求路径和鉴权方式；修改后需要重新验证连接。')}</p></details><p class="setup-note">${copy('Key 只保存在本机。测试使用虚构内容；连接后，任务上下文会发送给所选模型。')}</p><div class="action-row"><button class="primary-button" type="submit">${copy('验证并连接模型')}</button>${active ? ui`<button class="text-button" type="button" data-model-forget>${copy('移除本机模型连接')}</button>` : ''}</div><p class="model-error" role="alert" data-model-error hidden></p></form>`;
-  updateContent('modelOnboarding', ui`<div class="model-heading"><div><span class="connection-step">${copy('连接用于理解工作的模型')}</span><h2>${title}</h2>${active ? `<p>${escapeHtml(model.model)} · ${copy(modelProtocolLabel(model.protocol))} · ${Number(model.calls || 0)} ${copy('次模型请求')}</p>` : ui`<p>${copy('支持 OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，也可使用本地模型。')}</p>`}${verified ? '' : privacyFacts()}</div><span class="state-badge ${model.lastError ? 'offline' : verified ? 'done' : 'waiting'}">${model.lastError ? copy('模型请求需要检查') : verified ? copy('真实请求已验证') : copy('等待连接')}</span></div>${active ? `<details data-preserve="edit-model"><summary>${copy('更换模型或连接设置')}</summary>${form}</details>` : form}`);
+  updateContent('modelOnboarding', ui`<div class="model-heading"><div><span class="connection-step">${copy('连接用于理解工作的模型')}</span><h2>${title}</h2>${active ? `<p>${escapeHtml(model.model)} · ${copy(modelProtocolLabel(model.protocol))} · ${Number(model.calls || 0)} ${copy('次模型请求')}</p>` : ui`<p>${copy('支持 OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，也可使用本地模型。')}</p>`}${verified ? '' : privacyFacts()}</div><span class="state-badge ${model.lastError ? 'offline' : verified ? 'done' : 'waiting'}">${model.lastError ? copy('模型请求需要检查') : verified ? copy('真实请求已验证') : copy('等待连接')}</span></div>${active ? `<details data-preserve="edit-model"><summary>${copy('更换模型或连接设置')}</summary>${form}</details>` : form}${modelControlsMarkup({ language: getLocale(), workspaceId: setupState?.workspace?.id })}`);
 }
 
 function renderDashboard() {
@@ -1816,6 +1832,15 @@ document.addEventListener('submit', async event => {
   finally { setupBusy = false; if (submit) submit.disabled = false; }
 });
 
+bindModelControls({ render: renderModelPanel, connection: () => {
+  const form = document.querySelector('[data-model-form]');
+  if (!form) return null;
+  const data = new FormData(form);
+  const input = { baseUrl: data.get('baseUrl'), model: data.get('model'), protocol: data.get('protocol'), harness: data.get('harness') };
+  if (data.get('apiKey')) input.apiKey = data.get('apiKey');
+  return input;
+} });
+
 document.addEventListener('submit', async event => {
   const modelForm = event.target.closest('[data-model-form]');
   if (!modelForm) return;
@@ -1834,6 +1859,7 @@ document.addEventListener('submit', async event => {
     modelForm.querySelector('[name="apiKey"]').value = '';
     for (const field of document.querySelectorAll('#modelOnboarding [name="apiKey"]')) field.value = '';
     setupState = result.setup;
+    invalidateModelControls();
     const report = await fetch('/api/runtime');
     if (report.ok) renderRuntime(await report.json());
     render(result.state);
@@ -2170,21 +2196,38 @@ async function saveAutonomy(button, endpoint, body) {
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; }
 }
+function autonomyMoneyInput(form) {
+  const data = new FormData(form);
+  return {currency:String(data.get('moneyCurrency') || 'USD'),capMicros:parseMajor(data.get('moneyMajor') || '0'),durationMinutes:Number(data.get('moneyMinutes') || 30),confirmed:data.get('moneyConfirmed') === 'on'};
+}
+document.addEventListener('input', event => {
+  const form = event.target.closest('[data-yolo-time]');
+  if (!form || event.target.name === 'moneyConfirmed') return;
+  const confirmation = form.querySelector('[name="moneyConfirmed"]'); if(confirmation) confirmation.checked = false;
+  if(event.target.name === 'durationMinutes') {
+    const minutes = form.querySelector('[name="moneyMinutes"]');
+    if(minutes && Number(minutes.value) > Number(event.target.value)) minutes.value = event.target.value;
+  }
+});
 document.addEventListener('submit', event => {
   const form = event.target.closest('[data-yolo-time]');
   if (!form) return;
   event.preventDefault();
-  void saveAutonomy(form.querySelector('button'), '/api/autonomy', {
-    mode: 'time', durationMinutes: Number(new FormData(form).get('durationMinutes'))
-  });
+  try {
+    void saveAutonomy(form.querySelector('button'), '/api/autonomy', {
+      mode: 'time', durationMinutes: Number(new FormData(form).get('durationMinutes')), money:autonomyMoneyInput(form)
+    });
+  } catch(error) { toast(error.message,true); }
 });
 document.addEventListener('click', event => {
   const task = event.target.closest('[data-yolo-task]');
   const revoke = event.target.closest('[data-yolo-revoke]');
   if (!task && !revoke) return;
   event.preventDefault();
-  void saveAutonomy(task || revoke, task ? '/api/autonomy' : `/api/autonomy/${encodeURIComponent(revoke.dataset.yoloRevoke)}/revoke`,
-    task ? { mode: 'task', taskId: task.dataset.yoloTask } : {});
+  try {
+    void saveAutonomy(task || revoke, task ? '/api/autonomy' : `/api/autonomy/${encodeURIComponent(revoke.dataset.yoloRevoke)}/revoke`,
+      task ? { mode: 'task', taskId: task.dataset.yoloTask, money:autonomyMoneyInput(task.closest('details').querySelector('[data-yolo-time]')) } : {});
+  } catch(error) { toast(error.message,true); }
 });
 
 document.addEventListener('click', async event => {
@@ -2294,7 +2337,7 @@ interactions = createInteractions({
   update: updateContent, refresh: renderDashboard, escape: escapeHtml, title: taskTitle, sourceLabel
 });
 mcpUI = createMcpPanel({ update: updateContent, post: postJSON,
-  context: () => ({ mcp: setupState?.mcp, demo: runtime?.demo?.disposable || runtime?.demo?.ruleBased }),
+  context: () => ({ mcp: setupState?.mcp, autonomy:current?.autonomy, tasks:current?.tasks, demo: runtime?.demo?.disposable || runtime?.demo?.ruleBased }),
   refresh: () => refreshSetup({ quiet: true }), notify: toast });
 durableUI = createDurablePanel({ context: () => ({ state: current }), update: updateContent, post: postJSON, applyState: render,
   refresh: refreshState, notify: toast, openTask });

@@ -15,6 +15,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
 const outRoot = path.join(repoRoot, 'website', 'docs');
 const contentRoot = path.join(here, 'content');
+
+// The build no longer emits Markdown mirrors under content/. Remove any
+// stale copies left behind so incremental deployments cannot serve them.
+fs.rmSync(path.join(outRoot, 'content'), { recursive: true, force: true });
 const nav = JSON.parse(fs.readFileSync(path.join(here, 'nav.json'), 'utf8'));
 const version = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version || '0.4.0';
 const origin = 'https://pstarh.github.io/unprompted/docs/';

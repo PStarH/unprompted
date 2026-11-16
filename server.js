@@ -1,3 +1,7 @@
+import { publicSourceHealth } from './src/connectors/source-health.js';
+import { ModelRoutingMetrics } from './src/durable/model-routing-metrics.js';
+import { ModelRoutingService, applyModelRequestLimit } from './src/durable/model-routing.js';
+import { ModelControlsService } from './src/model-controls.js';
 import { todoistIdentity } from './src/connectors/todoist.js';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -12,6 +16,7 @@ import { demoMemorySpace, demoMemoryDetail } from './src/demo-memory-space.js';
 import { buildRuntime } from './src/connectors/index.js';
 import { ConnectorSync } from './src/connectors/sync.js';
 import { createReasoner } from './src/reasoning.js';
+import { forkReasonerConfiguration } from './src/reasoner-scope.js';
 import { PermissionDeniedError, grantInvestigationDecision, shadowAfterFailedSourceRefresh } from './src/permissions.js';
 import { normaliseDateLocale } from './src/requests.js';
 import { GoogleAuth } from './src/connectors/google.js';
@@ -19,9 +24,11 @@ import { GoogleDocsWriteProvider } from './src/document-delivery.js';
 import { LocalSetupStore, GoogleOAuthSetup, googleWorkspacePath } from './src/setup.js';
 import { MonitoringService } from './src/monitoring.js';
 import { HttpRequestError, readJsonBody, SseHub } from './src/http-transport.js';
+import { GitHubWebhookService, GITHUB_WEBHOOK_PATH } from './src/github-webhooks.js';
 import { ModelSetupError, normalizeModelSettings, validateModelSettings } from './src/model-setup.js';
 import { googleConnectionIssue } from './src/google-connection.js';
-import { CONNECTION_PROVIDERS, connectionProvider, publicClientConfiguration } from './src/connection-catalog.js';
+import { CONNECTION_PROVIDERS, connectionProvider, publicClientConfiguration, validBrokerOrigin } from './src/connection-catalog.js';
+import { NotionBrokerClient } from './src/notion-broker-client.js';
 import { DeviceOAuth } from './src/device-oauth.js';
 import { CodeOAuth } from './src/code-oauth.js';
 import { connectedSources, sourceCounts, sourceAccountBindings } from './src/connected-sources.js';
@@ -52,19 +59,20 @@ const localSetup = new LocalSetupStore({ filePath: process.env.UNPROMPTED_SETUP_
 const mcp = new McpManager({ configStore: new McpConfigStore(localSetup.directory) });
 const nativeBridge = new NativeSourceBridge();
 const currentSources = () => connectedSources(localSetup, { nativeBridge, baseUrl: `http://${host}:${port}` });
-const artifactConnectionFor = id => {
-  const connector = runtime.connectors.find(item => item.id === id && item.live);
+const artifactConnectionForRuntime = (targetRuntime, targetEnv, id) => {
+  const connector = targetRuntime.connectors.find(item => item.id === id && item.live);
   if (!connector || workspaceChanging || shutdownPromise) return null;
   if (id === 'google') {
     const saved = localSetup.get().google;
-    return { connector, accountId: process.env.GOOGLE_REFRESH_TOKEN ? runtimeEnv.GOOGLE_ACCOUNT_EMAIL : saved.accountId,
-      accountLabel: process.env.GOOGLE_REFRESH_TOKEN ? runtimeEnv.GOOGLE_ACCOUNT_EMAIL : saved.accountEmail, scopes: process.env.GOOGLE_REFRESH_TOKEN
-        ? (runtimeEnv.GOOGLE_DRAFTS_ENABLED === 'true' ? ['https://www.googleapis.com/auth/gmail.compose'] : []) : saved.grantedScopes };
+    return { connector, accountId: process.env.GOOGLE_REFRESH_TOKEN ? targetEnv.GOOGLE_ACCOUNT_EMAIL : saved.accountId,
+      accountLabel: process.env.GOOGLE_REFRESH_TOKEN ? targetEnv.GOOGLE_ACCOUNT_EMAIL : saved.accountEmail, scopes: process.env.GOOGLE_REFRESH_TOKEN
+        ? (targetEnv.GOOGLE_DRAFTS_ENABLED === 'true' ? ['https://www.googleapis.com/auth/gmail.compose'] : []) : saved.grantedScopes };
   }
   if (id === 'apple_notes' || id === 'apple_reminders') return { connector, accountId: connector.scopeId, accountLabel: id === 'apple_notes' ? 'Apple Notes' : 'Apple Reminders', scopes: [] };
   const saved = localSetup.getConnection(id);
   return { connector, accountId: saved.account?.id, accountLabel: saved.account?.label, scopes: saved.scopes || [] };
 };
+const artifactConnectionFor = id => artifactConnectionForRuntime(runtime, runtimeEnv, id);
 const publicScopeId = item => item.id || createHash('sha256').update(`${item.accountId}\0${item.folderId}`).digest('hex').slice(0, 24);
 let nativeSelectionBusy = false;
 let setupState = localSetup.get();
@@ -72,6 +80,19 @@ const connectionClientFile = process.env.UNPROMPTED_CONNECTOR_CLIENTS_FILE || pa
 let provisionedConnections = {};
 try { provisionedConnections = publicClientConfiguration(JSON.parse(readRegularFile(connectionClientFile, { maxBytes: 64 * 1024 }))); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
+// The Notion broker descriptor is public build metadata. It is applied only
+// when the user has no saved owner-private client or active authorization.
+const provisionedNotionBroker = (() => {
+  if (process.env.UNPROMPTED_NOTION_CLIENT_SECRET) return null;
+  const configured = provisionedConnections.notion;
+  if (configured?.brokerUrl) {
+    const brokerUrl = validBrokerOrigin(configured.brokerUrl);
+    return brokerUrl ? Object.freeze({ clientId: configured.clientId, brokerUrl }) : null;
+  }
+  const clientId = process.env.UNPROMPTED_NOTION_CLIENT_ID;
+  const brokerUrl = validBrokerOrigin(process.env.UNPROMPTED_NOTION_BROKER_URL);
+  return clientId && brokerUrl ? Object.freeze({ clientId, brokerUrl }) : null;
+})();
 for (const provider of Object.values(CONNECTION_PROVIDERS)) {
   if (provider.flow === 'token') continue;
   const saved = localSetup.getConnection(provider.id);
@@ -80,6 +101,12 @@ for (const provider of Object.values(CONNECTION_PROVIDERS)) {
   const fromEnvSecret = provider.secretEnv ? process.env[provider.secretEnv] : null;
   if (provider.flow === 'code') {
     const paired = Boolean(fromEnvId && (provider.id === 'slack' || fromEnvSecret));
+    if (provider.id === 'notion' && !paired && provisionedNotionBroker) {
+      // Never replace complete owner-private credentials or a working grant.
+      const ownerPrivate = Boolean((saved.clientId && saved.clientSecret) || (saved.pendingClientId && saved.pendingClientSecret));
+      if (!ownerPrivate && !saved.accessToken) localSetup.saveConnectionBrokerClient('notion', provisionedNotionBroker);
+      continue;
+    }
     const clientId = paired ? fromEnvId : fromFile.clientId;
     const clientSecret = paired ? fromEnvSecret : fromFile.clientSecret;
     if (clientId && (provider.id === 'slack' || clientSecret) && !(saved.clientId && (provider.id === 'slack' || saved.clientSecret))) localSetup.saveConnectionCredentials(provider.id, { clientId, clientSecret });
@@ -164,7 +191,7 @@ let engine = new WorkEngine(store, {
   baseUrl: `http://${host}:${port}`,
   provider: runtime.provider,
   policy: runtime.policy,
-  reasoner: productReasoner,
+  reasoner: forkReasonerConfiguration(productReasoner),
   externalTools: scope => [...mcp.tools({ ...scope, executeWrite: input => engine.durableRuntime.connectorActions.mcpWrite(input) }), ...(engine?.durableRuntime?.tools(scope) || [])],
   documentProvider,
   mode: runtime.mode,
@@ -240,6 +267,26 @@ let sync = new ConnectorSync({
 });
 let monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
 let workspaceChanging = false;
+
+// A non-current store remains owned until its handle is actually closed. The
+// set is retried only during an existing fail-closed activation drain or
+// shutdown; there is no background retry timer. The current store and a
+// same-store candidate are never added or closed here.
+const retiredWorkspaceStores = new Set();
+
+function retainRetiredWorkspaceStore(retired) {
+  if (retired && retired !== store) retiredWorkspaceStores.add(retired);
+}
+
+function closeRetiredWorkspaceStores() {
+  const unresolved = [];
+  for (const retired of [...retiredWorkspaceStores]) {
+    if (retired === store) continue;
+    try { retired.close(); retiredWorkspaceStores.delete(retired); }
+    catch (error) { unresolved.push({ store: retired, error }); }
+  }
+  return unresolved;
+}
 const googleOAuth = new GoogleOAuthSetup(localSetup, { onAuthorized: options => activateGoogleWorkspace(options) });
 let connectionActivationQueue = Promise.resolve();
 const onConnectionAuthorized = (id, options) => {
@@ -248,11 +295,21 @@ const onConnectionAuthorized = (id, options) => {
 };
 const deviceOAuth = new DeviceOAuth(localSetup, { onConnected: onConnectionAuthorized });
 const codeOAuth = new CodeOAuth(localSetup, { onConnected: onConnectionAuthorized,
-  slackPublicClient: provisionedConnections.slack?.redirectUri ? provisionedConnections.slack : null });
+  slackPublicClient: provisionedConnections.slack?.redirectUri ? provisionedConnections.slack : null,
+  notionPublicClient: provisionedNotionBroker });
 const microsoftOAuth = new CodeOAuth(localSetup, { onConnected: onConnectionAuthorized, port: 0 });
 const mcpOAuth = new McpOAuthBroker({ manager: mcp, onAuthorized: () => { if (!shutdownPromise) engine.investigateWithTools(); } });
 mcp.attachOAuth(mcpOAuth);
 const connectionOAuth = id => id === 'microsoft' ? microsoftOAuth : connectionProvider(id).flow === 'code' ? codeOAuth : deviceOAuth;
+// Local forget never waits for the broker. The captured grant is the only one
+// this call can revoke, so a reconnect completed later is never affected.
+const bestEffortBrokerRevoke = authorization => {
+  try {
+    if (!authorization?.broker || !validBrokerOrigin(authorization.broker.issuer)) return;
+    const client = new NotionBrokerClient({ clientId: authorization.clientId, brokerUrl: authorization.broker.issuer });
+    void client.revoke({ authorization, signal: AbortSignal.timeout(5_000) }).catch(() => {});
+  } catch { /* disconnect stays local and immediate */ }
+};
 const publicSetupStatus = () => {
   const status = localSetup.publicStatus({
     runtime,
@@ -270,13 +327,12 @@ const publicSetupStatus = () => {
   status.connections = Object.fromEntries(Object.values(CONNECTION_PROVIDERS).map(provider => {
     const saved = localSetup.getConnection(provider.id), connector = runtime.connectors.find(connector => connector.id === provider.id && connector.live);
     const recorded = store.state.connectorStatus?.[provider.id];
-    return [provider.id, { id: provider.id, name: provider.name, flow: provider.flow, clientId: saved.pendingClientId || saved.clientId || null,
-      configured: provider.flow === 'token' ? true : provider.flow === 'code' ? Boolean(saved.clientId && (provider.id === 'slack' || saved.clientSecret)) : Boolean(saved.clientId),
+    return [provider.id, { id: provider.id, name: provider.name, flow: provider.flow, ...localSetup.publicConnection(provider.id),
       authorized: Boolean(saved.accessToken), connected: Boolean(connector && connector.account?.id === saved.account?.id),
       account: saved.account ? { label: saved.account.label } : null, readOnly: !canCreateArtifact(provider.id) && !(status.connectorActions.enabled && status.connectorActions.grants.some(grant => grant.connectorId === provider.id && grant.status === 'active' && grant.available)), capabilities: connector?.capabilities() || null,
       oauth: provider.flow === 'token' ? { phase: 'idle' } : connectionOAuth(provider.id).describe(provider.id), lastSyncAt: recorded?.lastSyncAt || null,
       lastSuccessAt: recorded?.lastSuccessAt || null,
-      lastError: recorded?.lastError || null, healthy: recorded ? recorded.ok === true && recorded.complete !== false : null,
+      ...publicSourceHealth(recorded, { connected: Boolean(connector && connector.account?.id === saved.account?.id) }),
       counts: sourceCounts(store.state, provider.id) }];
   }));
   status.platform = nativeBridge.platform === 'darwin' ? 'macos' : nativeBridge.platform === 'win32' ? 'windows' : nativeBridge.platform === 'linux' ? 'linux' : 'other';
@@ -287,8 +343,8 @@ const publicSetupStatus = () => {
       connected: runtime.connectors.some(connector => connector.id === id && connector.live), readOnly: !canCreateArtifact(id) && !(status.connectorActions.enabled && status.connectorActions.grants.some(grant => grant.connectorId === id && grant.status === 'active' && grant.available)),
       capabilities: runtime.connectors.find(connector => connector.id === id && connector.live)?.capabilities() || null,
       scopes: entries.map((item, index) => ({ id: publicScopeId(item), index, label: item.label, ...(item.accountLabel ? { account: item.accountLabel } : {}) })),
-      healthy: recorded ? recorded.ok === true && recorded.complete !== false : null, lastSyncAt: recorded?.lastSyncAt || null,
-      lastSuccessAt: recorded?.lastSuccessAt || null, lastError: recorded?.lastError || null,
+      ...publicSourceHealth(recorded, { connected: runtime.connectors.some(connector => connector.id === id && connector.live) }), lastSyncAt: recorded?.lastSyncAt || null,
+      lastSuccessAt: recorded?.lastSuccessAt || null,
       counts: sourceCounts(store.state, id) }];
   }));
   status.google.configuredThisRun = Boolean(runtime.connectors.some(connector => connector.id === 'google' && connector.live));
@@ -306,6 +362,7 @@ const publicSetupStatus = () => {
     status.google.connectionStatus = store.state.connectorStatus?.google?.lastError ? 'sync_failed'
       : store.state.connectorStatus?.google?.ok && store.state.connectorStatus?.google?.complete !== false ? 'sync_ok' : 'configured_unverified';
   }
+  Object.assign(status.google, publicSourceHealth(store.state.connectorStatus?.google, { connected: status.google.configuredThisRun && !googleDisconnectedThisRun }));
   status.google.activating = workspaceChanging;
   status.google.issue = googleConnectionIssue(status.monitoring.lastError || status.google.lastValidationError);
   status.workspace = { mode: runtime.mode, id: runtime.report.workspaceId || runtime.mode, ready: runtime.connectors.some(connector => connector.live),
@@ -333,19 +390,41 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
   const credentials = localSetup.get().google;
   if (!credentials.clientId || !credentials.clientSecret || !credentials.refreshToken || !credentials.accountId) throw new Error('Authorize your Google account first.');
   workspaceChanging = true;
-  const previous = { store, engine, monitoring, durable: durableRuntime, shadow: runtime.policy.shadow };
-  let nextStore = null, applied = false;
+  const previous = { store, engine, runtime, runtimeEnv, monitoring, durable: durableRuntime,
+    googleConnector, documentProvider, simulation, sync };
+  if (previous.durable) previous.durable.suspended = true;
+  const previousWebhooks = githubWebhooks;
+  githubWebhooks = null;
+  const previousWebhooksStopped = previousWebhooks?.stop() ?? Promise.resolve();
+  let nextStore = null, applied = false, candidate = null;
   try {
     simulation.stop();
     previous.monitoring.stop();
+    // The old workspace stays paused and fail-closed while the replacement is
+    // built. Its receiver and worker are stopped before anything is drained.
     previous.engine.policy.shadow = true;
+    if (previous.engine.taskServices?.policy) previous.engine.taskServices.policy.shadow = true;
+    if (previous.documentProvider) previous.documentProvider.shadow = true;
+    if (previous.googleConnector) previous.googleConnector.shadow = true;
     // New mutations are refused below while the old requests, sync and model
     // calls drain. Nothing may write into a closed or different account store.
     await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
+    await previousWebhooksStopped;
     await previous.monitoring.whenIdle();
     await previous.engine.whenSettled();
     await previous.durable?.close();
     if (shutdownPromise) throw new Error('The application is shutting down.');
+    // The old workspace is already fail-closed and drained above. Only now is
+    // it safe to retry cleanup of a store retained by an earlier failure. A
+    // persistent failure refuses the new allocation instead of accumulating
+    // more open stores or reopening writes.
+    const unresolvedRetired = closeRetiredWorkspaceStores();
+    if (unresolvedRetired.length) {
+      console.error(`Workspace activation blocked: ${unresolvedRetired.length} retired workspace store(s) could not be closed.`);
+      throw Object.assign(new Error('A previous workspace is still open. Retry or restart to finish cleanup.'), {
+        code: 'GOOGLE_ACTIVATION_CLEANUP_REQUIRED', cleanupUnresolved: unresolvedRetired.length
+      });
+    }
     if (allowExternalWrites != null) localSetup.setExternalWrites(allowExternalWrites);
     const filename = googleWorkspacePath(workspaceDirectory, credentials.accountId);
     nextStore = path.resolve(filename) === path.resolve(previous.store.filename) ? previous.store : createWorkspaceStore(filename, { dateLocale });
@@ -357,38 +436,127 @@ async function activateGoogleWorkspace({ observe = localSetup.get().monitoring.e
     const nextGoogle = nextRuntime.connectors.find(connector => connector.id === 'google');
     const nextDocumentProvider = new GoogleDocsWriteProvider({ connector: nextGoogle,
       enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: nextRuntime.shadow });
+    // Everything the services observe is bound to this candidate. No getter
+    // may read the old globals after the old receiver has been stopped.
+    candidate = { store: nextStore, runtime: nextRuntime, runtimeEnv: nextEnv, engine: null, durableRuntime: null,
+      googleConnector: nextGoogle, documentProvider: nextDocumentProvider, simulation: null, sync: null, monitoring: null, webhooks: null };
     const nextEngine = new WorkEngine(nextStore, {
       baseUrl: `http://${host}:${port}`, provider: nextRuntime.provider, policy: nextRuntime.policy,
-      reasoner: previous.engine.reasoner, documentProvider: nextDocumentProvider, mode: 'live', dateLocale,
-      externalTools: scope => [...mcp.tools({ ...scope, executeWrite: input => engine.durableRuntime.connectorActions.mcpWrite(input) }), ...(engine?.durableRuntime?.tools(scope) || [])],
+      reasoner: forkReasonerConfiguration(previous.engine.reasoner), documentProvider: nextDocumentProvider, mode: 'live', dateLocale,
+      externalTools: scope => {
+        const target = candidate?.engine;
+        return [...mcp.tools({ ...scope, executeWrite: input => target?.durableRuntime?.connectorActions.mcpWrite(input) }),
+          ...(target?.durableRuntime?.tools(scope) || [])];
+      },
       stallAfterMs: previous.engine.stallAfterMs,
       onChange(state) { if (applied) sseHub.publish(state); }
     });
+    candidate.engine = nextEngine;
+    candidate.durableRuntime = nextStore.durable ? new DurableRuntime(nextEngine, {
+      connectorFor: id => nextRuntime.connectors.find(connector => connector.id === id) || null,
+      artifactConnectionFor: id => artifactConnectionForRuntime(nextRuntime, nextEnv, id)
+    }) : null;
+    candidate.simulation = new SimulationController(nextStore, nextEngine);
+    candidate.sync = new ConnectorSync({ connectors: nextRuntime.connectors, cursors: nextRuntime.cursors, engine: nextEngine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
+    candidate.monitoring = new MonitoringService({ sync: candidate.sync, setup: localSetup, connectors: nextRuntime.connectors });
+    candidate.webhooks = createGitHubWebhookService({ targetStore: nextStore, runtimeFor: () => candidate.runtime, syncFor: () => candidate.sync });
     if (nextStore !== previous.store) localSetup.resetObservationHistory();
-    store = nextStore; runtime = nextRuntime; runtimeEnv = nextEnv; engine = nextEngine;
-    durableRuntime = store.durable ? new DurableRuntime(engine, { connectorFor: id => runtime.connectors.find(connector => connector.id === id) || null, artifactConnectionFor }) : null;
-    googleConnector = nextGoogle; documentProvider = nextDocumentProvider;
-    googleDisconnectedThisRun = false; runSimulation = false; stateHoldsRealEvents = hasRealEvents(store.state);
-    simulation = new SimulationController(store, engine);
-    sync = new ConnectorSync({ connectors: runtime.connectors, cursors: runtime.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
-    monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
-    store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
+    const nextStateHoldsRealEvents = hasRealEvents(nextStore.state);
+    // Starting the receiver is still inside the candidate phase: its lifecycle
+    // is blocked, so it records no work and calls no provider. If any candidate
+    // step fails it is stopped/drained in the catch below.
+    candidate.webhooks.start();
+    nextStore.mutateIfChanged(state => { state.runtime = { ...nextRuntime.report, dateLocale: dateLocale || null }; });
     localSetup.markGoogleRuntimeActive();
-    if (nextStore !== previous.store) previous.store.close();
+    // Commit boundary. Every module-level owner is switched together, and
+    // applied is set before the old store is closed. A cleanup failure after
+    // this point must keep this open store and this single receiver.
+    store = candidate.store; runtime = candidate.runtime; runtimeEnv = candidate.runtimeEnv; engine = candidate.engine;
+    durableRuntime = candidate.durableRuntime; googleConnector = candidate.googleConnector; documentProvider = candidate.documentProvider;
+    simulation = candidate.simulation; sync = candidate.sync; monitoring = candidate.monitoring; githubWebhooks = candidate.webhooks;
+    googleDisconnectedThisRun = false; runSimulation = false; stateHoldsRealEvents = nextStateHoldsRealEvents;
     applied = true;
-    if (durableRuntime?.privacy.permissionRevoked('google')) durableRuntime.privacy.restorePermission('google');
-    durableRuntime?.start();
-    sseHub.publish(engine.publicState());
-    await monitoring.setSettings({ enabled: observe === true });
-    if (!observe) void monitoring.runNow();
+    let postCommitError = null;
+    try {
+      if (durableRuntime?.privacy.permissionRevoked('google')) durableRuntime.privacy.restorePermission('google');
+      durableRuntime?.start();
+      sseHub.publish(engine.publicState());
+      await monitoring.setSettings({ enabled: observe === true });
+      if (!observe) void monitoring.runNow();
+    } catch (error) { postCommitError = error; }
+    let cleanupError = null;
+    if (nextStore !== previous.store) {
+      try { previous.store.close(); }
+      catch (error) {
+        // The new workspace is committed and stays open. The old store is now
+        // owned by the retired set and is retried by the next activation drain
+        // or shutdown; cleanup failure never rolls the published state back.
+        retainRetiredWorkspaceStore(previous.store);
+        console.error('Workspace activation cleanup failed:', error?.message);
+        if (postCommitError) console.error('Workspace activation also failed before cleanup:', postCommitError?.message);
+        cleanupError = Object.assign(new Error('The previous workspace could not be cleaned up.'), {
+          code: 'GOOGLE_ACTIVATION_CLEANUP_FAILED', workspaceApplied: true, cause: postCommitError || error
+        });
+      }
+    }
+    if (cleanupError) throw cleanupError;
+    if (postCommitError) {
+      // Publication already happened, so this is recovery of a live workspace,
+      // not an authorization/activation rollback. The original provider detail
+      // stays in the cause and out of the user response.
+      throw Object.assign(new Error('The workspace was switched, but a background service needs recovery.'), {
+        code: 'GOOGLE_ACTIVATION_RECOVERY_REQUIRED', workspaceApplied: true, cause: postCommitError
+      });
+    }
     return publicSetupStatus();
   } catch (error) {
-    if (!applied && nextStore && nextStore !== previous.store) nextStore.close();
-    if (!applied && previous.durable?.closed) { durableRuntime = new DurableRuntime(previous.engine, { connectorFor: id => runtime.connectors.find(connector => connector.id === id) || null, artifactConnectionFor }); durableRuntime.start(); }
-    // Keep the old workspace paused if a newly saved account could not be
-    // applied. A retry uses that saved authorization; it never mixes accounts.
+    if (!applied) {
+      // Tear down every unowned candidate: receiver first, then its worker,
+      // monitoring and store. None of these may outlive a failed commit.
+      try { await candidate?.webhooks?.stop(); } catch { /* already stopped */ }
+      try { await candidate?.durableRuntime?.close(); } catch { /* already closed */ }
+      try { candidate?.monitoring?.stop(); } catch { /* already stopped */ }
+      try { candidate?.simulation?.stop(); } catch { /* already stopped */ }
+      // nextStore is the lexical owner even if the failure landed after its
+      // allocation but before the candidate object was assembled.
+      const rejectedStore = candidate?.store || nextStore;
+      if (rejectedStore && rejectedStore !== previous.store && rejectedStore !== store) {
+        try { rejectedStore.close(); }
+        catch (error) {
+          // A rejected candidate is never published, but its failed close is
+          // still an owned resource. Retain it for a later drain/shutdown.
+          retainRetiredWorkspaceStore(rejectedStore);
+          console.error('Rejected workspace cleanup deferred:', error?.message);
+        }
+      }
+      store = previous.store; runtime = previous.runtime; runtimeEnv = previous.runtimeEnv; engine = previous.engine;
+      durableRuntime = previous.durable; googleConnector = previous.googleConnector; documentProvider = previous.documentProvider;
+      simulation = previous.simulation; sync = previous.sync; monitoring = previous.monitoring;
+      previous.engine.policy.shadow = true;
+      if (previous.engine.taskServices?.policy) previous.engine.taskServices.policy.shadow = true;
+      if (previous.documentProvider) previous.documentProvider.shadow = true;
+      if (previous.googleConnector) previous.googleConnector.shadow = true;
+      if (previous.durable?.closed) {
+        // Rebuild the previous owner without starting it. The old workspace
+        // remains paused; a retry uses the newly saved authorization.
+        durableRuntime = new DurableRuntime(previous.engine, {
+          connectorFor: id => previous.runtime.connectors.find(connector => connector.id === id) || null,
+          artifactConnectionFor: id => artifactConnectionForRuntime(previous.runtime, previous.runtimeEnv, id)
+        });
+        durableRuntime.suspended = true;
+      }
+      githubWebhooks = createGitHubWebhookService({ targetStore: previous.store, runtimeFor: () => previous.runtime, syncFor: () => previous.sync });
+      githubWebhooks.start();
+    }
     throw error;
-  } finally { workspaceChanging = false; }
+  } finally {
+    workspaceChanging = false;
+    // The worker exists from construction, but admission was blocked for the
+    // whole rebuild. Reconcile and wake it only after the lifecycle is open so
+    // a retained receipt drains without a process restart.
+    try { githubWebhooks?.refresh(); } catch { /* the next reconcile retries */ }
+    void githubWebhooks?.kick();
+  }
 }
 
 let sourceRefreshGeneration = 0;
@@ -404,12 +572,18 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
   if (workspaceChanging || modelSetupBusy) throw new Error('A connection update is already running.');
   workspaceChanging = true;
   if (durableRuntime) durableRuntime.suspended = true;
+  const previousWebhooks = githubWebhooks;
+  githubWebhooks = null;
+  const previousWebhooksStopped = previousWebhooks?.stop() ?? Promise.resolve();
   const heldPolicy = engine.policy;
   const previousShadow = heldPolicy.shadow;
   const previousTaskShadow = engine.taskServices?.policy?.shadow;
   const previousDocShadow = documentProvider?.shadow;
   const previousConnectorShadow = googleConnector?.shadow;
-  let installed = false;
+  const previousEngine = { provider: engine.provider, policy: engine.policy, mode: engine.mode, documentProvider: engine.documentProvider,
+    taskPolicy: engine.taskServices?.policy, taskProvider: engine.taskServices?.provider,
+    taskMode: engine.taskServices?.mode, taskDocumentProvider: engine.taskServices?.documentProvider };
+  let installed = false, candidateWebhooks = null, candidateMonitoring = null;
   try {
     sourceRefreshGeneration += 1;
     monitoring.stop(); simulation.stop();
@@ -417,6 +591,7 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     // Only a widening grant may let an already authorized action finish first.
     if (!widening) failClosedForRefresh();
     await Promise.allSettled([...activeHttpHandlers].filter(handler => handler !== request?.workspaceHandler));
+    await previousWebhooksStopped;
     await monitoring.whenIdle(); await engine.whenSettled();
     await durableRuntime?.whenIdle();
     if (shutdownPromise) throw new Error('The application is shutting down.');
@@ -467,24 +642,35 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     const next = buildRuntime(nextEnv, { store, allowSimulation: false, extraConnectors: currentSources() });
     next.report.workspaceId = runtime.report.workspaceId || `workspace:${createHash('sha256').update(store.filename).digest('hex').slice(0, 24)}`;
     if (googleDisconnectedThisRun) next.report.google.disconnectedThisRun = true;
-    runtime = next; runtimeEnv = nextEnv;
-    googleConnector = runtime.connectors.find(connector => connector.id === 'google') || null;
-    documentProvider = googleConnector ? new GoogleDocsWriteProvider({ connector: googleConnector,
-      enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: runtime.shadow }) : null;
+    const nextGoogleConnector = next.connectors.find(connector => connector.id === 'google') || null;
+    const nextDocumentProvider = nextGoogleConnector ? new GoogleDocsWriteProvider({ connector: nextGoogleConnector,
+      enabled: nextEnv.GOOGLE_DOCS_WRITE_ENABLED === 'true', shadow: next.shadow }) : null;
     // Task services captured the policy object at startup. Replacing only
     // engine.policy left Google Docs writes on the drained read-only policy.
-    runtime.policy.temporaryAuthorization = heldPolicy.temporaryAuthorization;
-    engine.provider = runtime.provider; engine.policy = runtime.policy; engine.mode = runtime.mode;
-    engine.documentProvider = documentProvider;
-    engine.taskServices.policy = runtime.policy;
-    engine.taskServices.provider = runtime.provider;
-    engine.taskServices.mode = runtime.mode;
-    engine.taskServices.documentProvider = documentProvider;
+    next.policy.temporaryAuthorization = heldPolicy.temporaryAuthorization;
+    // Build the replacement services before publishing any of them. Their
+    // getters are bound to this candidate rather than to globals that may
+    // still describe the old authorization.
+    const nextSync = new ConnectorSync({ connectors: next.connectors, cursors: next.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
+    const nextMonitoring = new MonitoringService({ sync: nextSync, setup: localSetup, connectors: next.connectors });
+    candidateMonitoring = nextMonitoring;
+    const nextWebhooks = createGitHubWebhookService({ targetStore: store, runtimeFor: () => next, syncFor: () => nextSync });
+    candidateWebhooks = nextWebhooks;
+    nextWebhooks.start();
+    store.mutateIfChanged(state => { state.runtime = { ...next.report, dateLocale: dateLocale || null }; });
+    // Commit boundary: the engine wiring and every module-level owner switch
+    // together. installed is set last, so a failure above is still pre-commit.
+    engine.provider = next.provider; engine.policy = next.policy; engine.mode = next.mode;
+    engine.documentProvider = nextDocumentProvider;
+    engine.taskServices.policy = next.policy;
+    engine.taskServices.provider = next.provider;
+    engine.taskServices.mode = next.mode;
+    engine.taskServices.documentProvider = nextDocumentProvider;
+    runtime = next; runtimeEnv = nextEnv;
+    googleConnector = nextGoogleConnector; documentProvider = nextDocumentProvider;
+    sync = nextSync; monitoring = nextMonitoring; githubWebhooks = nextWebhooks;
     installed = true;
     runSimulation = false;
-    sync = new ConnectorSync({ connectors: runtime.connectors, cursors: runtime.cursors, engine, ...(syncTimeoutMs ? { timeoutMs: syncTimeoutMs } : {}) });
-    monitoring = new MonitoringService({ sync, setup: localSetup, connectors: runtime.connectors });
-    store.mutateIfChanged(state => { state.runtime = { ...runtime.report, dateLocale: dateLocale || null }; });
     // A permission refresh must not rebuild a reply that is already prepared.
     // That new object cancels the draft request queued for the new destination.
     if (reassess) for (const task of Object.values(store.state.tasks)) if (!task.action && !['completed', 'cancelled'].includes(task.status)) engine.assess(task.id, null, { force: true, allowAutomation: false });
@@ -496,6 +682,21 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
     return publicSetupStatus();
   } catch (error) {
     if (!installed) {
+      // Stop every candidate before restoring the old owner. The candidate
+      // receiver has its own timers and worker; leaving either alive after a
+      // failed commit leaks a receiver that still points at the old target.
+      try { await candidateWebhooks?.stop(); } catch { /* already stopped */ }
+      try { candidateMonitoring?.stop(); } catch { /* already stopped */ }
+      // Engine fields are restored only if the commit did not happen. The
+      // fail-closed narrowing behaviour below is unchanged.
+      engine.provider = previousEngine.provider; engine.policy = previousEngine.policy; engine.mode = previousEngine.mode;
+      engine.documentProvider = previousEngine.documentProvider;
+      if (engine.taskServices) {
+        engine.taskServices.policy = previousEngine.taskPolicy;
+        engine.taskServices.provider = previousEngine.taskProvider;
+        engine.taskServices.mode = previousEngine.taskMode;
+        engine.taskServices.documentProvider = previousEngine.taskDocumentProvider;
+      }
       // A narrowing refresh already failed closed. Do not put the previous
       // writable flags back. A widening grant may restore the flags it had.
       const shadow = shadowAfterFailedSourceRefresh({ widening, previousShadow });
@@ -503,9 +704,19 @@ async function applyConnectedSources({ observe = localSetup.get().monitoring.ena
       if (engine.taskServices?.policy) engine.taskServices.policy.shadow = widening ? previousTaskShadow : true;
       if (documentProvider) documentProvider.shadow = widening ? previousDocShadow : true;
       if (googleConnector) googleConnector.shadow = widening ? previousConnectorShadow : true;
+      githubWebhooks = createGitHubWebhookService();
+      githubWebhooks.start();
     }
     throw error;
-  } finally { workspaceChanging = false; if (durableRuntime) { durableRuntime.suspended = false; durableRuntime.kick(); } }
+  } finally {
+    workspaceChanging = false;
+    if (durableRuntime) { durableRuntime.suspended = false; durableRuntime.kick(); }
+    // The worker exists from construction, but admission was blocked for the
+    // whole rebuild. Reconcile and wake it only after the lifecycle is open so
+    // a retained receipt drains without a process restart.
+    try { githubWebhooks?.refresh(); } catch { /* the next reconcile retries */ }
+    void githubWebhooks?.kick();
+  }
 }
 
 function draftStillDispatching() {
@@ -589,11 +800,56 @@ server.keepAliveTimeout = 5_000;
 server.maxHeadersCount = 100;
 let shutdownPromise = null;
 
+// The webhook receiver is rebuilt wherever the store, runtime or sync runner is
+// replaced. Getters keep the worker on the current account instead of a
+// captured startup closure; stop() aborts and drains the old receiver first.
+let githubWebhooks = null;
+function createGitHubWebhookService({ targetStore = store, runtimeFor = () => runtime, syncFor = () => sync } = {}) {
+  return new GitHubWebhookService({
+    store: targetStore,
+    setup: localSetup,
+    getRuntime: runtimeFor,
+    getSync: syncFor,
+    getLifecycle: () => (workspaceChanging || shutdownPromise ? 'blocked' : 'running')
+  });
+}
+githubWebhooks = createGitHubWebhookService();
+githubWebhooks.start();
+
+function googleActivationFailure(res, error) {
+  // Post-publication failures must not claim the saved authorization was
+  // rejected: the workspace is already switched. Provider/prose detail stays
+  // in the internal cause and out of the response.
+  if (error?.code === 'GOOGLE_ACTIVATION_CLEANUP_FAILED') {
+    return json(res, 500, { error: 'Google is active, but the previous workspace could not be closed. Retry or restart to finish cleanup.',
+      code: error.code, workspaceApplied: true });
+  }
+  if (error?.code === 'GOOGLE_ACTIVATION_CLEANUP_REQUIRED') {
+    return json(res, 500, { error: 'The saved Google authorization was not applied because a previous workspace is still open. Retry or restart to finish cleanup.',
+      code: error.code, workspaceApplied: false });
+  }
+  if (error?.code === 'GOOGLE_ACTIVATION_RECOVERY_REQUIRED') {
+    return json(res, 500, { error: 'The workspace was switched, but a background service needs recovery. Retry to finish activation.',
+      code: error.code, workspaceApplied: true });
+  }
+  return json(res, 409, { error: 'Your saved Google authorization could not be applied. Check the connection and retry.', code: 'GOOGLE_ACTIVATION_FAILED' });
+}
+
 async function handleHttpRequest(req, res) {
   let url;
   try { url = new URL(req.url, `http://${host}:${port}`); }
   catch { return json(res, 400, { error: 'Invalid request target.' }); }
   try {
+    if (url.pathname === GITHUB_WEBHOOK_PATH) {
+      // The only externally POSTable route. It authenticates the raw body
+      // before parsing and never shares the general JSON/origin boundary.
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.', code: 'METHOD_NOT_ALLOWED' });
+      if (!githubWebhooks) return json(res, 503, { error: 'GitHub webhooks are not available.', code: 'WEBHOOK_UNAVAILABLE' });
+      // Await inside the surrounding try so HttpRequestError from the strict
+      // headers or the bounded raw-body read reaches the 400/413/408 mapping
+      // below. Returning the bare promise would bypass that catch.
+      return await githubWebhooks.handle(req, res);
+    }
     if (req.method === 'GET' && url.pathname === '/api/health') {
       return json(res, 200, {
         ok: true,
@@ -622,8 +878,34 @@ async function handleHttpRequest(req, res) {
     if (req.method === 'GET' && url.pathname === '/api/situations') return json(res, 200, { situations: durableRuntime?.tasks.situations.listActive() || [], available: Boolean(durableRuntime) });
     if (req.method === 'GET' && url.pathname === '/api/standing-intents') return json(res, 200, { intents: durableRuntime?.intents.list() || [], available: Boolean(durableRuntime) });
     if (req.method === 'GET' && url.pathname === '/api/activation/metrics') return json(res, 200, durableRuntime ? durableRuntime.activationMetrics() : { available: false });
+    if (req.method === 'GET' && url.pathname === '/api/model-controls/routing') {
+      if (!durableRuntime || demoMode) return json(res, 409, { error: 'Open a persistent workspace to configure model routing.', code: 'DURABLE_WORKSPACE_REQUIRED' });
+      return json(res, 200, { ...new ModelRoutingService(durableRuntime.database).get(), measurements:(engine.reasoner?.modelRoutingMetrics || new ModelRoutingMetrics(durableRuntime.database)).summary(), workspaceToken:new ModelControlsService(durableRuntime, localSetup).workspaceToken(), maxCallsPerRequest: engine.reasoner?.budget?.limits?.maxCallsPerRequest || 1 });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/model-controls') {
+      if (!durableRuntime || demoMode) return json(res, 409, { error: 'Open a persistent workspace to configure model budgets.', code: 'DURABLE_WORKSPACE_REQUIRED' });
+      try { return json(res, 200, new ModelControlsService(durableRuntime, localSetup).describe(url.searchParams.get('taskId'))); }
+      catch (error) { return json(res, error.status || 400, { error: error.message, code: error.code }); }
+    }
     if (req.method === 'GET' && url.pathname === '/api/model-usage') return json(res, 200, durableRuntime ? { available: true, ...durableRuntime.usage.summary() } : { available: false });
-    if (req.method === 'GET' && url.pathname === '/api/experiences') return json(res, 200, { experiences: durableRuntime?.experiences.list() || [] });
+    if (req.method === 'GET' && url.pathname === '/api/experiences') {
+      if (durableRuntime) durableRuntime.experiences.refreshStaleness();
+      const experiences = durableRuntime ? durableRuntime.experiences.list().map(experience => ({
+        ...experience, latestTrial: durableRuntime.trials.latest(experience.id), caseSet: durableRuntime.trials.caseSetSummary(experience.id),
+        authorization: durableRuntime.experiences.authorizationFor(experience), contentVersions: durableRuntime.experiences.contentVersions(experience.id, { limit: 8 })
+      })) : [];
+      return json(res, 200, { experiences, evaluation: durableRuntime?.trials.describe() || null, available: Boolean(durableRuntime) });
+    }
+    const experienceDetail = url.pathname.match(/^\/api\/experiences\/([^/]+)$/);
+    if (req.method === 'GET' && experienceDetail) {
+      if (!durableRuntime) return json(res, 409, { error: 'Open the persistent workspace to inspect Experience evaluations.', code: 'DURABLE_WORKSPACE_REQUIRED' });
+      durableRuntime.experiences.refreshStaleness();
+      const id = decodeURIComponent(experienceDetail[1]), experience = durableRuntime.experiences.get(id);
+      if (!experience) return json(res, 404, { error: 'This Experience no longer exists.', code: 'EXPERIENCE_NOT_FOUND' });
+      return json(res, 200, { experience: { ...experience, latestTrial: durableRuntime.trials.latest(id), caseSet: durableRuntime.trials.caseSet(id),
+        authorization: durableRuntime.experiences.authorizationFor(experience), contentVersions: durableRuntime.experiences.contentVersions(id) },
+        trials: durableRuntime.trials.list(id, { includeDifferences: true }), evaluation: durableRuntime.trials.describe() });
+    }
     if (req.method === 'GET' && url.pathname === '/api/memory-space') {
       const options = Object.fromEntries(url.searchParams);
       return json(res, 200, durableRuntime ? await durableRuntime.memorySpace.browse(options) : demoMemorySpace(store.state, options));
@@ -706,6 +988,7 @@ async function handleHttpRequest(req, res) {
         artifacts: durableRuntime?.artifacts.describe() || { available: false, targets: [], grants: [] },
         monitoring: monitoring.describe(),
         sync: sync.describe(),
+        webhooks: githubWebhooks?.describe() || { provider: 'github', enabled: false, configured: false, available: false, paused: true, pending: 0, lastReceivedAt: null, lastPullAt: null, lastErrorCode: 'WEBHOOK_UNAVAILABLE' },
         ...runtime.cursors.describe()
       });
     }
@@ -875,11 +1158,45 @@ async function handleHttpRequest(req, res) {
         const editDraft = url.pathname.match(/^\/api\/tasks\/([^/]+)\/draft$/);
         if (editDraft) { durableRuntime.editDraft(decodeURIComponent(editDraft[1]), body); return json(res, 200, { state: engine.publicState() }); }
         const promote = url.pathname.match(/^\/api\/experiences\/([^/]+)\/promote$/);
-        if (promote) { const experience = durableRuntime.experiences.promote(decodeURIComponent(promote[1]), { expectedRevision: body.expectedRevision, userRequested: true }); durableRuntime.contextChanged(); engine.changed(); return json(res, 200, { experience }); }
+        if (promote) { const experience = durableRuntime.experiences.promote(decodeURIComponent(promote[1]), { expectedRevision: body.expectedRevision, userRequested: true }); durableRuntime.contextChangedForExperiences([experience.id]); engine.changed(); return json(res, 200, { experience }); }
         const revalidate = url.pathname.match(/^\/api\/experiences\/([^/]+)\/revalidate$/);
-        if (revalidate) { const experience = durableRuntime.experiences.revalidate(decodeURIComponent(revalidate[1]), { expectedRevision: body.expectedRevision, userRequested: true }); durableRuntime.contextChanged(); engine.changed(); return json(res, 200, { experience }); }
+        if (revalidate) { const experience = durableRuntime.experiences.revalidate(decodeURIComponent(revalidate[1]), { expectedRevision: body.expectedRevision, userRequested: true }); durableRuntime.contextChangedForExperiences([experience.id]); engine.changed(); return json(res, 200, { experience }); }
         const retire = url.pathname.match(/^\/api\/experiences\/([^/]+)\/retire$/);
-        if (retire) { const experience = durableRuntime.experiences.retire(decodeURIComponent(retire[1]), body.expectedRevision); durableRuntime.contextChanged(); engine.changed(); return json(res, 200, { experience }); }
+        if (retire) { const experience = durableRuntime.experiences.retire(decodeURIComponent(retire[1]), body.expectedRevision); durableRuntime.contextChangedForExperiences([experience.id]); engine.changed(); return json(res, 200, { experience }); }
+        const evaluate = url.pathname.match(/^\/api\/experiences\/([^/]+)\/evaluate$/);
+        if (evaluate) {
+          if (Object.keys(body).some(key => key !== 'expectedRevision')) return json(res, 400, { error: 'An isolated evaluation only accepts expectedRevision.', code: 'INVALID_TRIAL_REQUEST' });
+          const id = decodeURIComponent(evaluate[1]);
+          const trial = durableRuntime.trials.evaluate(id, { expectedRevision: body.expectedRevision });
+          if (trial.state === 'passed') durableRuntime.contextChangedForExperiences([id]);
+          engine.changed();
+          return json(res, 200, { trial });
+        }
+        const cases = url.pathname.match(/^\/api\/experiences\/([^/]+)\/cases$/);
+        if (cases) {
+          if (Object.keys(body).some(key => !['expectedRevision', 'expectedCaseSetVersion', 'cases'].includes(key))) {
+            return json(res, 400, { error: 'Saving trial scenarios accepts only expectedRevision, expectedCaseSetVersion and cases.', code: 'INVALID_CASE_SET_REQUEST' });
+          }
+          const id = decodeURIComponent(cases[1]);
+          const caseSet = durableRuntime.trials.saveCases(id, { expectedRevision: body.expectedRevision,
+            expectedCaseSetVersion: body.expectedCaseSetVersion, cases: body.cases, userRequested: true });
+          durableRuntime.contextChangedForExperiences([id]); engine.changed();
+          return json(res, 200, { caseSet });
+        }
+        const adopt = url.pathname.match(/^\/api\/experiences\/([^/]+)\/adopt$/);
+        if (adopt) {
+          if (Object.keys(body).some(key => key !== 'expectedRevision')) return json(res, 400, { error: 'Adoption only accepts expectedRevision.', code: 'INVALID_ADOPTION_REQUEST' });
+          const experience = durableRuntime.experiences.adopt(decodeURIComponent(adopt[1]), { expectedRevision: body.expectedRevision, userRequested: true });
+          durableRuntime.contextChangedForExperiences([experience.id]); engine.changed();
+          return json(res, 200, { experience });
+        }
+        const rollback = url.pathname.match(/^\/api\/experiences\/([^/]+)\/rollback$/);
+        if (rollback) {
+          if (Object.keys(body).some(key => !['expectedRevision', 'targetRevision'].includes(key))) return json(res, 400, { error: 'Rollback only accepts expectedRevision and targetRevision.', code: 'INVALID_ROLLBACK_REQUEST' });
+          const experience = durableRuntime.experiences.rollback(decodeURIComponent(rollback[1]), { expectedRevision: body.expectedRevision, targetRevision: body.targetRevision, userRequested: true });
+          durableRuntime.contextChangedForExperiences([experience.id]); engine.changed();
+          return json(res, 200, { experience });
+        }
         const trial = url.pathname.match(/^\/api\/experiences\/([^/]+)\/trial$/);
         if (trial) { const result = await durableRuntime.trial(decodeURIComponent(trial[1]), body); return json(res, 200, { ...result, state: engine.publicState() }); }
         const reconcileExecution = url.pathname.match(/^\/api\/executions\/([^/]+)\/reconcile$/);
@@ -948,11 +1265,11 @@ async function handleHttpRequest(req, res) {
         const result = url.pathname === '/api/mcp/import'
           ? await mcp.import(body.config, { allowDeclaredRead: body.allowDeclaredRead === true })
           : await mcp.update(serverId, body);
-        const writesTouched = Array.isArray(body.writeTools) || body.enabled != null;
+        const writesTouched = Array.isArray(body.writeTools) || body.enabled != null || Array.isArray(body.nonfinancialTools) || body.financialTools != null;
         if (serverId && writesTouched) {
           const widening = mcpWritesWidened(previousMcp, body);
           if (widening && process.env.UNPROMPTED_SHADOW_MODE !== 'true') localSetup.setArtifactWrites(true);
-          if (widening || body.enabled === false || Array.isArray(body.writeTools)) {
+          if (widening || body.enabled === false || Array.isArray(body.writeTools) || Array.isArray(body.nonfinancialTools) || body.financialTools != null) {
             await applyConnectedSources({ request: req, initialRead: false, reassess: false, widening: widening && process.env.UNPROMPTED_SHADOW_MODE !== 'true' });
           }
         }
@@ -1035,10 +1352,12 @@ async function handleHttpRequest(req, res) {
         }
         if (operation === 'cancel') { oauth.cancel(id); return json(res, 200, { setup: publicSetupStatus() }); }
         if (operation === 'forget') {
+          const captured = localSetup.getConnection(id);
           oauth.cancel(id);
           const connector = runtime.connectors.find(connector => connector.id === id);
           if (connector) { connector.live = false; if (connector.auth) connector.auth.disabled = true; }
           localSetup.clearConnection(id);
+          if (id === 'notion' && captured.broker) bestEffortBrokerRevoke(captured);
           if (body?.purgeLocal === true) await monitoring.whenIdle();
           if (durableRuntime) await durableRuntime.privacy.revokePermission({ connectorId: id, purgeLocal: body?.purgeLocal === true });
           await applyConnectedSources({ request: req, disconnected: id, initialRead: false });
@@ -1049,6 +1368,25 @@ async function handleHttpRequest(req, res) {
         return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
       }
 
+      if (/^\/api\/model-controls\/(token-limit|money-limit|price-profile|routing)$/.test(url.pathname)) {
+        if (!durableRuntime || demoMode) return json(res, 409, { error: 'Open a persistent workspace to configure model budgets.', code: 'DURABLE_WORKSPACE_REQUIRED' });
+        try {
+          const controls = new ModelControlsService(durableRuntime, localSetup);
+          if (req.headers['x-unprompted-model-workspace'] && req.headers['x-unprompted-model-workspace'] !== controls.workspaceToken()) return json(res, 409, { error: 'The workspace changed. Reload model controls before saving.', code: 'MODEL_CONTROLS_WORKSPACE_CHANGED' });
+          const operation = url.pathname.split('/').at(-1);
+          if (operation === 'routing') {
+            const routingService = new ModelRoutingService(durableRuntime.database), previous = routingService.get();
+            if (body?.config && engine.reasoner?.runtime) return json(res, 409, { error: 'Stage routing requires the standard model harness. Switch from Pi before enabling a group.', code: 'MODEL_ROUTING_UNSUPPORTED_HARNESS' });
+            const routing = routingService.configure(body);
+            if (engine.reasoner?.budget?.limits) applyModelRequestLimit(engine.reasoner, routing);
+            if (routing.version !== previous.version) { durableRuntime.modelChanged(); engine.changed(); }
+            return json(res, 200, { ...routing, maxCallsPerRequest: engine.reasoner?.budget?.limits?.maxCallsPerRequest || 1 });
+          }
+          return json(res, 200, operation === 'token-limit' ? { controls: controls.configureToken(body) }
+            : operation === 'money-limit' ? { controls: controls.configureMoney(body) } : controls.configureProfile(body));
+        } catch (error) { return json(res, error.status || 400, { error: error.message, code: error.code, ...(error.currentProfile ? { currentProfile: error.currentProfile } : {}) }); }
+      }
+
       if (url.pathname === '/api/setup/model') {
         if (demoMode) return json(res, 409, { error: 'Start your persistent workspace with npm start before connecting a model.', code: 'DISPOSABLE_DEMO' });
         if (modelSetupBusy || engine.pendingReasoning.size || engine.pendingDiscovery.size) return json(res, 409, { error: 'Model reasoning is running. Wait for it to finish before changing the connection.', code: 'MODEL_BUSY' });
@@ -1056,7 +1394,8 @@ async function handleHttpRequest(req, res) {
         modelSetupBusy = true;
         try {
           const settings = normalizeModelSettings(body, localSetup.get().model);
-          const checked = await validateModelSettings(settings, { budgetEnv: process.env });
+          const checked = await validateModelSettings(settings, { budgetEnv: process.env, tokenBudget: durableRuntime?.tokenBudget,
+            accountingContext: durableRuntime?.modelAccountingContext() || { scope: 'workspace' } });
           if (engine.pendingReasoning.size || engine.pendingDiscovery.size) throw new ModelSetupError('MODEL_BUSY', 'Model reasoning started during the check. Wait for it to finish and try again.', 409);
           localSetup.saveModel(settings, checked.validation);
           engine.replaceReasoner(checked.reasoner);
@@ -1068,6 +1407,8 @@ async function handleHttpRequest(req, res) {
           if (simulationCanStart() && !demoStarted && !runtime.live) { demoStarted = true; simulation.start(); }
           return json(res, 200, { ok: true, setup: publicSetupStatus(), state: engine.publicState() });
         } catch (error) {
+          if (['MODEL_ROUTING_UNSUPPORTED_HARNESS','TOKEN_BUDGET_UNSUPPORTED_HARNESS','MONEY_BUDGET_UNSUPPORTED_HARNESS'].includes(error?.code)) return json(res, error.status || 409, { error:error.message, code:error.code });
+          if (typeof error?.code === 'string' && /^(TOKEN_|MONEY_)/.test(error.code)) return json(res, error.code.endsWith('BUDGET_EXHAUSTED') ? 429 : error.status || 409, { error: error.code === 'MONEY_PROFILE_REQUIRED' ? 'Confirm complete prices for this connection before testing it, or change the money budget.' : 'The model check is waiting for available model budget or current admission settings.', code: error.code });
           if (error instanceof ModelSetupError) return json(res, error.status, { error: error.message, code: error.code });
           return json(res, 500, { error: 'The model settings could not be fully applied. Reload to check the current connection before retrying.', code: 'MODEL_SAVE_FAILED' });
         } finally { modelSetupBusy = false; }
@@ -1085,6 +1426,9 @@ async function handleHttpRequest(req, res) {
 
       if (url.pathname === '/api/setup/monitoring') {
         const state = await monitoring.setSettings({ enabled: body?.enabled, intervalMs: body?.intervalMs });
+        // An explicit resume also releases durable receipts retained while
+        // observation was paused. An explicit pause never pulls.
+        githubWebhooks?.refresh();
         return json(res, 200, { monitoring: state });
       }
       if (url.pathname === '/api/setup/google/client') {
@@ -1106,13 +1450,14 @@ async function handleHttpRequest(req, res) {
       }
       if (url.pathname === '/api/setup/google/activate') {
         try { await activateGoogleWorkspace({ observe: body?.observe !== false, request: req }); }
-        catch { return json(res, 409, { error: 'Your saved Google authorization could not be applied. Check the connection and retry.', code: 'GOOGLE_ACTIVATION_FAILED' }); }
+        catch (error) { return googleActivationFailure(res, error); }
         return json(res, 200, { setup: publicSetupStatus(), state: engine.publicState() });
       }
       if (url.pathname === '/api/setup/google/permissions') {
         if (process.env.GOOGLE_REFRESH_TOKEN) return json(res, 409, { error: 'The launch environment controls this Google connection.', code: 'GOOGLE_ENV_CONFIGURED' });
         const result = localSetup.setExternalWrites(body?.allowExternalWrites);
-        await activateGoogleWorkspace({ request: req });
+        try { await activateGoogleWorkspace({ request: req }); }
+        catch (error) { return googleActivationFailure(res, error); }
         return json(res, 200, { setup: publicSetupStatus(), allowExternalWrites: result.permissions.allowExternalWrites, restartRequired: false });
       }
       if (url.pathname === '/api/setup/google/validate') {
@@ -1285,7 +1630,7 @@ async function handleHttpRequest(req, res) {
       }
       return json(res, 404, { error: 'Endpoint not found' });
     }
-    if (req.method === 'GET' && (url.pathname === '/' || ['/app.js', '/i18n.js', '/ux-state.js', '/dom-state.js', '/interactions.js', '/workspace.js', '/workspace-model.js', '/memory-space.js', '/memory-space-model.js', '/appearance.js', '/appearance-model.js', '/mcp.js', '/durable.js', '/artifacts.js', '/source-offers.js', '/styles.css', '/interactions.css', '/workspace.css', '/mcp.css', '/durable.css', '/redesign.css', '/workbench.css', '/page-focus.css', '/design-system.css', '/page-focus.js', '/memory-space.css', '/select-menu.js', '/marks/gmail.svg', '/marks/github.svg', '/marks/slack.svg', '/marks/notion.svg'].includes(url.pathname))) {
+    if (req.method === 'GET' && (url.pathname === '/' || ['/app.js', '/model-controls.js', '/source-health.js', '/i18n.js', '/ux-state.js', '/dom-state.js', '/interactions.js', '/workspace.js', '/workspace-model.js', '/memory-space.js', '/memory-space-model.js', '/appearance.js', '/appearance-model.js', '/mcp.js', '/durable.js', '/artifacts.js', '/source-offers.js', '/styles.css', '/interactions.css', '/workspace.css', '/mcp.css', '/durable.css', '/redesign.css', '/workbench.css', '/page-focus.css', '/design-system.css', '/page-focus.js', '/memory-space.css', '/select-menu.js', '/marks/gmail.svg', '/marks/github.svg', '/marks/slack.svg', '/marks/notion.svg'].includes(url.pathname))) {
       const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
       const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.svg') ? 'image/svg+xml' : 'text/html';
       res.writeHead(200, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -1350,6 +1695,8 @@ async function shutdown(exitCode = 0) {
   shutdownPromise = (async () => {
   simulation.stop();
   monitoring.stop();
+  const webhooksStopped = githubWebhooks?.stop();
+  githubWebhooks = null;
   sseHub.close();
   googleOAuth.cancel('shutdown');
   deviceOAuth.close();
@@ -1364,13 +1711,20 @@ async function shutdown(exitCode = 0) {
     if (!server.listening) return resolve();
     server.close(() => resolve());
   });
-  await Promise.allSettled([monitoring.whenIdle(), closed]);
+  await Promise.allSettled([monitoring.whenIdle(), closed, webhooksStopped]);
   while (activeHttpHandlers.size) await Promise.allSettled([...activeHttpHandlers]);
   // A sync can ingest new work while it settles. Drain the engine after that
   // pass completes so no late reasoning task can write after the state closes.
   await engine.whenSettled();
-  store.close();
-  process.exitCode = exitCode;
+  // Shutdown owns every store, including retired candidates that previously
+  // failed to close. Report unresolved handles instead of hiding them.
+  const unresolvedStores = closeRetiredWorkspaceStores();
+  try { store.close(); }
+  catch (error) { unresolvedStores.push({ store, error }); }
+  if (unresolvedStores.length) {
+    console.error(`Shutdown could not close ${unresolvedStores.length} workspace store(s): ${unresolvedStores.map(entry => entry.error?.message || 'unknown error').join('; ')}`);
+    process.exitCode = exitCode || 1;
+  } else process.exitCode = exitCode;
   })();
   return shutdownPromise;
 }

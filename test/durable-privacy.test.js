@@ -7,6 +7,7 @@ import { DurableDatabase, iso } from '../src/durable/database.js';
 import { DurableJobs } from '../src/durable/jobs.js';
 import { DurableTasks } from '../src/durable/tasks.js';
 import { ExperienceService } from '../src/durable/experience.js';
+import { ExperienceTrialService } from '../src/durable/experience-trials.js';
 import { HybridMemory } from '../src/durable/memory.js';
 import { ForgetService } from '../src/durable/privacy.js';
 import { SqliteStore } from '../src/durable/store.js';
@@ -17,9 +18,17 @@ function setup(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-privacy-'));
   const database = new DurableDatabase(path.join(directory, 'workspace.sqlite'));
   const jobs = new DurableJobs(database), tasks = new DurableTasks(database, jobs), memory = new HybridMemory(database), experiences = new ExperienceService(database, { jobs });
-  const privacy = new ForgetService(database, { jobs, memory });
+  const trials = new ExperienceTrialService(database, { experiences });
+  const privacy = new ForgetService(database, { jobs, memory, experiences });
   t.after(() => { database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
-  return { directory, database, jobs, tasks, memory, experiences, privacy };
+  return { directory, database, jobs, tasks, memory, experiences, trials, privacy };
+}
+function passTrial(context, experience) {
+  const caseSet = context.trials.caseSet(experience.id);
+  context.trials.saveCases(experience.id, { expectedRevision: experience.revision, expectedCaseSetVersion: caseSet.version, userRequested: true,
+    cases: [{ id: 'privacy-case', scope: [{ type: experience.scope_type, key: experience.scope_key }], features: {},
+      expected: { applies: true, winner: 'candidate', effect: experience.effect } }] });
+  return context.trials.evaluate(experience.id, { expectedRevision: experience.revision });
 }
 function withMemory(context) { return context.memory.put({ id: 'fact', content: secret }); }
 function dependentRun(context) {
@@ -261,6 +270,50 @@ test('permission revocation without purge marks derived guidance for revalidatio
   context.database.db.prepare("UPDATE experiences SET status='active' WHERE id=?").run(experience.id);
   await context.privacy.revokePermission({ connectorId: 'fixture' });
   assert.equal(context.experiences.get(experience.id).status, 'needs_revalidation');
+});
+
+test('a soft revocation expires trial passes immediately, then purge and Forget remove trial, case and version history', async t => {
+  const context = setup(t);
+  const db = context.database.db;
+  const task = context.tasks.createOrLoad({ candidateKey: 'revoked-trial', data: { sourceConnectorId: 'fixture', subject: 'Revoked trial', status: 'waiting_for_information' } });
+  const experience = context.experiences.create({
+    kind: 'planning_hint', scopeType: 'project', scopeKey: 'A', directiveKey: 'privacy.notification.mode',
+    instruction: 'Private notification guidance', effect: { type: 'notification_behavior', mode: 'digest' }, freshnessClass: 'stable'
+  }, { sources: [{ kind: 'task', id: task.taskId }] });
+  assert.equal(passTrial(context, experience).state, 'passed');
+  assert.equal(context.experiences.adopt(experience.id, { expectedRevision: experience.revision, userRequested: true }).status, 'active');
+  assert.ok(db.prepare('SELECT 1 FROM experience_trials WHERE experience_id=?').get(experience.id));
+  assert.ok(db.prepare('SELECT 1 FROM experience_trial_case_sets WHERE experience_id=?').get(experience.id));
+  assert.ok(db.prepare('SELECT 1 FROM experience_content_versions WHERE experience_id=?').get(experience.id));
+
+  await context.privacy.revokePermission({ connectorId: 'fixture' });
+  const revoked = context.experiences.get(experience.id);
+  assert.equal(revoked.status, 'needs_revalidation');
+  assert.equal(context.experiences.validTrialPass(revoked), false);
+  assert.equal(context.trials.list(experience.id).every(row => row.state !== 'passed'), true, 'a revoked source cannot leave a usable pass');
+  assert.ok(context.trials.list(experience.id).length > 0, 'soft revocation keeps attributable history but marks it expired');
+  assert.ok(context.experiences.contentVersions(experience.id).length > 0, 'soft revocation keeps immutable content history for audit');
+  assert.equal(context.experiences.retrieve({ scopes: [{ type: 'project', key: 'A' }], purpose: 'automatic' }).length, 0);
+
+  await context.privacy.revokePermission({ connectorId: 'fixture', purgeLocal: true });
+  assert.equal(context.experiences.get(experience.id), undefined);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM experience_trials WHERE experience_id=?').get(experience.id).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM experience_trial_case_sets WHERE experience_id=?').get(experience.id).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM experience_content_versions WHERE experience_id=?').get(experience.id).n, 0);
+
+  const memory = context.memory.put({ id: 'trial-memory', content: 'Private trial provenance' });
+  const forgottenExperience = context.experiences.create({
+    kind: 'planning_hint', scopeType: 'project', scopeKey: 'A', directiveKey: 'privacy.review.mode',
+    instruction: 'Private review guidance', effect: { type: 'review_requirements', required: true }, freshnessClass: 'stable'
+  }, { sources: [{ kind: 'memory', id: memory.id }] });
+  assert.equal(passTrial(context, forgottenExperience).state, 'passed');
+  assert.ok(db.prepare('SELECT 1 FROM experience_trial_case_sets WHERE experience_id=?').get(forgottenExperience.id));
+  await context.privacy.forget({ kind: 'memory', id: memory.id });
+  assert.equal(context.experiences.get(forgottenExperience.id), undefined);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM experience_trials WHERE experience_id=?').get(forgottenExperience.id).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM experience_trial_case_sets WHERE experience_id=?').get(forgottenExperience.id).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM experience_content_versions WHERE experience_id=?').get(forgottenExperience.id).n, 0);
+  assert.ok(!JSON.stringify(db.prepare('SELECT * FROM experience_trials').all()).includes('Private review guidance'));
 });
 
 test('ordinary memory write and lifecycle restore APIs reject a forgotten identifier', async t => {

@@ -114,7 +114,7 @@ export function ingestObservedTask(store, event) {
     const dismissed = previous?.userDismissed === true, closed = observed.state !== 'open', at = new Date().toISOString();
     const request = { id, intent: 'follow_up', subjectEntity: observed.documentTitle, deliverable: 'local_task', requiredContent: [], deadline: null,
       interpretedBy: 'explicit_source_todo', text: observed.title, source: { kind: event.connectorId, id: observed.documentId,
-        url: observed.url, connectorId: event.connectorId, locator: `line:${observed.line}` } };
+        url: observed.url, connectorId: event.connectorId, accountId: observed.accountId || null, locator: `line:${observed.line}` } };
     state.tasks[id] = { ...(previous || {}), id, kind: 'observed_task', sourceConnectorId: event.connectorId,
       subject: observed.title, sender: observed.documentTitle, request, externalSource: { ...observed },
       owner: { id: 'user', label: 'You', source: 'explicit_source_todo' },

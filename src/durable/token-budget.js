@@ -1,13 +1,13 @@
 import { durableError, iso } from './database.js';
+import { randomUUID, createHash } from 'node:crypto';
 
 /**
  * Token budget core ledger.
  *
  * This service stores daily token limits, reservations and settlements. It is
- * deliberately not wired into model dispatch yet: constructing it does not
- * enforce a budget on any product path. The next integration step owns the
- * transport hooks (`markDispatched`, `settle`, `markUnknown`,
- * `cancelBeforeDispatch`) and the public schema migration.
+ * enforced by native model transport when the runtime binds this ledger.
+ * Optional same-database job wakes persist capacity release in the accounting
+ * transaction; scheduling still rechecks budgets, ownership and authority.
  *
  * Accounting rules:
  * - One fixed UTC day window per reservation, taken from `database.now()`.
@@ -177,6 +177,8 @@ function summarize(limit, usage) {
 }
 
 export class TokenBudgetService {
+  #wakeQueue = null;
+
   constructor(database) {
     if (!database?.db) throw new TypeError('TokenBudgetService requires a DurableDatabase.');
     this.database = database;
@@ -217,6 +219,20 @@ export class TokenBudgetService {
     else database.atomic(initialize);
   }
 
+  attachWakeQueue(jobs) {
+    if (!jobs || jobs.database !== this.database || typeof jobs.startBudgetWake !== 'function') {
+      throw invalid('Budget wakes require the same workspace job queue.');
+    }
+    this.#wakeQueue = jobs;
+  }
+  #capacityReleased(key, taskId = null) {
+    // Ledger identifiers may already occupy the whole bounded key space.
+    // Hash their JSON form so prefixes/control characters cannot reject a
+    // valid release or collapse distinct UTF-16 identifiers.
+    const wakeKey = `token-capacity:${createHash('sha256').update(JSON.stringify(key)).digest('hex')}`;
+    this.#wakeQueue?.startBudgetWake({ key: wakeKey, kind: 'token', taskId });
+  }
+
   /** Set or clear one limit. `null` means unlimited; `0` forbids new spend. */
   setLimit({ scope, taskId = null, tokens } = {}) {
     if (scope !== 'workspace' && scope !== 'task') throw invalid("scope must be 'workspace' or 'task'.");
@@ -226,9 +242,13 @@ export class TokenBudgetService {
     const limit = tokens === null ? null : tokenCount(tokens, 'tokens');
     const at = iso(this.database.now());
     this.database.atomic(() => {
+      const previous = this.db.prepare('SELECT tokens FROM token_budget_limits WHERE scope=? AND scope_id=?').get(scope, task ?? '');
       this.db.prepare(`INSERT INTO token_budget_limits(scope,scope_id,tokens,updated_at) VALUES(?,?,?,?)
         ON CONFLICT(scope,scope_id) DO UPDATE SET tokens=excluded.tokens,updated_at=excluded.updated_at`)
         .run(scope, task ?? '', limit, at);
+      if (previous?.tokens != null && (limit === null || limit > previous.tokens)) {
+        this.#capacityReleased(`token-limit:${randomUUID()}`, task);
+      }
     });
     return { scope, taskId: task, limit, updatedAt: at };
   }
@@ -342,6 +362,7 @@ export class TokenBudgetService {
       const at = iso(this.database.now());
       this.db.prepare("UPDATE token_budget_reservations SET state='cancelled',updated_at=? WHERE attempt_id=?")
         .run(at, attempt);
+      if (row.reserved_total > 0 && row.day === utcDay(this.database.now())) this.#capacityReleased(`token-cancel:${attempt}`);
       return project(this._row(attempt));
     });
   }
@@ -402,6 +423,7 @@ export class TokenBudgetService {
       this.db.prepare(`UPDATE token_budget_reservations SET state='settled',actual_input=?,actual_output=?,actual_cache_read=?,
         actual_cache_write=?,actual_total=?,overrun_tokens=?,settled_at=?,updated_at=? WHERE attempt_id=?`)
         .run(input, output, cacheRead, cacheWrite, actualTotal, overrun, at, at, attempt);
+      if (delta < 0 && row.day === utcDay(this.database.now())) this.#capacityReleased(`token-settle:${attempt}`);
       return project(this._row(attempt));
     });
   }

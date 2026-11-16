@@ -9,7 +9,7 @@ A place the app is allowed to read. Local folders, Apple Notes, Google, GitHub, 
 
 ## Observation
 
-A read of a connected source. Connecting checks once, then repeats on the interval saved in Connections. The default is 5 minutes. The choices are 1 minute, 5 minutes, 15 minutes, and 1 hour. You can pause it, or choose **Check now**. The process has to stay running. An empty read can be a real result. This is polling, not a webhook.
+A read of a connected source. Connecting checks once, then repeats on the interval saved in Connections. The default is 5 minutes. The choices are 1 minute, 5 minutes, 15 minutes, and 1 hour. You can pause it, or choose **Check now**. The process has to stay running. An empty read can be a real result. Native sources poll. An optional, explicitly configured GitHub signed webhook can prompt a scoped incremental pull through the existing connector; polling continues, and this is not push for other sources or a guaranteed realtime feed.
 
 ## Evidence
 
@@ -42,6 +42,18 @@ The optional loop selected with `UNPROMPTED_AGENT_HARNESS=pi`. It uses Pi Agent 
 ## Automatic follow-up
 
 A lease you start so a prepared reply can be sent, or a prepared document patch applied, without another click. Shadow mode refuses it. It does not grant a connector write. See [Automatic follow-up](follow-up.md).
+
+## Transaction allowance
+
+An optional finite cap on money-moving actions, set with automatic follow-up. You confirm one currency, a cumulative amount and an independent expiry. The default is zero. It does not grant tool or account access and does not supply a price. Renewal or restart does not reset spending, and an unknown outcome keeps the amount held. See [Automatic follow-up](follow-up.md).
+
+## Model control
+
+The separate daily UTC token and fee allowances, confirmed price profiles and saved routing groups in model settings. Usage reports settled, reserved and unknown amounts. Fees are estimates from confirmed prices; missing prices stay unknown, and unpriced calls are not free.
+
+## Routing group
+
+A saved set of model IDs and per-stage choices for bounded dispatch. It is configuration, not an evaluation of model quality. See [Models](models.md).
 
 ## Standing goal
 

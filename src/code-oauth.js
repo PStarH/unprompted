@@ -1,12 +1,14 @@
 import { withOAuthScopes } from './oauth-scopes.js';
 import { createServer } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { CONNECTION_PROVIDERS, OAUTH_LOOPBACK_HOST, OAUTH_LOOPBACK_PORT, connectionProvider, oauthRedirectUri, validClientSecret, validPublicClientId, validSlackRedirectUri } from './connection-catalog.js';
+import { CONNECTION_PROVIDERS, OAUTH_LOOPBACK_HOST, OAUTH_LOOPBACK_PORT, connectionProvider, oauthRedirectUri, validBrokerOrigin, validClientSecret, validPublicClientId, validSlackRedirectUri } from './connection-catalog.js';
+import { NotionBrokerClient } from './notion-broker-client.js';
 import { providerJSON } from './connectors/http.js';
 import { providerIdentity } from './device-oauth.js';
 
 const TOKEN_LIMIT = 32_000;
 const CODE_LIMIT = 4096;
+const BROKER_BEST_EFFORT_MS = 5_000;
 
 function statesMatch(expected, actual) {
   const left = Buffer.from(String(expected || ''));
@@ -115,9 +117,16 @@ async function exchangeNotion(session, code, fetchImpl, now) {
 
 /** One loopback authorization-code server for providers that require a client secret. */
 export class CodeOAuth {
-  constructor(setup, { fetchImpl = globalThis.fetch, onConnected = async () => {}, now = Date.now, port = OAUTH_LOOPBACK_PORT, slackPublicClient = null } = {}) {
+  constructor(setup, { fetchImpl = globalThis.fetch, onConnected = async () => {}, now = Date.now, port = OAUTH_LOOPBACK_PORT, slackPublicClient = null, notionPublicClient = null, brokerFetchImpl = null } = {}) {
     if (slackPublicClient && (!validPublicClientId(slackPublicClient.clientId) || !validSlackRedirectUri(slackPublicClient.redirectUri))) throw new Error('Invalid Slack public client redirect.');
-    Object.assign(this, { setup, fetchImpl, onConnected, now, port, slackPublicClient });
+    let notionBroker = null;
+    if (notionPublicClient != null) {
+      const brokerUrl = validBrokerOrigin(notionPublicClient.brokerUrl);
+      if (!validPublicClientId(notionPublicClient.clientId) || !brokerUrl) throw new Error('Invalid Notion public broker client.');
+      notionBroker = Object.freeze({ clientId: notionPublicClient.clientId, brokerUrl });
+    }
+    Object.assign(this, { setup, fetchImpl, onConnected, now, port, slackPublicClient, notionPublicClient: notionBroker,
+      brokerFetchImpl: brokerFetchImpl || fetchImpl });
     this.sessions = new Map();
     this.status = new Map();
     this.server = null;
@@ -178,13 +187,78 @@ export class CodeOAuth {
     for (const server of servers) server.close();
   }
 
+  /** The saved or provisioned public broker descriptor for this exact client
+   * ID. An owner secret always selects the direct owner-private flow. */
+  #notionBrokerDescriptor(saved, selectedId, requestedSecret) {
+    if (requestedSecret || saved.pendingClientSecret) return null;
+    const candidates = [];
+    if (saved.pendingBrokerUrl && saved.pendingClientId === selectedId) candidates.push(saved.pendingBrokerUrl);
+    if (saved.brokerUrl && saved.clientId === selectedId) candidates.push(saved.brokerUrl);
+    if (!saved.clientSecret && this.notionPublicClient?.clientId === selectedId) candidates.push(this.notionPublicClient.brokerUrl);
+    for (const brokerUrl of candidates) {
+      const origin = validBrokerOrigin(brokerUrl);
+      if (origin) return { clientId: selectedId, brokerUrl: origin };
+    }
+    return null;
+  }
+
+  async #startNotionBroker(id, { descriptor, observe, scopes }) {
+    this.setup.saveConnectionBrokerClient(id, descriptor);
+    let client;
+    try {
+      client = new NotionBrokerClient({ clientId: descriptor.clientId, brokerUrl: descriptor.brokerUrl,
+        fetchImpl: this.brokerFetchImpl, now: this.now });
+    } catch {
+      throw new Error('The Notion broker client configuration is invalid.');
+    }
+    const state = randomBytes(32).toString('hex');
+    const verifier = randomBytes(32).toString('base64url');
+    const session = { mode: 'broker', client, clientId: descriptor.clientId, brokerUrl: descriptor.brokerUrl,
+      state, verifier, redirectUri: null, observe: observe === true, drafts: false,
+      scopes: Array.isArray(scopes) ? scopes : [], consumed: false, redeemed: false, brokerSession: null,
+      controller: new AbortController(), expiresAt: this.now() + 5 * 60_000, timer: null };
+    // The session is registered before either await. Cancel, new start or
+    // close can therefore always retire this attempt and its late result.
+    this.sessions.set(id, session);
+    this.#status(id, 'starting');
+    try { await this.#listen(); }
+    catch (error) {
+      if (this.sessions.get(id) === session) this.#finish(id, session, 'failed');
+      throw error;
+    }
+    if (this.sessions.get(id) !== session) return this.describe(id);
+    const redirectUri = oauthRedirectUri(id, this.server.address().port);
+    session.redirectUri = redirectUri;
+    let started;
+    try {
+      started = await client.begin({ redirectUri, clientState: state, verifier, signal: session.controller.signal });
+    } catch {
+      if (this.sessions.get(id) !== session) return this.describe(id);
+      this.#finish(id, session, 'failed');
+      throw new Error('The Notion broker authorization could not start. Check the broker address and try again.');
+    }
+    if (this.sessions.get(id) !== session) {
+      this.#cancelBrokerSession(client, started.session, verifier);
+      return this.describe(id);
+    }
+    session.brokerSession = started.session;
+    session.expiresAt = Date.parse(started.expiresAt);
+    session.timer = setTimeout(() => this.#finish(id, session, 'expired'), Math.max(0, session.expiresAt - this.now()));
+    session.timer.unref?.();
+    this.#status(id, 'authorizing', started.authorizeUrl);
+    return this.describe(id);
+  }
+
   async start(id, { clientId = null, clientSecret = null, observe = true, channels = false, drafts = false, scopes = [] } = {}) {
     const provider = connectionProvider(id);
     if (provider.flow !== 'code' && id !== 'microsoft') throw new Error('This provider does not use browser authorization.');
     this.cancel(id);
     const saved = this.setup.getConnection(id);
     const selectedId = clientId == null || clientId === '' ? saved.pendingClientId || saved.clientId : clientId;
-    const selectedSecret = clientSecret == null || clientSecret === '' ? saved.pendingClientSecret || saved.clientSecret : clientSecret;
+    const requestedSecret = clientSecret == null || clientSecret === '' ? null : clientSecret;
+    const notionBroker = id === 'notion' ? this.#notionBrokerDescriptor(saved, selectedId, requestedSecret) : null;
+    if (notionBroker) return this.#startNotionBroker(id, { descriptor: notionBroker, observe, scopes });
+    const selectedSecret = requestedSecret || saved.pendingClientSecret || saved.clientSecret;
     if (!validPublicClientId(selectedId) || (id !== 'microsoft' && (id !== 'slack' || selectedSecret != null) && !validClientSecret(selectedSecret))) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
     await this.#listen();
     const redirectUri = id === 'slack' && this.slackPublicClient?.clientId === selectedId
@@ -252,6 +326,9 @@ export class CodeOAuth {
         const account = await providerIdentity(id, token.accessToken, { fetchImpl: this.fetchImpl });
         if (this.sessions.get(id) !== session) { respond(res, 409, 'This authorization was cancelled.'); return; }
         this.setup.saveConnectionAuthorization(id, { clientId: session.clientId, ...token, account, scopes });
+      } else if (session.mode === 'broker') {
+        await this.#redeemNotionBroker(id, session, code, res);
+        return;
       } else {
         const exchanged = await exchangeNotion(session, code, this.fetchImpl, this.now());
         if (this.sessions.get(id) !== session) { respond(res, 409, 'This authorization was cancelled.'); return; }
@@ -270,11 +347,77 @@ export class CodeOAuth {
     }
   }
 
+  #bestEffortSignal() {
+    try { return AbortSignal.timeout(BROKER_BEST_EFFORT_MS); }
+    catch { return undefined; }
+  }
+
+  #cancelBrokerSession(client, brokerSession, verifier) {
+    try {
+      if (!client || !brokerSession) return;
+      void client.cancel({ session: brokerSession, verifier, signal: this.#bestEffortSignal() }).catch(() => {});
+    } catch { /* a cancelled flow is already local; remote cleanup is best effort */ }
+  }
+
+  #revokeLateBrokerGrant(client, authorization) {
+    try {
+      if (!client || !authorization) return;
+      void client.revoke({ authorization, signal: this.#bestEffortSignal() }).catch(() => {});
+    } catch { /* a late grant is never saved; bounded remote cleanup is best effort */ }
+  }
+
+  async #redeemNotionBroker(id, session, code, res) {
+    let authorization;
+    try {
+      authorization = await session.client.redeem({ code, verifier: session.verifier, signal: session.controller.signal });
+    } catch (error) {
+      if (this.sessions.get(id) === session) this.#finish(id, session, error?.code === 'expired' ? 'expired' : 'failed');
+      respond(res, 400, 'Authorization could not be completed.');
+      return;
+    }
+    session.redeemed = true;
+    // A cancelled, replaced or expired attempt never saves or activates a
+    // grant that the broker redeemed after the local session went away.
+    if (this.sessions.get(id) !== session || this.now() >= session.expiresAt) {
+      this.#revokeLateBrokerGrant(session.client, authorization);
+      respond(res, 409, 'This authorization was cancelled.');
+      return;
+    }
+    try {
+      this.setup.saveConnectionBrokerAuthorization(id, {
+        clientId: session.clientId,
+        brokerUrl: session.brokerUrl,
+        broker: authorization.broker,
+        accessToken: authorization.accessToken,
+        refreshToken: authorization.refreshToken,
+        expiresAt: authorization.expiresAt,
+        account: authorization.account,
+        scopes: []
+      });
+    } catch {
+      this.#revokeLateBrokerGrant(session.client, authorization);
+      if (this.sessions.get(id) === session) this.#finish(id, session, 'failed');
+      respond(res, 400, 'Authorization could not be completed.');
+      return;
+    }
+    try { await this.onConnected(id, { observe: session.observe }); }
+    catch {
+      if (this.sessions.get(id) === session) this.#finish(id, session, 'activation_failed');
+      respond(res, 200, 'Authorization is saved. Return to Unprompted to apply the connection.'); return;
+    }
+    respond(res, 200, 'You can close this window.');
+    if (this.sessions.get(id) === session) this.#finish(id, session, 'connected');
+  }
+
   #finish(id, session, phase) {
     if (this.sessions.get(id) !== session) return;
     if (session.timer) clearTimeout(session.timer);
+    if (session.controller) session.controller.abort();
     this.sessions.delete(id);
     this.#status(id, phase);
+    if (session.mode === 'broker' && session.brokerSession && !session.redeemed) {
+      this.#cancelBrokerSession(session.client, session.brokerSession, session.verifier);
+    }
     if (this.sessions.size === 0) this.#closeServer();
   }
 

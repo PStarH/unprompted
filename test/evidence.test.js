@@ -396,7 +396,7 @@ test('a document that becomes readable again can support the work once more', ()
   const { store, engine } = engineIn();
   ingestNorthstar(engine);
   const taskId = 'request:m1';
-  engine.ingest({ id: 'e-gone', type: 'document.unavailable', payload: { id: 'northstar-proposal', reason: 'removed' } });
+  engine.ingest({ id: 'e-gone', type: 'document.unavailable', at: '2026-10-17T09:00:00.000Z', payload: { id: 'northstar-proposal', reason: 'removed' } });
   assert.equal(store.state.tasks[taskId].status, 'waiting_for_information');
 
   engine.ingest({ id: 'e-doc-2', type: 'document.modified', payload: { ...doc(), modifiedAt: '2026-10-18T09:00:00.000Z' } });

@@ -428,7 +428,7 @@ test('activation v1.5 replay matrix', async t => {
     const run = env.runtime.tasks.beginRun(job, { advanceGeneration: false });
     env.runtime.tasks.checkpoint(run, job, { expectedInputVersion: 0, plan: {}, sources: [] });
     const intent = env.runtime.ledger.intent({ taskId: created.taskId, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'unknown-write', effect: { type: 'email' }, payload: {}, authorize: () => ({ allowed: true }) });
-    await assert.rejects(env.runtime.ledger.dispatch(intent, { run, job, send: async (_signal, beforeDispatch) => { beforeDispatch(); sends += 1; throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); } }), { code: 'ETIMEDOUT' });
+    await assert.rejects(env.runtime.ledger.dispatch(intent, { run, job, deferDispatch: true, send: async (_signal, beforeDispatch) => { beforeDispatch(); sends += 1; throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); } }), { code: 'ETIMEDOUT' });
     assert.equal(env.runtime.ledger.get(intent.execution.id).status, 'unknown');
     assert.equal(sends, 1);
     await env.runtime.close(); env.store.close();

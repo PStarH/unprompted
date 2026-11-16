@@ -60,15 +60,50 @@ try {
   await page.locator('[data-memory-search]').fill('Cedar approved budget');
   await page.locator(`.memory-search-result[data-memory-id="${memoryId}"] [data-memory-focus]`).click();
   await page.waitForFunction(() => document.querySelector('.memory-human-context')?.textContent.includes('Cedar budget source brief'));
+  // The Inspector paints the source task before the native version detail has
+  // resolved, so the origin is briefly the generic fallback. Wait for the
+  // resolved detail itself — the Agent quotation origin and the stored
+  // agent_remember version row in the same Inspector — before judging
+  // provenance. If that detail never resolves, this fails rather than passing
+  // on transient text or fabricating an origin.
+  await page.waitForFunction(id => {
+    const inspector = [...document.querySelectorAll('.memory-inspector')].find(element =>
+      !element.classList.contains('memory-reference-inspector') && !element.classList.contains('memory-relationship-inspector'));
+    if (!inspector) return false;
+    const origin = inspector.querySelector('.memory-human-context')?.textContent || '';
+    if (!origin.includes('Agent saved this quotation')) return false;
+    const versions = inspector.querySelector(`[data-preserve="memory-versions-${CSS.escape(id)}"]`);
+    return Boolean(versions) && [...versions.querySelectorAll('.memory-version-row')]
+      .some(row => (row.textContent || '').includes('Agent update · Remembered'));
+  }, memoryId, { timeout: 15000 });
   assert.match(await page.locator('.memory-human-context').innerText(), /Agent saved this quotation/);
-  await page.locator('[data-preserve^="memory-versions-"] summary').click();
+  // The Inspector's current detail tabs are real navigation: History owns the
+  // version section, Related owns the recorded-use context and Overview owns
+  // the actions. Move through the visible tabs instead of touching hidden
+  // panels, and keep every existing business assertion.
+  const activeInspector = () => page.locator('.memory-inspector:not(.memory-reference-inspector):not(.memory-relationship-inspector):visible');
+  async function selectInspectorTab(name) {
+    await activeInspector().locator('.detail-focus-navigation [role="tablist"]:visible')
+      .getByRole('tab', { name, exact: true }).click();
+  }
+  await selectInspectorTab('History');
+  // Entering History opens its disclosure panels, so only click the visible
+  // summary when the real details element is closed; clicking it twice would
+  // hide the history this check exists to read.
+  const versions = page.locator('[data-preserve^="memory-versions-"]');
+  if (!(await versions.evaluate(element => element.open))) await versions.locator('summary').click();
+  await page.locator('.memory-version-row').filter({ hasText: 'Agent update · Remembered' }).waitFor({ state: 'visible' });
   assert.match(await page.locator('.memory-version-row').first().innerText(), /Agent update · Remembered/);
   assert.equal((await page.locator('.memory-inspector').innerText()).includes('agent_remember'), false);
-  const usage = page.locator('.memory-inspector-context').filter({ hasText: 'Recorded use in work' });
+  await selectInspectorTab('Related');
+  const usage = activeInspector().locator('.memory-inspector-context').filter({ hasText: 'Recorded use in work' });
+  await usage.waitFor({ state: 'visible' });
+  assert.equal(await usage.isVisible(), true);
   assert.equal(await usage.locator('[data-open-task]').count(), 1);
   await page.evaluate(() => scrollTo(0, 0));
   await page.screenshot({ path: `${output}/desktop-agent-memory.png`, fullPage: true });
   checks.push('a real harness write is searchable, shows its task source and readable Agent history in the Inspector');
+  await selectInspectorTab('Overview');
   await page.locator('.memory-actions-menu summary').click();
   await page.locator('[data-memory-operation=edit]').click();
   await page.locator('[data-memory-edit] textarea').fill(correction);

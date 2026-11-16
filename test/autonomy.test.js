@@ -134,3 +134,9 @@ for (const durable of [false, true]) test(`task YOLO applies a source-backed pat
   assert.equal(store.state.documentPatches[patch.id].authorization.kind, 'temporary_yolo');
   assert.match(store.state.documents['northstar-proposal'].content, /Pilot result: 12.5%/);
 });
+
+test('legacy JSON workspaces cannot mint a positive funds allowance or publish a partial grant', t => {
+  const { engine } = fixture(t);
+  assert.throws(() => engine.autonomy.create({mode:'time',durationMinutes:30,money:{currency:'USD',capMicros:100,durationMinutes:10,confirmed:true}}), {code:'INVALID_AUTONOMY'});
+  assert.equal(engine.autonomy.grants().length,0);
+});

@@ -24,6 +24,20 @@ description: 用于查看工作区、连接模型和审阅工作的本机 HTTP A
 
 `POST /api/setup/model` 接受 `baseUrl`、`model`、可选的 `apiKey`，以及 `harness`（`classic` 或 `pi`）。它和表单做同一次真实验证。失败不会保存这次候选。`POST /api/setup/model/forget` 移除已保存的连接。请求仍在进行时返回 `MODEL_BUSY`。由启动环境配置时返回 `MODEL_ENV_CONFIGURED`，并继续由该环境控制。
 
+## 模型控制
+
+`GET /api/model-controls?taskId=TASK_ID` 返回按 UTC 日计算的 token 限额，以及已结算、预留和未知的用量、模型费用限额和分币种用量、当前价格版本，还有 `money.unpricedCalls`。省略 `taskId` 表示工作区。没有价格的调用费用未知，不会报告成免费；结果未知时会保留原来的账目占用。
+
+持久化工作区接受以下同源 JSON POST 路由：
+
+- `POST /api/model-controls/token-limit`：`{scope, taskId?, tokens}`。显式 `null` 关闭限额；`0` 阻止新的花费。
+- `POST /api/model-controls/money-limit`：`{scope, taskId?, currency, micros, expectedVersion}`。金额是安全整数微币单位；`null` 关闭限额。工作区和任务的有效限额需要币种一致。
+- `POST /api/model-controls/price-profile`：`{connection?, currency, revision, rates:{input,output,cacheRead,cacheWrite}, expectedVersion, confirmed:true}`。费率是每百万 token 的显式安全整数微币。版本过期时返回可供审阅的安全 `currentProfile`。
+- `POST /api/model-controls/routing`：`{expectedVersion, config, requestCallLimit, maxRpcAttempts}`。`config` 包含 `modelIds`、`defaultModel`、`stages` 映射（`interpret`、`discovery`、`planning`、`verification`、`general`）和可选的 `fallbackModel`；`config:null` 禁用该分组。
+- `GET /api/model-controls/routing` 返回已保存的分组、版本和 classic 调用上限。
+
+这些都是本机设置。路由分组是限定范围的调度配置，不是质量评估；确认过的价格只是估算，不承诺节省。
+
 ## 审阅
 
 带有准备草稿的任务会暴露 `reviewToken`。批准时在正文里送出这个精确令牌。草稿或输入变了，响应是 **409**，旧令牌不会被接受。重复一个已经接受的令牌是幂等的。接受记录的是本地决定，它本身不是对提供商的写入。
@@ -32,7 +46,7 @@ description: 用于查看工作区、连接模型和审阅工作的本机 HTTP A
 
 ## 自动跟进
 
-`POST /api/autonomy` 接受 `{ "mode": "time", "durationMinutes": 30 }` 或 `{ "mode": "task", "taskId": "TASK_ID" }`。响应包含 `grant` 和 `state`。同一模式、同一任务的新授权会替换上一条。时间授权和任务授权可以同时存在。`POST /api/autonomy/GRANT_ID/revoke` 停止该授权。`GET /api/state` 包含 `autonomy.enabled` 和当前有效的授权。无效输入返回 **400**。影子模式会拒绝，错误文本是 `YOLO requires write mode.` 行为见[自动跟进](follow-up.md)。
+`POST /api/autonomy` 接受 `{ "mode": "time", "durationMinutes": 30 }` 或 `{ "mode": "task", "taskId": "TASK_ID" }`，还可以带 `money: { "currency": "USD", "capMicros": 1000000, "durationMinutes": 20, "confirmed": true }`。默认资金上限为零。正数上限需要 `confirmed: true` 和持久化工作区；金额是显式 USD/CNY/EUR 币种的整数微币，不做换算。资金权限不能晚于时间授权结束；同一范围和币种的多次授权共享累计账目：续期、到期和重启都不会重置已花金额或未知占用。资金上限本身不授予工具、账号或目标权限，也不提供价格。模型和 API 费用使用上面另一套模型控制。响应包含 `grant` 和 `state`。同一模式、同一任务的新授权会替换上一条。时间授权和任务授权可以同时存在。`POST /api/autonomy/GRANT_ID/revoke` 停止该授权。`GET /api/state` 包含 `autonomy.enabled` 和当前有效的授权。无效输入返回 **400**。影子模式会拒绝，错误文本是 `YOLO requires write mode.` 行为见[自动跟进](follow-up.md)。
 
 `POST /api/tasks/TASK_ID/feedback` 的 `label` 为 `useful`、`not_useful`、`not_mine`、`duplicate`、`already_handled` 或 `wrong_association`。标成重复时还要带 `relatedTaskId`。`POST /api/feedback/FEEDBACK_ID/undo` 撤回一条纠正。这些都不会发信。`POST /api/misses` 带上 `note`，记下你看到而应用没有发现的事。它不创建任务。空的说明会被拒绝。
 

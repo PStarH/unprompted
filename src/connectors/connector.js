@@ -104,6 +104,24 @@ export class CursorStore {
     });
   }
 
+  /**
+   * Health-only snapshot/restore. A stopped observation must not leave a page
+   * that committed mid-pass looking like the current state of the source; the
+   * cursor is deliberately not part of this record because an acknowledged
+   * page's events were ingested and must not be replayed.
+   */
+  snapshotStatus(connectorId) {
+    return structuredClone(this.store.state.connectorStatus?.[connectorId] ?? null);
+  }
+
+  restoreStatus(connectorId, snapshot) {
+    this.store.mutate(state => {
+      state.connectorStatus = state.connectorStatus || {};
+      if (snapshot == null) delete state.connectorStatus[connectorId];
+      else state.connectorStatus[connectorId] = structuredClone(snapshot);
+    });
+  }
+
   observe(connectorId, observation) {
     // A small durable heartbeat, separate from the large content snapshot.
     if (this.store.database) this.store.database.atomic(() => this.store.database.set(`connector_observation:${connectorId}`, JSON.stringify(observation)));

@@ -26,6 +26,10 @@ export async function startConnectedFixture() {
     if (url.pathname === '/google/login.microsoftonline.com/common/oauth2/v2.0/token') return json(controls.microsoftAuthorized
       ? { access_token: `PRIVATE_MS_ACCESS_${controls.microsoftAccount}`, refresh_token: 'PRIVATE_MS_REFRESH', expires_in: 3600, scope: `User.Read Mail.Read offline_access${controls.microsoftDrafts ? ' Mail.ReadWrite' : ''}${controls.microsoftExtraScopes.length ? ` ${controls.microsoftExtraScopes.join(' ')}` : ''}` } : { error: 'authorization_pending' }, controls.microsoftAuthorized ? 200 : 400);
     if (url.pathname === '/google/api.todoist.com/api/v1/user') return json({ id: 'todoist-a', email: 'todoist@example.test' });
+    if (url.pathname === '/google/api.todoist.com/api/v1/tasks' && controls.todoistFailure) {
+      if (controls.todoistFailure.retryAfter) res.setHeader('retry-after', String(controls.todoistFailure.retryAfter));
+      return json({ error: controls.todoistFailure.message || 'Scripted observation failure' }, controls.todoistFailure.status);
+    }
     if (url.pathname === '/google/api.todoist.com/api/v1/tasks') return json({ results: [{ id: 'task-a', content: controls.todoistContent, description: 'Read-only Todoist fixture', updated_at: controls.todoistUpdatedAt }], next_cursor: null });
     if (url.pathname === '/google/api.github.com/user') return json({ id: 123, login: 'reader' });
     const issue = { id: 15, number: 7, title: 'Investigate webhook retry behavior', body: 'This issue is assigned to reader. Inspect the retry policy.',
@@ -42,7 +46,10 @@ export async function startConnectedFixture() {
         body: { contentType: 'text', content: 'Please update the Cedar proposal to include sample size and conclusion and send it back.' } }],
       '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=checkpoint' });
     if (url.pathname === '/model/v1/chat/completions') {
-      JSON.parse(raw);
+      const request = JSON.parse(raw);
+      if (request.messages?.some(message => message.role === 'system' && String(message.content).includes('Investigate the existing task'))) {
+        return json({ choices: [{ message: { content: JSON.stringify({ nextStep: 'Inspect the assigned issue and retain its original source ownership.' }) } }] });
+      }
       return json({ choices: [{ message: { content: JSON.stringify({ subjectEntity: 'Cedar', deliverable: 'proposal', intent: 'update_and_send', requiredContent: [
         { text: 'sample size', sourceQuote: 'sample size', sourceField: 'body' }, { text: 'conclusion', sourceQuote: 'conclusion', sourceField: 'body' }
       ] }) } }] });

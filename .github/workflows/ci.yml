@@ -92,7 +92,7 @@ jobs:
   browser:
     name: First-run and interaction contracts
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       UNPROMPTED_BROWSER_CHANNEL: chrome
     steps:
@@ -173,6 +173,21 @@ jobs:
         env:
           UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
         run: npm run test:durable-ui
+
+      - name: Run model budget and routing controls contract
+        env:
+          UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
+        run: npm run test:model-controls
+
+      - name: Run Experience trial evaluation contract
+        env:
+          UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
+        run: npm run test:experience-trials
+
+      - name: Run autonomy grant and confirmation contract
+        env:
+          UNPROMPTED_PLAYWRIGHT_MODULE: ${{ runner.temp }}/unprompted-browser/node_modules/playwright/index.mjs
+        run: npm run test:autonomy
 
       - name: Run external MCP connection contract
         env:

@@ -12,7 +12,10 @@ try {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.goto(fixture.base + '/#sources');
   await page.locator('#languageSelect').selectOption('en');
-  await page.locator('#googleSearchPanel').waitFor();
+  // The Sources page shows one focus tab at a time; enter Search through the
+  // visible public tab that controls the panel instead of waiting on a hidden panel.
+  await page.locator('#viewSources .page-focus-nav [role="tab"][aria-controls~="googleSearchPanel"]').click();
+  await page.locator('#googleSearchPanel').waitFor({ state: 'visible' });
   assert.match(await page.locator('#googleSearchPanel h2').textContent(), /Search Google/);
   await page.locator('#googleSearchForm [name=query]').fill('Cedar');
   await page.locator('#googleSearchForm').evaluate(form => form.requestSubmit());

@@ -33,6 +33,16 @@ export async function startGoogleFixture({ provisioned = true, directory = null,
         const request = JSON.parse(body);
         const content = request.messages.at(-1).content;
         if (controls.rejectTask && !content.includes('connection-check')) return json({ error: 'scripted model unavailable' }, 503);
+        // Probe planning posts its payload as the last user JSON and fails closed
+        // unless the final answer is { probes: [...] }. An empty list is a valid
+        // final answer: no model probe is added to the deterministic plan.
+        const lastUser = [...(request.messages || [])].reverse().find(message => message?.role === 'user');
+        let planning = null;
+        if (typeof lastUser?.content === 'string') { try { planning = JSON.parse(lastUser.content); } catch { planning = null; } }
+        if (planning && typeof planning === 'object' && !Array.isArray(planning)
+          && (Object.hasOwn(planning, 'uncoveredRequirements') || Object.hasOwn(planning, 'allowedProviders'))) {
+          return json({ choices: [{ message: { content: JSON.stringify({ probes: [] }) } }] });
+        }
         return json({ choices: [{ message: { content: JSON.stringify({ subjectEntity: 'Cedar', deliverable: 'proposal', intent: 'update_and_send', requiredContent: [
           { text: 'sample size', sourceQuote: 'sample size', sourceField: 'body' }, { text: 'conclusion', sourceQuote: 'conclusion', sourceField: 'body' }
         ] }) } }] });

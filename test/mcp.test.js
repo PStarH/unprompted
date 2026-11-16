@@ -304,9 +304,11 @@ test('MCP write tools require explicit selection and dispatch through the durabl
   const selected = manager.tools({ taskId: 'task-1', isCurrent: () => true }).find(tool => tool.label.endsWith('write_item'));
   assert.equal(selected.effect, 'write');
   await assert.rejects(selected.execute('no-executor', {}), /durable task/);
+  await manager.update('local', { nonfinancialTools: ['write_item'] });
   let invoked = 0;
   const action = manager.tools({ taskId: 'task-1', isCurrent: () => true, executeWrite: async request => {
     assert.equal(request.tool, 'write_item'); assert.equal(request.check(), true); invoked++;
+    assert.equal(request.transfer, 'nonfinancial'); assert.match(request.schemaDigest, /^[a-f0-9]{64}$/);
     return { state: 'accepted' };
   } }).find(tool => tool.label.endsWith('write_item'));
   assert.match((await action.execute('write-1', {})).content[0].text, /accepted/); assert.equal(invoked, 1);

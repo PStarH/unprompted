@@ -8,7 +8,7 @@ failed read and disconnect one account while keeping the others connected.
 
 ## Observation
 
-Sources use periodic incremental checks on this computer. Observation starts immediately after connection and resumes on restart. Keep the local service running; pause or disconnect to stop observation. Provider push notifications are deferred to a future version.
+Sources use periodic incremental checks on this computer by default. Observation starts immediately after connection and resumes on restart. Keep the local service running; pause or disconnect to stop observation. GitHub repositories can additionally use the [opt-in signed webhook receiver](GITHUB_WEBHOOKS.md). It persists delivery metadata and schedules scoped pulls through the existing observer; the notification is not evidence or authorization. It requires explicit account/repository configuration and a reachable HTTPS endpoint. Other sources continue to use polling.
 
 ## Available connections
 
@@ -17,11 +17,11 @@ Sources use periodic incremental checks on this computer. Observation starts imm
 | Local folders | Native folder picker on macOS; absolute path on other systems | Markdown and UTF-8 text inside selected folders; explicit text to-dos | Read-only |
 | Apple Notes | macOS only. Automation consent, then choose Notes folders. Offered on a Mac; hidden elsewhere unless already connected | Plain text in selected folders; locked notes and attachments excluded | New notes in explicitly authorized folders; real-account acceptance pending |
 | Apple Reminders | macOS Automation consent, then choose lists | Explicit reminders, completion and due dates in selected lists | Create, edit, complete and delete reminders in separately authorized selected lists |
-| Todoist native | Personal API token; no developer app | Active tasks with paginated snapshots; removed tasks stop being followed | Read-only |
+| Todoist native | Personal API token; no developer app | Active tasks with paginated snapshots; removed tasks stop being followed | Authorized API actions after a separate local grant, within the token’s actual permissions |
 | Google Workspace | Desktop OAuth with PKCE | Gmail; Docs, Sheets (first sheet as CSV), Slides; optional primary Calendar | Draft creation after separate authorization; Gmail sending and Docs editing require independent approval |
 | GitHub | Official device OAuth | Assigned issues, issue mentions (title/body), pull requests awaiting the user's review or response, the newest five commits per repository from the last three days, and the newest ten Actions runs per repository from that window | Authorized platform API actions within installation and user permissions |
-| Microsoft Outlook | Browser OAuth with PKCE | Inbox email, initially the last 3 days, then Graph delta updates | Unsent draft creation after separate authorization |
-| Notion | Public integration browser OAuth | Pages selected by the user | Child pages in an explicitly authorized parent |
+| Microsoft Outlook | Browser OAuth with PKCE | Inbox email, initially the last 3 days, then Graph delta updates | Draft target grant; generic Graph actions additionally require the relevant scopes and a local action grant |
+| Notion | Public integration browser OAuth | Pages selected by the user | Child-page target grant; generic API actions remain limited to actual integration permissions and a separate local grant |
 | Slack | User browser OAuth with PKCE | Direct/group messages; optionally joined public/private channels and replies | Platform API actions after user-scope consent and local authorization |
 
 With Google connected, **Connections → Search Google** searches Gmail or Google
@@ -35,9 +35,32 @@ The connector reports its configured operations in `/api/runtime` and
 provider has not since revoked access. Gmail sending additionally requires Gmail
 read access so the sent message can be independently verified.
 
+## Source capability contract
+
+The table records what each adapter actually implements and how a result can be
+checked. It describes local behavior, not a promise that a real account granted
+the scope. Live adapters observe through `pull()`/`listHistoricalEvents()`; only
+Google exposes a separate native `search()` method, and only adapters with a
+provider readback expose strong verification.
+
+| Source | Read | Search | Observe | Write | Verify | Required grant |
+| --- | --- | --- | --- | --- | --- | --- |
+| Google Workspace | Native Gmail, Drive, optional primary Calendar API | Native Gmail and Drive-name search in the app UI; not a model tool | Native poll: Gmail history, Drive changes, Calendar sync | Native approved Gmail reply and Docs patch; other endpoints through `platform_api` | Native Gmail Sent readback and Docs revision readback. Generic API writes need independent GET/HEAD assertions; otherwise accepted or unknown | Desktop OAuth: Gmail readonly (plus `gmail.compose` for send), Drive readonly (Docs edit separate), Calendar readonly; local action grant for platform writes |
+| Microsoft Outlook | Native Graph inbox API | API only through `platform_api` | Native poll: Graph delta | Artifact draft creation; other Graph endpoints through `platform_api` | Native adapter verification is unknown/manual. Draft creation is read back by the artifact layer; API writes need GET/HEAD assertions, otherwise accepted or unknown | Delegated `User.Read`, `Mail.Read`, `offline_access`; `Mail.ReadWrite` for drafts; local action grant for platform writes |
+| Slack | Native user API direct/group messages; optional joined channels and threads | API only through `platform_api` | Native poll | API only through `platform_api` | API readback assertions; otherwise accepted or unknown | User scopes (`im:read`, `im:history`, `mpim:read`, `mpim:history`, `users:read`; optional channel scopes; action scopes such as `chat:write`); local action grant |
+| Notion | Native API for user-selected pages | API only through `platform_api` (`/v1/search`) | Native poll | Artifact child page in an authorized parent; other endpoints through `platform_api` | Artifact readback and API readback assertions; otherwise accepted or unknown | Integration capabilities and selected pages; Insert content for artifacts; local grants |
+| GitHub | Native API assigned issues, PR reviews, repository changes, Actions runs | API only through `platform_api` | Native poll | API only through `platform_api` | Independent GET/HEAD assertions; otherwise accepted or unknown | GitHub App installation and user permissions; local action grant |
+| Todoist native | Native API active tasks, up to 10,000 per scan | API only through `platform_api` | Native poll | API only through `platform_api` | API readback assertions; otherwise accepted or unknown | Personal API token; local action grant |
+| Apple Reminders | Native macOS Automation for selected lists | Native list and item reads; no remote search | Native poll | Native selected-list POST/PATCH/DELETE with `expectedUpdatedAt`; local action grant | Independent native GET readback, or 404 after deletion; API assertions where supplied | macOS Automation consent and selected lists; explicit local action grant |
+| MCP | Server tools and resources allowed per tool/resource | `find_connected_tools` over the current authorized catalog | None; MCP is not a background source | Per-tool explicit write selection through the durable ledger | Unknown for arbitrary tools: acceptance is recorded as accepted, not verified | User-selected tool and resource grants; server read annotations are claims |
+
+A missing native observation or provider readback stays unknown or manual. An
+empty read, provider acceptance, a source closure or a disappeared record is not
+evidence that the agent completed the work.
+
 Source changes are observed by polling. The local `/api/stream` subscription
 publishes workspace snapshots as those observations are processed; it is not a
-provider webhook or a replayable per-event feed. Provider push is not enabled.
+provider webhook or a replayable per-event feed. GitHub repository push is optional and must be explicitly configured; other sources continue to use polling.
 [Gmail push](https://developers.google.com/workspace/gmail/api/guides/push)
 requires Cloud Pub/Sub, and [Drive push](https://developers.google.com/workspace/drive/api/guides/push)
 requires an HTTPS webhook; both still need recovery for missed notifications.
@@ -170,7 +193,7 @@ The publisher registers each application once. End users then authorize their ow
 accounts. Tokens stay on that computer. A self-hosted installation without
 provisioned clients asks for the application identity, not a user access token.
 
-GitHub uses device authorization. Outlook uses browser authorization with PKCE and a public Client ID. Slack uses a public Client ID with PKCE and needs no client secret. Notion uses an authorization code, a client secret and a fixed loopback redirect. The current native Notion exchange is local; a bundled secret is extractable and is not a confidential-client deployment.
+GitHub uses device authorization. Outlook uses browser authorization with PKCE and a public Client ID. Slack uses a public Client ID with PKCE and needs no client secret. Notion uses browser authorization. A public build registers the provider callback `<broker origin>/v1/notion/callback` and carries only a secretless broker descriptor (`clientId` plus `brokerUrl`); the desktop loopback `http://localhost:53682/oauth/notion` is only the handoff, the publisher client secret stays on the broker server, and an owner-private self-host can still register that loopback redirect directly. This repository does not deploy or register the broker publisher identity.
 
 For GitHub, register a GitHub App, enable its device flow and grant read access
 to Issues, Pull requests, Contents, Actions, and Metadata for observation. Configure write permissions for the actions offered by your product. Install it in the
@@ -203,8 +226,12 @@ labels them Slack. The same workspace can install the app directly. Cross-worksp
 and [PKCE](https://docs.slack.dev/authentication/using-pkce).
 
 For Notion, create a public integration at
-[My integrations](https://www.notion.so/my-integrations). Register this redirect
-URL exactly:
+[My integrations](https://www.notion.so/my-integrations). A public distribution
+registers the broker callback `<broker origin>/v1/notion/callback` and keeps the
+client secret on the broker server; see the
+[Notion broker operator guide](NOTION_BROKER.md) for the descriptor, endpoints
+and remaining deployment work. An owner-private self-host can instead register
+this redirect URL exactly:
 
 `http://localhost:53682/oauth/notion`
 
@@ -250,7 +277,7 @@ in task details. Automated coverage uses scripted providers; real account OAuth,
 macOS Automation and provider publication approval still require acceptance tests.
 
 Application client metadata is provisioned once, but users authorize their own
-accounts. Slack PKCE requires no secret. Native Notion currently exchanges locally, so bundling its secret distributes that secret to every client. Use the official Notion MCP for interactive lookups without registering an app; native background observation requires your public integration, and a confidential production exchange needs a hosted service. This repository does not yet implement that hosted exchange.
+accounts. Slack PKCE requires no secret. A public Notion build carries only the secretless broker descriptor `{clientId, brokerUrl}`; the publisher secret stays on the broker server, and the public app builder rejects Notion client-secret metadata. An owner-private installation can still exchange its own locally supplied secret. Use the official Notion MCP for interactive lookups without registering an app; native background observation requires the public integration and, for public builds, a deployed broker. Broker registration and HTTPS deployment remain publisher tasks.
 The [Chinese setup walkthrough](CONNECTORS.zh-CN.md#为所有用户配置可执行的原生连接器)
 includes registration steps and the user flow.
 
@@ -263,18 +290,20 @@ by `UNPROMPTED_CONNECTOR_CLIENTS_FILE`:
   "github": { "clientId": "YOUR_GITHUB_APP_CLIENT_ID" },
   "microsoft": { "clientId": "YOUR_MICROSOFT_APPLICATION_ID" },
   "slack": { "clientId": "YOUR_SLACK_CLIENT_ID" },
-  "notion": { "clientId": "YOUR_NOTION_CLIENT_ID", "clientSecret": "YOUR_NOTION_CLIENT_SECRET" }
+  "notion": { "clientId": "YOUR_NOTION_CLIENT_ID", "brokerUrl": "https://broker.example.test" }
 }
 ```
 
+The `broker.example.test` origin is a reserved, nonfunctional placeholder.
 Environment names are `UNPROMPTED_GITHUB_CLIENT_ID`, `UNPROMPTED_MICROSOFT_CLIENT_ID`,
 `UNPROMPTED_SLACK_CLIENT_ID`, `UNPROMPTED_SLACK_CLIENT_SECRET`,
-`UNPROMPTED_NOTION_CLIENT_ID` and `UNPROMPTED_NOTION_CLIENT_SECRET`. Notion uses an ID/secret pair. Slack needs only its ID; the legacy Slack secret setting is optional. Google uses the separate Desktop
+`UNPROMPTED_NOTION_CLIENT_ID`, `UNPROMPTED_NOTION_BROKER_URL` and
+`UNPROMPTED_NOTION_CLIENT_SECRET`. A public Notion build uses the client ID with the broker URL; an owner-private self-host can instead set the client ID with the client secret locally. Notion accepts either the broker descriptor or an ID/secret pair, not both. Slack needs only its ID; the legacy Slack secret setting is optional. Google uses the separate Desktop
 client file described in [account setup](ONBOARDING.md).
 
 The app builder accepts `--connector-clients /path/to/connector-clients.json`.
-It keeps GitHub, Outlook and Slack Client IDs, plus the native Notion client secret. An optional legacy Slack secret is retained if provided, but PKCE does not use it.
-It discards account tokens, refresh tokens, and a GitHub or Outlook client secret.
+It keeps GitHub, Outlook and Slack Client IDs and the secretless Notion `{clientId, brokerUrl}` descriptor. It rejects a Notion client secret. An optional legacy Slack secret is removed from the public build; PKCE does not use it.
+It discards account tokens, refresh tokens, and GitHub or Outlook client secrets.
 Tests use scripted providers; a publisher still needs consent from real accounts.
 
 ## Observation and recovery contract
@@ -337,7 +366,7 @@ still need acceptance on actual accounts; fixtures are not that evidence.
 | GitHub | Public GitHub App, device flow, read Issues/PRs/Contents/Actions/Metadata; Client ID | Install on chosen repositories and authorize | Organization installation/approval may require an admin |
 | Outlook | Entra app for any organization + personal accounts, public client/browser PKCE, delegated `User.Read`, `Mail.Read`, `offline_access`; Client ID | Sign in and consent | Publisher verification and tenant policy; draft scope is separately requested |
 | Slack | PKCE app, Client ID, user DM scopes and optional channel scopes; registered production redirect | Authorize workspace and chosen access | Cross-workspace/Marketplace distribution and admin policy; verify redirect eligibility |
-| Notion native | Public integration with Any workspace, Read content/user info, optional Insert content; ID + secret | Select pages | Current local secret exchange is unsuitable for keeping the publisher secret confidential; hosted exchange remains required for that deployment |
+| Notion native | Public integration with Any workspace, Read content/user info, optional Insert content; public builds use a secretless `{clientId, brokerUrl}` descriptor, owner-private self-hosts may use ID + secret | Select pages | Broker registration and HTTPS deployment remain publisher tasks; no publisher identity is deployed |
 | Local folders / Notes / Reminders | Bundle and sign the macOS application; no cloud app | Choose folders/lists and allow macOS access | Real signed-app permission acceptance |
 | Notion / Linear / Atlassian / Todoist MCP | No private app registration in this client | Official provider sign-in | Vendor availability and organization admin policy |
 | Todoist native | No developer app | Paste personal token once | Token rights are available through the platform API after action authorization |
@@ -429,7 +458,9 @@ General API calls accept JSON, form, text or base64 request bodies, custom noncr
 
 Writes use the durable execution ledger and stable operation identities. A lost connection after dispatch remains unknown and is not automatically resent. An accepted response is not verified task completion. Supply an independent GET/HEAD readback and expected JSON fields (or explicit 204/404) when verification is available. Native Apple/selected-folder interfaces retain their existing supported operations; this HTTP tool does not expand operating-system automation APIs.
 
-MCP write tools must be selected explicitly. Unknown annotations are treated as actions, and destructive annotations override a read-only hint. Larger authorized catalogs are searchable through `find_connected_tools` and callable through `call_connected_tool`; selection is no longer limited to the first 24 tools. Revoking a tool or disconnecting a server invalidates captured adapters. Generic MCP success is recorded as accepted because MCP does not standardize independent verification for arbitrary tools.
+MCP write tools must be selected explicitly. Unknown annotations are treated as actions, and destructive annotations override a read-only hint. Larger authorized catalogs are searchable through `find_connected_tools` and callable through `call_connected_tool`; selection is no longer limited to the first 24 tools. When the model's schema budget omits an otherwise inline MCP tool, that same pair is retained automatically instead of silently dropping the capability; a catalog that fits completely keeps no extra meta tools. Each find re-reads the current authorized tools and schemas, and each call resolves the exact returned name against that current set, so revocation, account replacement, a closed server or a changed catalog fails closed. Search results include a bounded continuation when more tools match. A schema too large for one result is marked oversized; the finder can return its complete public JSON schema in bounded fragments by exact tool name. Continuations bind the current catalog or schema digest, so changed permissions or schemas require discovery to restart. Calls still validate arguments against the current server schema. Revoking a tool or disconnecting a server invalidates captured adapters. Generic MCP success is recorded as accepted because MCP does not standardize independent verification for arbitrary tools.
+
+For an operation that may move money, first confirm a finite funds allowance in automatic follow-up settings. Then bind the platform grant or individual MCP tool to that allowance and explicitly confirm distinct request pointers for the integer amount in micros and its currency. A funds cap does not grant tool access by itself. Native checks bind the tool schema and connection identity, enforce the cumulative cap and expiry immediately before dispatch, and reject missing or mismatched currencies. Imported MCP JSON cannot grant financial access. Revoking a financial declaration retains write classification, including when the server advertises a read-only hint. An accepted generic response without independent financial readback leaves the amount held as unknown; it does not refund it or authorize a retry.
 
 Authenticated local endpoints:
 

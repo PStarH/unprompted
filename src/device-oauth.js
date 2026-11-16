@@ -1,5 +1,6 @@
 import { withOAuthScopes } from './oauth-scopes.js';
-import { connectionProvider, validPublicClientId } from './connection-catalog.js';
+import { connectionProvider, validBrokerOrigin, validPublicClientId } from './connection-catalog.js';
+import { NotionBrokerClient } from './notion-broker-client.js';
 import { providerJSON } from './connectors/http.js';
 import { retryAfterMs } from './reasoning-recovery.js';
 
@@ -128,6 +129,7 @@ export class SavedConnectionAuth {
     if (this.disabled) throw new Error('This connection is disconnected.');
     const saved = this.setup.getConnection(this.id);
     if (!saved.accessToken || saved.account?.id !== this.accountId) throw new Error('Reconnect this account.');
+    if (saved.brokerReauthorizationRequired === true) throw new Error('The connection expired. Reconnect this account.');
     if (!saved.expiresAt || Date.parse(saved.expiresAt) > this.now() + 60_000) return saved.accessToken;
     if (!saved.refreshToken) throw new Error('The connection expired. Reconnect this account.');
     if (this.pending) return this.pending;
@@ -135,6 +137,7 @@ export class SavedConnectionAuth {
     return this.pending;
   }
   async #refresh(saved) {
+    if (this.id === 'notion' && saved.broker) return this.#refreshNotionBroker(saved);
     const provider = connectionProvider(this.id);
     const origin = new URL(provider.tokenUrl).origin;
     let data;
@@ -164,5 +167,86 @@ export class SavedConnectionAuth {
       scopes: typeof data.scope === 'string' ? data.scope.split(/[\s,]+/).filter(Boolean) : current.scopes,
       expiresAt: Number(data.expires_in) > 0 ? new Date(this.now() + Number(data.expires_in) * 1000).toISOString() : null });
     return data.access_token;
+  }
+
+  /** Exact private binding captured before an await. A same-grant rebind with a
+   * new proof, capability or account must not receive this refresh's result. */
+  #brokerSnapshot(record) {
+    const broker = record?.broker || {};
+    return Object.freeze({
+      clientId: record?.clientId,
+      issuer: broker.issuer,
+      grantId: broker.grantId,
+      refreshCapability: broker.refreshCapability,
+      refreshProof: broker.refreshProof,
+      refreshToken: record?.refreshToken || null,
+      accountId: record?.account?.id,
+      userId: record?.account?.userId,
+      workspaceId: record?.account?.workspaceId
+    });
+  }
+
+  #sameBrokerSnapshot(record, snapshot) {
+    const broker = record?.broker || {};
+    return record?.clientId === snapshot.clientId
+      && broker.issuer === snapshot.issuer
+      && broker.grantId === snapshot.grantId
+      && broker.refreshCapability === snapshot.refreshCapability
+      && broker.refreshProof === snapshot.refreshProof
+      && (record.refreshToken || null) === snapshot.refreshToken
+      && record.account?.id === snapshot.accountId
+      && record.account?.userId === snapshot.userId
+      && record.account?.workspaceId === snapshot.workspaceId;
+  }
+
+  /** Refresh only the exact saved broker grant. One attempt per accessToken
+   * call; a cancelled or replaced authorization is never resurrected. */
+  async #refreshNotionBroker(saved) {
+    const broker = saved.broker;
+    const snapshot = this.#brokerSnapshot(saved);
+    const reconnect = () => new Error('The connection expired. Reconnect this account.');
+    if (!validPublicClientId(saved.clientId) || !validBrokerOrigin(broker?.issuer) || !saved.refreshToken) throw reconnect();
+    let client;
+    try {
+      client = new NotionBrokerClient({ clientId: saved.clientId, brokerUrl: broker.issuer, fetchImpl: this.fetchImpl, now: this.now });
+    } catch {
+      this.#markBrokerReconnect(snapshot);
+      throw reconnect();
+    }
+    let refreshed;
+    try {
+      refreshed = await client.refresh({ authorization: saved });
+    } catch (error) {
+      // A known in-progress request did not consume the grant. A 502
+      // provider_error means the broker already dispatched the refresh and
+      // marks the grant reauthorization_required, so the old token must never
+      // be sent again. Ambiguous transport failures behave the same way.
+      if (error?.code === 'in_progress') throw new Error('The Notion connection is already refreshing. Try again shortly.');
+      if (error?.outcomeUnknown === true || ['reauthorization_required', 'invalid_grant', 'expired', 'provider_error', 'invalid_configuration', 'invalid_input'].includes(error?.code)) {
+        this.#markBrokerReconnect(snapshot);
+      }
+      throw reconnect();
+    }
+    const current = this.setup.getConnection(this.id);
+    if (this.disabled || !this.#sameBrokerSnapshot(current, snapshot)) throw new Error('The connection changed while refreshing.');
+    this.setup.saveConnectionBrokerAuthorization(this.id, {
+      clientId: saved.clientId,
+      brokerUrl: broker.issuer,
+      broker: refreshed.broker,
+      accessToken: refreshed.accessToken,
+      // An omitted refresh token stays null; the previous token is never reused.
+      refreshToken: refreshed.refreshToken,
+      expiresAt: refreshed.expiresAt,
+      account: refreshed.account,
+      scopes: current.scopes
+    });
+    return refreshed.accessToken;
+  }
+
+  #markBrokerReconnect(snapshot) {
+    if (this.disabled) return;
+    try {
+      this.setup.markConnectionBrokerReauthorization(this.id, snapshot);
+    } catch { /* the reconnect decision already protects this call */ }
   }
 }

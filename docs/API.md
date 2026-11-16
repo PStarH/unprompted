@@ -101,7 +101,12 @@ permissions.
 | POST | `/api/policies` | `instruction`, typed `predicate`, structured `effect`, optional scope/identities. Updates require `id` and `expectedVersion`. Unresolved identities remain draft. |
 | POST | `/api/policies/:id/disable` | `expectedVersion`; invalidate Hot Context atomically |
 | POST | `/api/instructions` | `text`, `kind:"fact"` (default) or `"policy"`, scope. A policy can supply `policy:{predicate,effect}` and confirmed `identities`. Ambiguity returns `needs_clarification`. |
-| GET | `/api/experiences` | Structured Experiences, provenance-based status and evidence counts |
+| GET | `/api/experiences` | Structured Experiences with evidence counts, the latest trial summary with its effective (not merely stored) state, case-set summary, read-only archive authorization and immutable content-version summaries. Also returns the current fixture/policy version metadata |
+| GET | `/api/experiences/:id` | One Experience with its safe trial summaries, bounded case differences, saved declarative cases, content-version history, read-only archive authorization and evaluation metadata |
+| POST | `/api/experiences/:id/cases` | `expectedRevision`, `expectedCaseSetVersion`, bounded `cases`. An explicit user confirmation saves literal scenarios, never client-supplied results. Each case has a unique id, known scope/features and a literal `applies`/`winner`/`effect` expectation; an optional source must already be an active source of this Experience. Returns the new case-set version and digest |
+| POST | `/api/experiences/:id/evaluate` | `expectedRevision` only. Runs the fixed offline fixture against the actual predicate and arbitration paths with a bounded deadline. A pass needs at least one actually scope+predicate matched case whose literal expectation is `applies:true`, `winner:"candidate"` and an independent structured `effect`, and whose candidate selection actually equals that effect. User-precedence (`winner:"user"`) and negative cases remain supporting checks but never substitute for it. Returns `passed`, `failed` or `unknown`; advisory guidance, no applicable positive candidate case (`no_applicable_positive_candidate_case`), cancellation, an exception or the deadline is `unknown`. The policy version is `experience-trial-policy-2026-11-13.2`; earlier-policy passes and attestations are superseded. A pass expires after at most seven days, never later than the Experience validity window |
+| POST | `/api/experiences/:id/adopt` | `expectedRevision` only. Explicit user adoption of a supported non-format, non-global candidate with a current pass, available provenance and no negative evidence. Changes planning eligibility only; it never grants a tool or provider permission |
+| POST | `/api/experiences/:id/rollback` | `expectedRevision`, `targetRevision`. Explicitly restore one historical immutable content version as a new candidate revision. Clears evidence and any trial admission; never lowers the revision or restores active status |
 | POST | `/api/experiences/:id/trial` | Existing `taskId`, exact `reviewToken`; prepare a scoped format trial for review, without sending |
 | POST | `/api/experiences/:id/promote` | `expectedRevision`; still requires narrow low-risk eligibility and independent verified successes |
 | POST | `/api/experiences/:id/revalidate` | `expectedRevision`; explicit user confirmation returns a `needs_revalidation` Experience to `candidate` with a clean evidence slate. `retired` stays terminal |
@@ -122,6 +127,40 @@ Supported Forget roots are event, situation, task, memory, task_memory, task_dir
 experience, artifact, policy, feedback and outcome. The request reports local
 cleanup, WAL reader delays, registered backup deletion and pending external
 operations. It does not erase independent connector/model-provider copies.
+
+Automatic planning only receives an active Experience whose exact current
+revision, content digest, scope, fixture version, fixture digest and policy
+digest have a current pass. Candidates remain visible for explicit inspection
+and the existing supervised format trial, but an unverified candidate is never
+an automatic planning instruction. Trial passes add no `verified_success`
+evidence. Adopting or rolling back guidance does not authorize any tool,
+archive destination, payment, or review bypass; the dispatcher still validates
+those independently. JSON-store mode returns `409 DURABLE_WORKSPACE_REQUIRED`
+rather than pretending to persist an evaluation.
+
+Saved cases are declarative test data, not trusted outcomes or authority. The
+server evaluates every scope and typed predicate itself and compares the
+result with the user's literal expectation; a client field such as `passed`,
+`userRequested` or a fabricated case result is rejected. Applicability and
+positive candidate evidence are counted separately: only a passing case that
+matched the real scope and predicate, expected the candidate, and matched the
+literal structured effect satisfies the readiness gate. User-precedence and
+negative cases prove isolation and user authority but cannot replace that
+assertion. Because a pass is bound to the case-set version, digest and policy
+digest, saving a different set or running an older policy immediately expires
+earlier passes and attestations for that Experience. A stored `expired` row
+with no retained cause reports the generic `stored_expired` reason. Archive
+guidance is evaluated against the current archive grants read-only: the check
+can observe existing user authorization, but evaluation never creates, widens
+or consumes a grant. Stored trial rows keep their original state; list and
+detail responses also expose `effectiveState` (`expired` or `superseded` when
+the pass, fixture, policy, case set, positive evidence or revision no longer
+applies). Promotion carries an attestation only after the same current
+provenance, authorization, content, case-set, TTL and parent-chain checks as
+`currentTrialPass`. A supervised draft that was prepared from a candidate trial
+additionally records the revision, content digest, pass expiry, case set and
+authorization it used; an in-flight send is rejected with
+`EXPERIENCE_TRIAL_STALE` if any of those changed.
 “Do not do this again” belongs in an explicit suppression policy, separately
 from Forget. See [the requirements](PRD.md) and [storage boundaries](ARCHITECTURE.md#storage-and-process-model).
 
@@ -407,3 +446,84 @@ and `workflow.updated` events. Tasks keep the repository and source state.
 Closing or withdrawing the source stops tracking; it never creates an agent
 action receipt. Commits keep changed paths and omit file patches. Outlook uses
 account-namespaced email events and cannot select Gmail as its delivery adapter.
+
+### Model budgets and confirmed prices
+
+`GET /api/model-controls?taskId=<existing task>` returns UTC-day Token limits and
+settled/reserved/unknown usage, model-fee limits and per-currency usage, current
+price versions, and `money.unpricedCalls`. Unpriced calls have unknown fees;
+they are not reported as free. Omit `taskId` for the workspace. Unknown outcomes
+retain their original ledger holds.
+
+Persistent workspaces support these same-origin JSON POST routes:
+
+- `/api/model-controls/token-limit`: `{scope, taskId?, tokens}`. An explicit
+  `null` disables a limit; `0` blocks new spending.
+- `/api/model-controls/money-limit`: `{scope, taskId?, currency, micros,
+  expectedVersion}`. Amounts are safe integer micro-currency units; `null`
+  disables a limit. Active workspace/task limits require matching currencies.
+- `/api/model-controls/price-profile`: `{connection?, currency, revision,
+  rates:{input,output,cacheRead,cacheWrite}, expectedVersion, confirmed:true}`.
+  Rates are explicit safe integers in micro-currency per million tokens. A
+  proposed `connection` uses the model setup fields and allows confirming
+  prices before the synthetic connection test. The server derives the provider
+  identity. Saving prices does not activate a connection or save its credentials.
+  A stale price version returns a safe `currentProfile` for review.
+- `/api/model-controls/routing`: `{expectedVersion, config, requestCallLimit,
+  maxRpcAttempts}`. The config contains `modelIds`, `defaultModel`, a `stages`
+  map (interpret/discovery/planning/verification/general), and optional
+  `fallbackModel`. An explicit second-call choice
+  raises the classic single-call cap to 2; it does not reset counters or increase
+  the existing four-turn tool-loop ceiling. `config:null` disables the group.
+
+`GET /api/model-controls/routing` returns the saved group/version and the current
+classic call cap. Settings are local and do not convert currencies or grant
+external-write permission. A configuration change before dispatch produces a
+controlled `configuration_changed` deferral, with no request sent by that
+attempt; duplicate dispatch permits remain errors.
+
+
+### Timed/task autonomy and cumulative funds limits
+
+`POST /api/autonomy` accepts `{mode:"time",durationMinutes}` or
+`{mode:"task",taskId}`, with optional
+`money:{currency,capMicros,durationMinutes,confirmed}`. The default funds cap
+is zero. Positive caps require `confirmed:true` and a persistent workspace.
+Money permission expires after 1–1440 minutes and cannot outlast timed
+autonomy. Task autonomy still ends on task closure. Amounts are integer
+micros in an explicit USD/CNY/EUR currency; no conversion is performed.
+
+Repeated grants for the same scope and currency share cumulative accounting:
+renewal, expiry, stopping and restarting do not reset spending or unknown
+holds. The returned `moneyBudget` identifies that accounting container. Every
+new quote and dispatch also requires its exact current, active autonomy
+authority and task. A funds cap grants no tool/account/target permission and
+does not supply an untrusted price. Model/API fees use the separate model
+budgets and confirmed prices. `POST /api/autonomy/:id/revoke` stops new
+actions without claiming to reverse an accepted operation or refund a hold.
+
+
+### Financial tool contracts
+
+A funds allowance never enables a tool by itself. For a connected MCP tool,
+`POST /api/mcp/:id` accepts a per-tool patch:
+`{financialConfirmed:true, writeTools:[...], financialTools:{toolName:{monetaryGrantId, amountMicrosPointer, currencyPointer}}}`.
+Pointers address arguments directly, for example `/amountMicros` and
+`/currency`. Amounts must be nonnegative integer micros and currency must
+exactly match the selected allowance. The server binds the declaration to
+the connected schema, configured account/endpoint and discovered server
+identity. Imported configuration cannot create financial declarations.
+Set one entry to `null` to revoke it; omitted entries are unchanged. A removed
+financial declaration remains an unknown action, even if the remote server
+labels the tool read-only.
+
+`POST /api/connector-grants` uses `transfer:"paid"`, `financialConfirmed:true`,
+`monetaryGrantId`, `amountMicrosPointer`, and `currencyPointer`. These pointers
+address the entire request payload, for example `/request/body/amountMicros`
+and `/request/body/currency`. Task-scoped allowances require the matching
+`taskId`. Endpoint, account, path and method permissions still apply.
+
+Every dispatch rechecks the native quote and authority at the actual transport
+boundary. Generic MCP/API acceptance without independent monetary readback
+keeps the funds held as unknown; it is neither a verified payment nor a refund,
+and the same operation is not automatically sent again.

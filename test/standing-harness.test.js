@@ -15,6 +15,7 @@ import { piSupported } from '../src/pi-runtime.js';
 import { preparedWorkReviewToken } from '../src/draft-review.js';
 import { MonitoringService } from '../src/monitoring.js';
 import { LocalSetupStore } from '../src/setup.js';
+import { McpManager, McpConfigStore } from '../src/mcp.js';
 
 const quote = 'Keep both emergency exits clear.';
 const documentId = 'cccccccc-1111-2222-3333-dddddddddddd';
@@ -132,5 +133,84 @@ for (const harness of ['standard', 'pi']) for (const oversized of [false, true])
     assert.ok(task); assert.equal(task.preparedWork?.kind, 'draft', JSON.stringify(task.reasoning));
     assert.equal(sourceReads, 1); assert.equal(mcpReads, 1);
     assert.equal(catalog[0].description.length, 1000); assert.equal(catalog[0].parameters.properties.query.description.length, 600);
+  });
+}
+
+function budgetMcpSdk(tools, state) {
+  return {
+    fromJsonSchema: schema => ({ '~standard': { validate: async args => {
+      state.validated++;
+      return schema.properties?.query?.enum?.includes(args?.query) ? { value: args } : { issues: [{ message: 'arguments do not match' }] };
+    } } }),
+    getDefaultEnvironment: () => ({}),
+    Client: class {
+      async connect() {}
+      getServerCapabilities() { return { tools: {} }; }
+      async listTools() { return { tools }; }
+      async callTool(params) { state.calls++; return { content: [{ type: 'text', text: `Authorized MCP context: ${params.name} ${params.arguments?.query}` }] }; }
+      async close() {}
+    },
+    StreamableHTTPClientTransport: class { async close() {} },
+    SSEClientTransport: class { async close() {} },
+    StdioClientTransport: class { async close() {} }
+  };
+}
+
+for (const harness of ['standard', 'pi']) {
+  test(`${harness} reaches an MCP tool omitted by the schema budget, then reads its source`, { skip: harness === 'pi' && !piSupported() }, async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-mcp-budget-harness-'));
+    const store = new SqliteStore(path.join(directory, 'state.json'));
+    const enumValues = Array.from({ length: 300 }, (_, index) => `${index}-${'x'.repeat(10)}`);
+    const huge = name => ({ name, description: `Search ${name}`, inputSchema: { type: 'object', properties: { query: { type: 'string', enum: enumValues } }, required: ['query'], additionalProperties: false }, annotations: { readOnlyHint: true } });
+    const state = { validated: 0, calls: 0 };
+    const manager = new McpManager({ configStore: new McpConfigStore(path.join(directory, 'mcp')), timeoutMs: 3000, load: async () => budgetMcpSdk([
+      { name: 'lookup_small', description: 'Small lookup', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false }, annotations: { readOnlyHint: true } },
+      huge('search_first'), huge('search_records')
+    ], state) });
+    await manager.import({ mcpServers: { local: { url: 'http://127.0.0.1:9/mcp' } } }, { allowDeclaredRead: true });
+    const target = manager.tools({ isCurrent: () => true }).find(tool => tool.label.includes('search_records'));
+    const engine = new WorkEngine(store, { reasoner: new NullReasoner(), externalTools: scope => manager.tools(scope) });
+    const folder = path.join(directory, 'documents'); fs.mkdirSync(folder); fs.writeFileSync(path.join(folder, 'Lobby.md'), `# Lobby procedure\n${quote}`);
+    const connector = new LocalFilesConnector({ scopeId: 'local-account', roots: [{ id: 'selected', label: 'Work', path: fs.realpathSync(folder) }] });
+    const runtime = new DurableRuntime(engine, { tickMs: 100000, connectorFor: id => id === 'local_files' ? connector : null });
+    t.after(async () => { await manager.close(); await runtime.close(); await engine.whenSettled(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+    runtime.intents.create({ description: 'Review lobby procedure', desiredOutcome: 'Prepare a short safety note', prefilter: { connectorIds: ['local_files'], eventTypes: ['document.modified'], roles: ['UNKNOWN', 'DIRECT_ACTOR', 'PASSIVE_OBSERVER', 'SHARED_GROUP'], tokens: ['lobby'] }, autonomy: { maxAutonomy: 'prepare' }, prohibited: ['external_write'] }, { confirmed: true });
+    let sourceReads = 0;
+    engine.replaceReasoner(await reasoner(harness, (messages, names, metadata) => {
+      const user = messages.find(message => message.role === 'user');
+      const input = JSON.parse(typeof user?.content === 'string' ? user.content : user?.content?.[0]?.text || '{}');
+      if (!input.taskId) return { experiences: [] };
+      // The final tool-loop turn intentionally omits tools so the model answers.
+      if (names.length) {
+        assert.ok(names.includes('read_task_source'));
+        assert.ok(names.includes('find_connected_tools'));
+        assert.ok(names.includes('call_connected_tool'));
+        assert.ok(!names.includes(target.name), 'the large schema must not consume the inline catalog');
+        assert.match(metadata.system, /authorized tools were omitted/);
+      }
+      const textOf = result => typeof result.content === 'string' ? result.content : result.content[0].text;
+      const results = messages.filter(message => ['tool', 'toolResult'].includes(message.role));
+      if (!results.length) return { tool: 'find_connected_tools', id: 'find', args: { query: 'search_records' } };
+      if (results.length === 1) {
+        const found = JSON.parse(textOf(results[0]));
+        assert.equal(found.tools[0].name, target.name);
+        assert.equal(found.tools[0].parameters.properties.query.enum.length, enumValues.length);
+        return { tool: 'call_connected_tool', id: 'call', args: { name: found.tools[0].name, arguments: { query: enumValues[4] } } };
+      }
+      if (results.length === 2) {
+        assert.match(textOf(results[1]), /Authorized MCP context: search_records/);
+        return { tool: 'read_task_source', id: 'source' };
+      }
+      const read = JSON.parse(textOf(results.at(-1)));
+      assert.match(read.content, /Keep both emergency exits clear/); assert.equal(read.provider, 'local_files'); sourceReads++;
+      return { title: 'Lobby safety note', body: quote, evidenceRefs: [{ eventId: read.eventId, quote }] };
+    }));
+    const sync = new ConnectorSync({ connectors: [connector], cursors: new CursorStore(store), engine });
+    const result = await sync.run(); assert.equal(result.results[0].failed, false);
+    await engine.whenSettled();
+    const task = Object.values(store.state.tasks).find(item => item.kind === 'standing_intent');
+    assert.ok(task, JSON.stringify(store.state.events)); assert.equal(task.preparedWork?.kind, 'draft', JSON.stringify(task.reasoning));
+    assert.equal(sourceReads, 1); assert.equal(state.calls, 1); assert.equal(state.validated, 1);
+    assert.equal(task.preparedWork.body, quote);
   });
 }

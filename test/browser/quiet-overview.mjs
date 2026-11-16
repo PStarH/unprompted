@@ -154,6 +154,7 @@ try {
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ checks, errors, output }, null, 2));
 } finally {
+  for (const context of browser.contexts()) await context.close();
   await browser.close();
   await fixture.close();
 }

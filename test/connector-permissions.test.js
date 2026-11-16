@@ -165,8 +165,8 @@ test('ambiguous write outcome persists and the same operation cannot dispatch tw
 
 test('MCP actions use the execution ledger, deduplicate and cannot outlive their user permission', async t => {
   const c = await fixture(t); let calls = 0, allowed = true;
-  const action = { taskId: c.taskId, serverId: 'fixture', tool: 'write_item', args: { title: 'After' }, isCurrent: () => true, check: () => allowed,
-    invoke: async () => { calls++; return { content: [{ type: 'text', text: 'accepted' }] }; } };
+  const action = { taskId: c.taskId, serverId: 'fixture', tool: 'write_item', args: { title: 'After' }, transfer: 'nonfinancial', schemaDigest: 'a'.repeat(64), isCurrent: () => true, check: () => allowed,
+    invoke: async (_signal,beforeDispatch) => { beforeDispatch(); calls++; return { content: [{ type: 'text', text: 'accepted' }] }; } };
   const result = await c.runtime.connectorActions.mcpWrite(action);
   assert.equal(result.state, 'accepted'); assert.equal(calls, 1);
   assert.equal((await c.runtime.connectorActions.mcpWrite(action)).alreadyDispatched, true); assert.equal(calls, 1);
@@ -192,7 +192,7 @@ test('concurrent duplicate requests retain the first dispatch guard and send onc
 
 for (const harness of ['standard', 'pi']) {
   test(`${harness} harness executes an authorized platform update through its actual model loop`, { skip: harness === 'pi' && !piSupported() }, async t => {
-    const c = await fixture(t); c.runtime.connectorActions.createGrant({ connectorId: 'github', confirmed: true });
+    const c = await fixture(t); c.runtime.connectorActions.createGrant({ connectorId: 'github', transfer: 'nonfinancial', confirmed: true });
     const args = { connectorId: 'github', request: input(c).request, verification: { request: { path: '/repos/owner/repo/issues/42' }, matches: [{ pointer: '/title', value: 'After' }] } };
     let calls = 0, reasoner;
     const answer = { nextStep: 'The provider update was verified.', probes: [] };
@@ -212,7 +212,7 @@ for (const harness of ['standard', 'pi']) {
         stream.push({ type: 'done', reason: message.stopReason, message }); stream.end(message); return stream;
       } } });
     }
-    c.engine.reasoner = reasoner;
+    c.engine.reasoner = c.engine.bindReasonerUsage(reasoner);
     c.engine.externalTools = scope => c.runtime.wrapReadTools(c.runtime.tools(scope), scope.taskId);
     c.runtime.scheduleTask(c.taskId, `platform-${harness}`); c.runtime.kick(); await c.engine.whenSettled();
     assert.equal(calls, 2, JSON.stringify({ error: reasoner.lastError, task: c.runtime.tasks.get(c.taskId).reasoningWork }));

@@ -11,9 +11,17 @@ Reads start when you connect a source. Writes do not. The server binds to localh
 - Dedicated Google send and Docs editing flows have their own action settings. See [Google Workspace](google.md).
 - General GitHub, Slack, Outlook, Notion, Google and Todoist API actions depend on actual provider permissions and the locally granted scope. Creating an Apple Note needs a folder grant.
 - Writable, destructive and unannotated MCP tools need explicit action access; importing configuration never grants writes.
+- A transaction allowance is a separate limit, off by default at zero. You confirm its currency, cumulative amount and finite expiry. It never grants a provider, destination or tool by itself.
+- Model token and fee limits are separate model settings, with daily UTC windows. Routing groups choose among saved models; they are not a quality evaluation.
 - The model cannot grant these permissions. An explicit `UNPROMPTED_SHADOW_MODE=true` blocks external writes.
 
 Each real action still needs your approval or a matching standing authorization. An unknown provider result is reconciled before another try. It is not treated as success.
+
+## Money, fees and confirmation
+
+Connecting a provider or MCP server, confirming a UI dialog, and granting a platform path are different steps. A UI confirmation is not provider authorization. An operation that may move money needs a finite transaction allowance, a separate confirmed financial contract for the exact tool or platform path, and the provider's own permissions. The allowance is off by default at zero, names one currency and expires independently. A funds cap alone never enables a tool.
+
+A provider accepting a request is not a verified payment. Without independent financial readback the amount stays held and unknown; it is neither a refund nor permission to retry the same action automatically. Model token and fee allowances are separate from transaction funds. Their fees are estimates from prices you confirm; missing prices and usage stay unknown, and unpriced calls are not free.
 
 ## What is stored
 

@@ -1,5 +1,8 @@
+import { bindReasonerTokenBudget } from './reasoner-scope.js';
 import { createReasoner } from './reasoning.js';
 import { DEFAULT_MODEL_PROTOCOL, MODEL_PROTOCOLS, isModelProtocol } from './model-protocol.js';
+import { requireAccountingContext, directModelRoutingContext } from './model-request.js';
+import { isModelControlFailure } from './model-control.js';
 
 export class ModelSetupError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status; }
@@ -35,16 +38,23 @@ export function modelEnvironment(settings) {
 }
 
 /** One real structured inference using invented content; never sends workspace data. */
-export async function validateModelSettings(settings, { fetchImpl, piRuntimeOptions, budgetEnv = {} } = {}) {
+export async function validateModelSettings(settings, { fetchImpl, piRuntimeOptions, budgetEnv = {},
+  tokenBudget = null, reasoningSessions = null, accountingContext = { scope: 'workspace' } } = {}) {
+  const context = requireAccountingContext(accountingContext);
+  if (context.scope !== 'workspace') {
+    throw Object.assign(new Error('Synthetic connection checks require workspace accounting scope.'), { code: 'TOKEN_ACCOUNTING_CONTEXT' });
+  }
   const limits = Object.fromEntries(['UNPROMPTED_MODEL_MAX_CALLS_PER_MINUTE', 'UNPROMPTED_MODEL_MAX_QUEUED', 'UNPROMPTED_MODEL_QUEUE_TIMEOUT_MS']
     .filter(key => budgetEnv[key] != null).map(key => [key, budgetEnv[key]]));
-  const reasoner = createReasoner({ ...limits, ...modelEnvironment(settings) }, { fetchImpl, piRuntimeOptions });
+  const reasoner = createReasoner({ ...limits, ...modelEnvironment(settings) }, { fetchImpl, piRuntimeOptions, tokenBudget, reasoningSessions });
+  if (tokenBudget) bindReasonerTokenBudget(reasoner, tokenBudget);
   if (!reasoner.available()) throw new ModelSetupError('MODEL_UNAVAILABLE', 'This model harness is unavailable. Choose the standard harness or install the Pi packages.');
   let result;
   try {
     result = await reasoner.interpretRequest({ subject: 'Cedar proposal',
-      body: 'Please update the Cedar proposal with sample size and conclusion, then send it to me.' }, 'connection-check');
+      body: 'Please update the Cedar proposal with sample size and conclusion, then send it to me.' }, 'connection-check', directModelRoutingContext(accountingContext));
   } catch (error) {
+    if (isModelControlFailure(error)) throw error;
     const status = Number(error.status);
     if (status === 401 || status === 403) throw new ModelSetupError('MODEL_AUTH_FAILED', 'The model provider rejected the key or model access. Check your API key and permissions.');
     if (status === 429) throw new ModelSetupError('MODEL_RATE_LIMITED', 'The model provider is rate limited or has insufficient quota. Check your provider account.');

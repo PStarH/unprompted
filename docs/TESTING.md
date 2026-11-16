@@ -87,6 +87,9 @@ npm run test:overview
 npm run test:appearance
 npm run test:mcp
 npm run test:durable-ui
+npm run test:model-controls
+npm run test:experience-trials
+npm run test:autonomy
 ```
 
 The command starts and stops an isolated local simulation with fresh temporary
@@ -132,6 +135,34 @@ Results go to `outputs/mcp-validation/`. The Node suite additionally verifies
 real Standard and Pi model/tool loops, task audit, native follow-up investigation,
 revocation, timeouts, process restart and private-file permissions. These are
 controlled protocol fixtures, not acceptance claims for third-party servers.
+
+`test:model-controls` checks the workspace model controls: explicit zero and
+unlimited Token budgets remain distinct, task and workspace limits stay separate,
+exact model-fee caps persist, while four-rate free pricing requires explicit
+confirmation, a concurrent price revision surfaces a conflict instead of
+overwriting newer rates,
+and stage routing with explicit fallback survives a reload. It uses the local
+scripted setup and does not activate a real model.
+
+`test:experience-trials` checks the Experience details surface: an unevaluated
+Experience asks for the missing independent behavior case instead of implying a
+pass; adding a bounded case appends to the loaded set; Evaluate uses the saved case
+through the real predicate and arbiter; Adopt records an attestation and rollback
+creates a candidate while marking the old pass stale; failed or stale detail loads
+and concurrent case-set changes do not write or overwrite data. It also checks the
+Chinese details surface.
+
+`test:autonomy` checks the task overview autonomy control at desktop and narrow
+widths: one visible YOLO control, a temporary YOLO permission and a time-bounded
+grant in the actual state, and confirmation that changing monetary inputs clears
+before an exact amount is saved.
+
+These four browser contracts (`test:mcp`, `test:model-controls`,
+`test:experience-trials` and `test:autonomy`) run in the pinned Ubuntu Chrome
+workflow with the same Playwright module and channel settings described below.
+They use local scripted provider and fixture responses; they do not measure
+real-model behavior, real payments, onboarding duration, or operation on other
+browsers or platforms. Check the latest workflow run for its current result.
 
 `test:first-run` exercises the actual 15-second demo in fresh English and
 Chinese browser contexts, plus the desktop simulation and its persistent setup

@@ -774,3 +774,9 @@ select[aria-expanded='true'] { border-color: var(--green); box-shadow: var(--rin
   #viewPreferences form[data-attention-settings] { grid-template-columns: minmax(0, 1fr); }
   #viewPreferences .grant-row { align-items: flex-start; flex-direction: column; gap: 10px; }
 }
+
+/* Keep the source account and repair status readable in narrow inspectors. */
+@media (max-width: 520px) {
+  #viewSources .source-connection-heading { grid-template-columns: 28px minmax(0, 1fr); }
+  #viewSources .source-connection-heading > .state-badge { grid-column: 2; grid-row: 2; justify-self: start; }
+}

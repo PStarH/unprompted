@@ -66,6 +66,19 @@ export function validClientSecret(value) {
     && !/^(?:xox[abprs]-|ntn_|gh[opusr]_|github_pat_|ya29\.|eyJ)/i.test(value);
 }
 
+/** A public Notion broker descriptor pins one exact HTTPS origin. Paths,
+ * queries, fragments and user information are rejected instead of normalized
+ * away, so a malformed broker field is never silently ignored. */
+export function validBrokerOrigin(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 255) return null;
+  let url;
+  try { url = new URL(value); }
+  catch { return null; }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
+  if (url.pathname !== '/' || !url.hostname) return null;
+  return url.origin;
+}
+
 /** Classify each OAuth provider entry as configured, missing or invalid without
  * returning application identifiers or secrets. */
 export function clientConfigurationStates(input) {
@@ -85,7 +98,11 @@ export function clientConfigurationStates(input) {
 
 function validClientEntry(id, provider, entry) {
   if (typeof entry !== 'object' || Array.isArray(entry) || !validPublicClientId(entry.clientId)) return false;
-  if (provider.flow !== 'code') return true;
+  if (provider.flow !== 'code') return entry.brokerUrl == null;
+  if (id !== 'notion' && entry.brokerUrl != null) return false;
+  if (entry.brokerUrl != null) {
+    return id === 'notion' && entry.clientSecret == null && Boolean(validBrokerOrigin(entry.brokerUrl));
+  }
   if ((id !== 'slack' || entry.clientSecret != null) && !validClientSecret(entry.clientSecret)) return false;
   return id !== 'slack' || entry.redirectUri == null || validSlackRedirectUri(entry.redirectUri);
 }
@@ -99,8 +116,20 @@ export function publicClientConfiguration(input) {
     if (entry == null) continue;
     if (typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Invalid connector client configuration.');
     const clientId = entry.clientId;
-    if (clientId == null && entry.clientSecret == null) continue;
+    const hasBroker = entry.brokerUrl != null;
+    if (clientId == null && entry.clientSecret == null && !hasBroker) continue;
     if (!validPublicClientId(clientId)) throw new Error('Invalid connector application Client ID.');
+    if (hasBroker) {
+      // The broker is a Notion-only public descriptor. A stray broker field on
+      // another provider, or a broker paired with an owner secret, is an
+      // ambiguous configuration and must fail closed rather than be dropped.
+      if (id !== 'notion') throw new Error('Only Notion supports a broker client descriptor.');
+      if (entry.clientSecret != null) throw new Error('A Notion client uses either a broker descriptor or a client secret, not both.');
+      const brokerUrl = validBrokerOrigin(entry.brokerUrl);
+      if (!brokerUrl) throw new Error('The Notion broker URL must be an exact HTTPS origin.');
+      result[id] = { clientId, brokerUrl };
+      continue;
+    }
     if (CONNECTION_PROVIDERS[id].flow === 'code') {
       if ((id !== 'slack' || entry.clientSecret != null) && !validClientSecret(entry.clientSecret)) throw new Error('Invalid connector application Client Secret.');
       if (id === 'slack' && entry.redirectUri != null && !validSlackRedirectUri(entry.redirectUri)) throw new Error('Slack public redirect URI must be a valid HTTPS URL.');

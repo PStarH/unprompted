@@ -11,7 +11,13 @@ const output = process.env.UNPROMPTED_BROWSER_OUTPUT || 'outputs/memory-explorer
 fs.mkdirSync(output, { recursive: true });
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-explorer-browser-'));
 const store = new SqliteStore(path.join(directory, 'state.json'));
-seedMemoryExplorerStore(store, 500); store.close();
+// The browser runs against the real server clock, while the native tests pin it
+// to 2026-11-02T12:00Z. Anchor the whole fixture once at seed time so relative
+// ages (several weeks ago vs recent) stay identical to the fixed-clock tests.
+const seeded = seedMemoryExplorerStore(store, 500, new Date(Date.now()).toISOString());
+store.close();
+const oldPreferenceDate = new Date(seeded.records.find(record => record.id === 'old-preference').createdAt)
+  .toLocaleDateString('en-US');
 const checks = [], errors = [], tasks = [];
 const check = id => checks.push({ id, passed: true });
 let browser, fixture, demo;
@@ -138,7 +144,9 @@ try {
   assert.match(await page.locator('.memory-human-context').innerText(), /Cedar review/);
   await page.screenshot({ path: `${output}/desktop-budget-context.png`, fullPage: true });
   await find('Find the preference 林晨 expressed several weeks ago', 'old-preference', 'Find a preference expressed several weeks ago');
-  assert.match(await page.locator('.memory-search-result').first().innerText(), /9\/18\/2026/);
+  assert.match(await page.locator('.memory-search-result').first().innerText(),
+    new RegExp(oldPreferenceDate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    `The historical result shows its seeded date ${oldPreferenceDate}`);
   await find('Find the correction from the previous Cedar task', 'budget-current', 'Find a correction made during a previous task');
   await selectInspectorSection('related');
   assert.match(await page.locator('.memory-inspector-context').innerText(), /replaces|Replaces/);

@@ -7,8 +7,10 @@ developers as `npm run demo`.
 
 | I want to… | Read |
 | --- | --- |
+| Measure long-running behaviour under synthetic faults | [Synthetic soak](SOAK_TESTING.md) |
 | Start using my real workspace | [Quick start](QUICKSTART.md) |
 | Connect accounts and recover authorization | [Account setup](ONBOARDING.md) |
+| Receive GitHub events promptly | [GitHub webhooks](GITHUB_WEBHOOKS.md) |
 | Understand each connector and build another | [Connectors](CONNECTORS.md) |
 | Provision apps once and onboard every user | [完整连接配置教程（中文）](CONNECTOR_SETUP.zh-CN.md) |
 | Configure connectors in Chinese | [连接器配置](CONNECTORS.zh-CN.md) |

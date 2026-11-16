@@ -3,6 +3,8 @@ import { durableError, iso, json, parse } from './database.js';
 import { readinessBlock } from './coordination.js';
 
 export const ATTENTION_DEFAULTS = Object.freeze({ maxInteractivePerHour: 3, minIntervalMs: 10 * 60000, digestWindowMs: 5 * 60000, issueCooldownMs: 60 * 60000, quietHours: null });
+const PRIORITY_RANK = Object.freeze({ low: 1, normal: 2, high: 3 });
+const RELEASE_BATCH = 30;
 export class AttentionBudget {
   constructor(database, options = {}) {
     this.database = database; this.db = database.db; this.options = { ...ATTENTION_DEFAULTS, ...parse(database.get('attention_policy', '{}')), ...options };
@@ -33,6 +35,92 @@ export class AttentionBudget {
     return { critical, deadlines, claims, notifications: { pending, usedThisHour: used, limitPerHour: this.options.maxInteractivePerHour, quietHours: this.quiet(now) },
       calendarAvailability: 'unavailable', focusAffinity: null };
   }
+  #revoked() { return new Set(parse(this.database.get('revoked_connectors', '[]')) || []); }
+  #priorityRank(notification) { return PRIORITY_RANK[notification?.priority] || 2; }
+  /**
+   * Effective selection rank, not the stored user priority. Waiting one full
+   * hour raises one level (low -> normal -> high); the cap equals high, so a
+   * two-hour-old low competes with a fresh high and wins the tie on queuedAt.
+   * The stored notification payload is never rewritten.
+   */
+  #effectiveRank(notification, createdAt, now) {
+    const queued = Date.parse(createdAt);
+    // Whole seconds match SQLite's unixepoch() ranking exactly, so admission
+    // and release cannot disagree about an hour boundary.
+    const age = Number.isFinite(queued) ? Math.max(0, Math.floor(now / 1000) - Math.floor(queued / 1000)) : 0;
+    return Math.min(3, this.#priorityRank(notification) + Math.floor(age / 3600));
+  }
+  /** One eligibility rule for both admission and release, so a new offer and a
+   * queued release cannot disagree about whether an old row can use a slot. */
+  #blockedReason(notification, revoked) {
+    const taskRow = notification?.taskId ? this.db.prepare('SELECT id,status,data_json FROM tasks WHERE id=?').get(notification.taskId) : null;
+    const task = taskRow && { ...parse(taskRow.data_json), id: taskRow.id, status: taskRow.status };
+    const connector = task?.sourceConnectorId || task?.connectorId || task?.request?.source?.connectorId;
+    return readinessBlock(this.db, task) || (task?.privacyInvalidated ? 'privacy_invalidated' : null) || (connector && revoked.has(connector) ? 'permission_revoked' : null);
+  }
+  /**
+   * A bounded page of due pending rows in effective-priority order. The rank is
+   * computed in SQL from the persisted created_at and priority so the ordering
+   * is identical across service instances and survives a restart. Only this
+   * page (at most 30 rows) is materialised in JavaScript.
+   */
+  #duePage(now, { interactiveOnly = false, cursor = null, excludeId = null } = {}) {
+    const filters = ["d.state IN ('pending','digest')", 'd.not_before<=?'];
+    const parameters = [iso(now), iso(now)];
+    if (interactiveOnly) filters.push("d.class='interactive'");
+    if (excludeId) { filters.push('d.id<>?'); parameters.push(excludeId); }
+    let after = '';
+    if (cursor) {
+      after = 'WHERE effective_rank<? OR (effective_rank=? AND (created_at>? OR (created_at=? AND id>?)))';
+      parameters.push(cursor.rank, cursor.rank, cursor.created_at, cursor.created_at, cursor.id);
+    }
+    parameters.push(RELEASE_BATCH);
+    return this.db.prepare(`WITH due AS (
+      SELECT d.*, MIN(3, CASE json_extract(d.notification_json,'$.priority') WHEN 'low' THEN 1 WHEN 'high' THEN 3 ELSE 2 END
+        + MAX(0, CAST((unixepoch(?) - unixepoch(d.created_at)) / 3600 AS INTEGER))) AS effective_rank
+      FROM notification_deliveries d WHERE ${filters.join(' AND ')}
+    ) SELECT * FROM due ${after} ORDER BY effective_rank DESC, created_at ASC, id ASC LIMIT ?`).all(...parameters);
+  }
+  /** True when an older, currently deliverable queued interaction belongs in
+   * the slot this new offer would otherwise take. Blocked, forgotten, revoked
+   * and not-yet-due rows are skipped so they cannot park unrelated resources. */
+  #hasDeliverableInteractionAhead(rank, now, excludeId) {
+    const revoked = this.#revoked();
+    let cursor = null;
+    for (;;) {
+      const rows = this.#duePage(now, { interactiveOnly: true, cursor, excludeId });
+      for (const row of rows) {
+        if (Number(row.effective_rank) < rank) return false;
+        const notification = parse(row.notification_json) || {};
+        if (!this.#blockedReason(notification, revoked)
+          && this.#evaluate(notification, row.class, row.issue_key, now).state === 'delivered') return true;
+      }
+      if (rows.length < RELEASE_BATCH) return false;
+      const last = rows[rows.length - 1];
+      cursor = { rank: last.effective_rank, created_at: last.created_at, id: last.id };
+    }
+  }
+  #evaluate(notification, notificationClass, issueKey, now) {
+    const critical = notificationClass === 'critical';
+    const used = this.db.prepare("SELECT COUNT(*) n FROM notification_deliveries WHERE class='interactive' AND delivered_at>=?").get(iso(now - 3600000)).n;
+    const last = this.db.prepare("SELECT MAX(delivered_at) at FROM notification_deliveries WHERE class!='critical'").get().at;
+    const repeated = this.db.prepare("SELECT 1 FROM notification_deliveries WHERE issue_key=? AND delivered_at>=? AND state!='resolved'").get(issueKey, iso(now - this.options.issueCooldownMs));
+    const activeCritical = this.db.prepare("SELECT 1 FROM notification_deliveries WHERE class='critical' AND state='delivered' LIMIT 1").get();
+    // Zero means "interactive delivery is off", not "queue forever". Without
+    // this branch `used >= 0` is always true and every non-critical
+    // notification stays pending, re-offered by releaseDue() forever.
+    const interactiveOff = this.options.maxInteractivePerHour === 0;
+    // High priority may skip the spacing between interruptions, but never the
+    // hourly ceiling, quiet hours, an unresolved critical notification, or a
+    // repeated issue. Priority changes pacing, not the budget itself.
+    const highPriority = notification.priority === 'high';
+    const deferred = !critical && (interactiveOff || activeCritical || this.quiet(now) || used >= this.options.maxInteractivePerHour || !highPriority && last && now - Date.parse(last) < this.options.minIntervalMs || repeated);
+    const state = deferred ? interactiveOff || ['informational', 'digest'].includes(notificationClass) ? 'digest' : 'pending' : 'delivered';
+    // A digest row is not waiting for a slot, so it gets no wake-up time;
+    // releaseDue() only selects rows whose not_before has arrived.
+    const notBefore = deferred && !interactiveOff ? iso(Math.max(now + this.options.digestWindowMs, last ? Date.parse(last) + this.options.minIntervalMs : 0)) : null;
+    return { deferred, state, notBefore, last, interactiveOff };
+  }
   offer(notification, { class: notificationClass = 'interactive', criticalConfigured = false, issueKey = notification.dedupeKey || notification.id, candidateId = null } = {}) {
     if (!['critical', 'interactive', 'informational', 'digest'].includes(notificationClass)) throw durableError('INVALID_NOTIFICATION', 'Unknown notification class.', 400);
     return this.database.atomic(() => {
@@ -43,30 +131,26 @@ export class AttentionBudget {
         if (existing.notification_json !== json(notification)) this.db.prepare('UPDATE notification_deliveries SET notification_json=?,class=? WHERE id=?').run(json(notification), notificationClass, existing.id);
         return { ...existing, class: notificationClass, notification_json: json(notification), notification };
       }
-      if (notificationClass === 'critical' && !criticalConfigured) notificationClass = 'interactive';
-      const critical = notificationClass === 'critical';
-      const used = this.db.prepare("SELECT COUNT(*) n FROM notification_deliveries WHERE class='interactive' AND delivered_at>=?").get(iso(now - 3600000)).n;
-      const last = this.db.prepare("SELECT MAX(delivered_at) at FROM notification_deliveries WHERE class!='critical'").get().at;
-      const repeated = this.db.prepare("SELECT 1 FROM notification_deliveries WHERE issue_key=? AND delivered_at>=? AND state!='resolved'").get(issueKey, iso(now - this.options.issueCooldownMs));
-      const activeCritical = this.db.prepare("SELECT 1 FROM notification_deliveries WHERE class='critical' AND state='delivered' LIMIT 1").get();
-      // Zero means "interactive delivery is off", not "queue forever". Without
-      // this branch `used >= 0` is always true and every non-critical
-      // notification stays pending, re-offered by releaseDue() forever.
-      const interactiveOff = this.options.maxInteractivePerHour === 0;
-      // High priority may skip the spacing between interruptions, but never the
-      // hourly ceiling, quiet hours, an unresolved critical notification, or a
-      // repeated issue. Priority changes pacing, not the budget itself.
-      const highPriority = notification.priority === 'high';
-      const deferred = !critical && (interactiveOff || activeCritical || this.quiet(now) || used >= this.options.maxInteractivePerHour || !highPriority && last && now - Date.parse(last) < this.options.minIntervalMs || repeated);
-      const state = deferred ? interactiveOff || ['informational', 'digest'].includes(notificationClass) ? 'digest' : 'pending' : 'delivered';
-      // A digest row is not waiting for a slot, so it gets no wake-up time;
-      // releaseDue() only selects rows whose not_before has arrived.
-      const notBefore = deferred && !interactiveOff ? iso(Math.max(now + this.options.digestWindowMs, last ? Date.parse(last) + this.options.minIntervalMs : 0)) : null;
+      const decision = this.#evaluate(notification, notificationClass, issueKey, now);
+      // A real user resolution starts a new queue life; a dedupe refresh or a
+      // denied release keeps the original queue age.
+      const queuedAt = existing && existing.state !== 'resolved' ? existing.created_at : at;
+      let state = decision.state, notBefore = decision.notBefore;
+      if (!decision.deferred && notificationClass === 'interactive'
+        && this.#hasDeliverableInteractionAhead(this.#effectiveRank(notification, queuedAt, now), now, existing?.id || null)) {
+        // The slot belongs to an older deliverable interaction at the same or a
+        // higher effective rank. Queue this one for the unified release rather
+        // than letting a fresh high-priority offer bypass the queue ordering.
+        state = 'pending';
+        const spacing = this.#priorityRank(notification) === 3 ? 0
+          : decision.last ? Date.parse(decision.last) + this.options.minIntervalMs : 0;
+        notBefore = iso(Math.max(now + this.options.digestWindowMs, spacing));
+      }
       const id = existing?.id || randomUUID();
       this.db.prepare(`INSERT INTO notification_deliveries VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
         class=excluded.class,state=excluded.state,notification_json=excluded.notification_json,created_at=excluded.created_at,
-        delivered_at=excluded.delivered_at,not_before=excluded.not_before`).run(id, key, issueKey, candidateId, notificationClass, state, json(notification), at, state === 'delivered' ? at : null, notBefore);
-      if (candidateId && deferred) this.db.prepare("UPDATE working_candidates SET state='NOTIFICATION_PENDING' WHERE id=?").run(candidateId);
+        delivered_at=excluded.delivered_at,not_before=excluded.not_before`).run(id, key, issueKey, candidateId, notificationClass, state, json(notification), queuedAt, state === 'delivered' ? at : null, notBefore);
+      if (candidateId && state !== 'delivered') this.db.prepare("UPDATE working_candidates SET state='NOTIFICATION_PENDING' WHERE id=?").run(candidateId);
       return { ...this.db.prepare('SELECT * FROM notification_deliveries WHERE id=?').get(id), notification };
     });
   }
@@ -81,28 +165,38 @@ export class AttentionBudget {
     return [...groups.values()];
   }
   releaseDue() {
-    const rows = this.db.prepare("SELECT * FROM notification_deliveries WHERE state IN ('pending','digest') AND not_before<=? ORDER BY created_at LIMIT 30").all(iso(this.database.now()));
-    const priorityRank = { low: 1, normal: 2, high: 3 };
-    rows.sort((left, right) => (priorityRank[parse(right.notification_json)?.priority] || 2) - (priorityRank[parse(left.notification_json)?.priority] || 2)
-      || String(left.created_at).localeCompare(String(right.created_at)));
-    const released = [];
-    const revoked = new Set(parse(this.database.get('revoked_connectors', '[]')) || []);
-    for (const row of rows) {
-      const notification = parse(row.notification_json);
-      const taskRow = notification?.taskId ? this.db.prepare('SELECT id,status,data_json FROM tasks WHERE id=?').get(notification.taskId) : null;
-      const task = taskRow && { ...parse(taskRow.data_json), id: taskRow.id, status: taskRow.status };
-      const connector = task?.sourceConnectorId || task?.connectorId || task?.request?.source?.connectorId;
-      const block = readinessBlock(this.db, task) || (task?.privacyInvalidated ? 'privacy_invalidated' : null) || (connector && revoked.has(connector) ? 'permission_revoked' : null);
-      if (block) {
-        this.database.atomic(() => this.db.prepare("UPDATE notification_deliveries SET state='pending',not_before=? WHERE id=? AND state IN ('pending','digest')").run(iso(this.database.now() + this.options.digestWindowMs), row.id));
-        continue;
+    const now = this.database.now(), released = [];
+    let cursor = null;
+    for (;;) {
+      const rows = this.#duePage(now, { cursor });
+      for (const row of rows) {
+        // This is the module-controlled re-offer path: it keeps the original
+        // queuedAt, re-checks budget/quiet/critical inside the transaction and
+        // bypasses the new-offer admission check that could otherwise make two
+        // queued rows defer to each other forever.
+        const offered = this.database.atomic(() => {
+          const current = this.db.prepare("SELECT * FROM notification_deliveries WHERE id=? AND state IN ('pending','digest')").get(row.id);
+          if (!current) return null;
+          const currentNotification = parse(current.notification_json) || {}, atNow = this.database.now();
+          // Eligibility can change after page selection. Observe it under the
+          // same write lock as the decision, including newly revoked scopes.
+          if (this.#blockedReason(currentNotification, this.#revoked())) {
+            this.db.prepare("UPDATE notification_deliveries SET state='pending',not_before=? WHERE id=?")
+              .run(iso(atNow + this.options.digestWindowMs), current.id);
+            return null;
+          }
+          const decision = this.#evaluate(currentNotification, current.class, current.issue_key, atNow);
+          const changed = this.db.prepare("UPDATE notification_deliveries SET state=?,delivered_at=?,not_before=? WHERE id=? AND state IN ('pending','digest')")
+            .run(decision.state, decision.state === 'delivered' ? iso(atNow) : null, decision.notBefore, current.id).changes;
+          if (!changed) return null;
+          if (decision.state === 'pending' && current.candidate_id) this.db.prepare("UPDATE working_candidates SET state='NOTIFICATION_PENDING' WHERE id=?").run(current.candidate_id);
+          return this.db.prepare('SELECT * FROM notification_deliveries WHERE id=?').get(current.id);
+        });
+        if (offered?.state === 'delivered') released.push(offered);
       }
-      this.database.atomic(() => {
-        // Reuse budget calculation without losing the pending decision.
-        this.db.prepare("UPDATE notification_deliveries SET state='resolved' WHERE id=?").run(row.id);
-        const offered = this.offer(parse(row.notification_json), { class: row.class, issueKey: row.issue_key, candidateId: row.candidate_id });
-        if (offered.state === 'delivered') released.push(offered);
-      });
+      if (rows.length < RELEASE_BATCH) break;
+      const last = rows[rows.length - 1];
+      cursor = { rank: last.effective_rank, created_at: last.created_at, id: last.id };
     }
     return released;
   }

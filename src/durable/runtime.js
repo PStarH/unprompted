@@ -1,10 +1,18 @@
+import { TransactionMoneyService } from './transaction-money.js';
 import { ConnectorActions } from './connector-actions.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, createHash } from 'node:crypto';
 import { durableError, iso, json, parse } from './database.js';
-import { DurableWorker, classifyFailure } from './jobs.js';
+import { DurableWorker, classifyFailure, effectiveJobAttempts } from './jobs.js';
+import { isModelControlFailure } from '../model-control.js';
+import { TokenBudgetService } from './token-budget.js';
+import { bindReasonerTokenBudget, bindReasonerPrivateSessions, nativeClassicReasoner } from '../reasoner-scope.js';
+import { guardModelContext } from '../model-request.js';
+import { DurableReasoningSessions, stableDigest } from './reasoning-sessions.js';
+import { ModelCommits } from './model-commits.js';
 import { FeatureRegistry, ActivationPolicies, WorkingContextIndex } from './context.js';
-import { ExperienceService, arbitrateExperiences, effectDigest } from './experience.js';
+import { ExperienceService, arbitrateExperiences, archiveAuthorization, effectDigest, experienceContentDigest } from './experience.js';
+import { ExperienceTrialService } from './experience-trials.js';
 import { ToolExecutionLedger } from './execution.js';
 import { taskArtifactLifecycle } from './artifact-lifecycle.js';
 import { ForgetService } from './privacy.js';
@@ -16,7 +24,7 @@ import { normalizeAddress, isTrustedThreadSender } from '../commitments.js';
 import { unquotedMessageFields } from '../commitments.js';
 import { isAutomatedSender } from '../requests.js';
 import { PAIR_EVALUATOR_VERSION, UNATTACHED_WINDOW_MS, validatePairAssessment } from './pair-evidence.js';
-import { validateStateDelta, confirmsCancellation } from './state-delta.js';
+import { validateStateDelta, confirmsCancellation, ensureStateDeltaSchema } from './state-delta.js';
 import { applyTextChanges } from '../document-delivery.js';
 import { activationFlags, setActivationFlags } from './flags.js';
 import { StandingIntents } from './standing-intents.js';
@@ -32,6 +40,7 @@ import { eventContext } from '../event-context.js';
 import { planningContextManifest } from './planning-context.js';
 import { effectiveTaskRequest } from '../task-guidance.js';
 import { MemorySpaceService } from './memory-space.js';
+import { eligibleMemoryIds } from './memory.js';
 import { taskMemoryTools, isLocalMemoryWriter } from './memory-tools.js';
 import { observeFailureSignals } from '../observation.js';
 
@@ -54,6 +63,7 @@ export class DurableRuntime {
       || !Number.isInteger(maxPairCandidates) || maxPairCandidates < 1 || maxPairCandidates > 10) throw durableError('INVALID_PAIR_POLICY', 'Pair matching needs bounded window and candidate limits.', 400);
     if (!Number.isInteger(startupRevalidationLimit) || startupRevalidationLimit < 0 || startupRevalidationLimit > 100) throw durableError('INVALID_STARTUP_POLICY', 'Startup revalidation needs a bounded task limit.', 400);
     this.engine = engine; this.store = engine.store; this.database = this.store.database; this.db = this.database.db;
+    ensureStateDeltaSchema(this.database);
     this.unattachedWindowMs = unattachedWindowMs; this.maxPairCandidates = maxPairCandidates; this.startupRevalidationLimit = startupRevalidationLimit;
     const applied = parse(this.database.get('rsi_applied', 'null'));
     if (Number.isFinite(applied?.pairWindowMs) && applied.pairWindowMs >= 60000 && applied.pairWindowMs <= 90 * 86400000) this.unattachedWindowMs = applied.pairWindowMs;
@@ -63,19 +73,43 @@ export class DurableRuntime {
     this.memorySpace = new MemorySpaceService(this);
     this.registry = new FeatureRegistry(); this.policies = new ActivationPolicies(this.database, this.registry);
     this.context = new WorkingContextIndex(this.database); this.experiences = new ExperienceService(this.database, { jobs: this.jobs, registry: this.registry });
+    this.trials = new ExperienceTrialService(this.database, { experiences: this.experiences, registry: this.registry });
     this.replay = new OfflineReplay(this.database, this.memory);
     this.intents = new StandingIntents(this.database, standingIntentGlobalBudget ? { globalBudget: standingIntentGlobalBudget } : undefined);
     this.usage = new UsageLedger(this.database);
     this.coordination = new Coordination(this.database);
     this.rsi = new BoundedRsi(this.database, { pairWindowMs: this.unattachedWindowMs, maxPairCandidates: this.maxPairCandidates });
     this.gateway = engine.toolGateway;
-    this.ledger = new ToolExecutionLedger(this.database, { tasks: this.tasks, jobs: this.jobs, experiences: this.experiences });
+    this.transactionMoney = new TransactionMoneyService(this.database);
+    this.ledger = new ToolExecutionLedger(this.database, { tasks: this.tasks, jobs: this.jobs, experiences: this.experiences, transfers: this.transactionMoney });
     this.artifacts = new ArtifactActions(this, { connectionFor: artifactConnectionFor });
+    // Read-only current-grant observation for archive targets. It runs the
+    // existing matcher, performs no provider I/O and never creates a grant.
+    this.experiences.bindAuthorizationCheck(experience => archiveAuthorization(experience, this.artifacts));
     this.connectorActions = new ConnectorActions(this);
     this.owner = `runtime:${process.pid}:${randomUUID()}`; this.scope = new AsyncLocalStorage(); this.closed = false; this.pending = null; this.kickAgain = false;
+    this.tokenBudget = engine.reasoner?.tokenBudget?.database === this.database
+      ? engine.reasoner.tokenBudget : new TokenBudgetService(this.database);
+    this.tokenBudget.attachWakeQueue(this.jobs);
+    this.bindModelBudget(engine.reasoner);
     this.generateExperience = generateExperience;
-    this.privacy = new ForgetService(this.database, { jobs: this.jobs, memory: this.memory, store: this.store,
-      onInvalidate: () => { this.memory.invalidate(); engine.changed(); this.kick(); } });
+    this.privacy = new ForgetService(this.database, { jobs: this.jobs, memory: this.memory, store: this.store, experiences: this.experiences,
+      onInvalidate: ({ taskIds = [], experienceIds = [] } = {}) => {
+        this.memory.invalidate(); engine.changed();
+        // Only tasks whose last planning context actually selected an affected
+        // Experience need to run again. A revocation elsewhere in the workspace
+        // must not restart every waiting task.
+        const experiences = new Set(experienceIds);
+        if (experiences.size) for (const task of Object.values(this.store.state.tasks || {})) {
+          if (!this.experienceChangeAffects(task, experiences) || this.hasQueuedTaskJob(task.id)) continue;
+          this.scheduleTask(task.id, 'experience_invalidated');
+        }
+        if (taskIds.length) for (const taskId of taskIds) {
+          const task = this.tasks.get(taskId);
+          if (task && !this.hasQueuedTaskJob(taskId)) this.scheduleTask(taskId, 'privacy_invalidated');
+        }
+        this.kick();
+      } });
     // A dead reconciliation job is the end of that task's recovery path, so it
     // must surface the uncertain action instead of letting the in-flight guard
     // swallow the only notice the user would get.
@@ -91,7 +125,7 @@ export class DurableRuntime {
       }
     }, recovery: job => this.recover(job) });
     this.learningWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'learning', id: `${this.owner}:learning`, handlers: {
-      compile_experience: (job, guard) => this.experiences.compile(job, summary => this.compile(summary, job), guard)
+      compile_experience: (job, guard) => this.runCompilation(job, guard)
     }, recovery: job => this.recover(job) });
     // Publishing can run for its full deadline. Reconciliation lives on its own
     // queue so a hung publish cannot delay another task's uncertain write.
@@ -110,6 +144,134 @@ export class DurableRuntime {
     this.timer = setInterval(() => this.kick(), tickMs); this.timer.unref?.();
   }
   current() { return this.scope.getStore(); }
+  bindModelBudget(reasoner) {
+    bindReasonerTokenBudget(reasoner, this.tokenBudget);
+    reasoner?.modelMoney?.attachWakeQueue(this.jobs);
+    if (nativeClassicReasoner(reasoner)) {
+      this.reasoningSessions ||= reasoner.reasoningSessions || new DurableReasoningSessions(this.database);
+      this.modelCommits ||= new ModelCommits(this.store, this.reasoningSessions);
+      bindReasonerPrivateSessions(reasoner, this.reasoningSessions);
+    }
+    return reasoner;
+  }
+  interpretModelContext(taskId, work) {
+    return this.taskModelContext(taskId, work, { stage: 'interpret', catalogVersion: 'interpret/no-tools/v1' });
+  }
+  probeModelContext(taskId, work, toolContextKey) {
+    return this.taskModelContext(taskId, work, { stage: 'planning', catalogVersion: stableDigest(toolContextKey) });
+  }
+  taskModelContext(taskId, work, { stage, catalogVersion, extraCurrent = null }) {
+    if (!nativeClassicReasoner(this.engine.reasoner)) return null;
+    const scope = this.current();
+    if (!scope?.job || scope.taskId !== taskId || !scope.run || !this.canRun(taskId)) {
+      throw durableError('LEASE_LOST', 'Private model work requires the current native task run.');
+    }
+    const task = this.tasks.get(taskId), job = scope.job, reasoner = this.engine.reasoner;
+    const authority = () => stableDigest({ shadow: this.engine.policy.shadow, rules: this.engine.policy.rules });
+    const authorityVersion = authority(), modelVersion = this.database.get('model_version', '0');
+    const privacyEpoch = this.database.get('privacy_epoch');
+    return this.modelCommits.context({ scope: 'task', taskId, key: work.key, stage, owner: { kind: 'job', job },
+      bindings: { authorityVersion, privacyEpoch: task.privacyEpoch, contextVersion: work.durableFence.contextVersion,
+        inputVersion: task.inputVersion, planningContextRevision: task.planningContextRevision || 0, modelVersion,
+        catalogVersion }, sourceRefs: [{ kind: 'task', id: taskId }],
+      isCurrent: () => !this.closed && !this.suspended && this.engine.reasoner === reasoner && authority() === authorityVersion
+        && this.database.get('model_version', '0') === modelVersion && this.database.get('privacy_epoch') === privacyEpoch
+        && this.jobs.owns(job) && this.isCurrent(taskId, work.durableFence) && (!extraCurrent || extraCurrent() === true) });
+  }
+  discoveryModelContext(eventId, extraCurrent) {
+    if (!nativeClassicReasoner(this.engine.reasoner)) return null;
+    const scope = this.current(), job = scope?.job;
+    if (!job || job.task_id != null || !this.canDiscover(eventId)) throw durableError('LEASE_LOST', 'Private discovery requires its current workspace job.');
+    const reasoner = this.engine.reasoner, privacyEpoch = this.database.get('privacy_epoch'), modelVersion = this.database.get('model_version', '0');
+    const contextVersion = this.database.get('context_version', '0');
+    const authority = () => stableDigest({ shadow: this.engine.policy.shadow, rules: this.engine.policy.rules });
+    const authorityVersion = authority();
+    const payload = this.store.state.events.find(event => event.id === eventId)?.payload;
+    const inputVersion = stableDigest(payload);
+    return this.modelCommits.context({ scope: 'workspace', key: `discovery:${eventId}:${stableDigest({ privacyEpoch, modelVersion, contextVersion, authorityVersion, inputVersion })}`,
+      stage: 'discovery', owner: { kind: 'job', job }, sourceRefs: [{ kind: 'event', id: eventId }],
+      bindings: { authorityVersion, privacyEpoch, contextVersion, inputVersion, catalogVersion: 'discovery/no-tools/v1', modelVersion },
+      isCurrent: () => !this.closed && !this.suspended && this.engine.reasoner === reasoner && this.canDiscover(eventId)
+        && this.database.get('model_version', '0') === modelVersion && this.database.get('context_version', '0') === contextVersion
+        && this.database.get('privacy_epoch') === privacyEpoch && authority() === authorityVersion && extraCurrent() === true });
+  }
+  activationMemoryCurrent(memoryContext) {
+    const memories = memoryContext.memories || [];
+    const eligible = eligibleMemoryIds(this.database, memories.map(item => item.id));
+    return memories.every(item => {
+      if (!eligible.has(item.id)) return false;
+      const current = this.memorySpace.get(item.id).memory;
+      return (item.version == null || current.version === item.version)
+        && (item.expectedVersion == null || current.expectedVersion === item.expectedVersion);
+    });
+  }
+  activationModelContext(job, { key, input, memoryContext, eventIds, extraCurrent }) {
+    if (!nativeClassicReasoner(this.engine.reasoner)) return null;
+    if (!job || job.task_id != null || !this.jobs.owns(job)) throw durableError('LEASE_LOST', 'Activation requires its current workspace job.');
+    const reasoner = this.engine.reasoner, modelVersion = this.database.get('model_version', '0');
+    const privacyEpoch = this.database.get('privacy_epoch'), contextVersion = this.database.get('context_version', '0');
+    const authority = () => stableDigest({ shadow: this.engine.policy.shadow, rules: this.engine.policy.rules });
+    const authorityVersion = authority(), memories = memoryContext.memories || [];
+    const memoryCurrent = () => this.activationMemoryCurrent(memoryContext);
+    return this.modelCommits.context({ scope: 'workspace', stage: 'discovery', owner: { kind: 'job', job },
+      key: `${key}:${stableDigest({ input, memoryContext, authorityVersion, modelVersion, privacyEpoch, contextVersion })}`,
+      bindings: { authorityVersion, modelVersion, privacyEpoch, contextVersion, inputVersion: stableDigest({ input, memoryContext }), catalogVersion: 'activation/no-tools/v1' },
+      sourceRefs: [...eventIds.map(id => ({ kind: 'event', id })), ...memories.map(item => ({ kind: 'memory', id: item.id }))],
+      isCurrent: () => !this.closed && !this.suspended && this.engine.reasoner === reasoner && this.jobs.owns(job)
+        && this.database.get('model_version', '0') === modelVersion && this.database.get('privacy_epoch') === privacyEpoch
+        && this.database.get('context_version', '0') === contextVersion && authority() === authorityVersion
+        && eventIds.every(id => !this.privacy.forgotten('event', id)) && memoryCurrent() && extraCurrent() === true });
+  }
+  modelAccountingContext({ taskId = null, job = this.current()?.job } = {}) {
+    if (this.closed || job && !this.jobs.owns(job)) throw durableError('LEASE_LOST', 'This model invocation no longer owns its worker lease.');
+    if (job && (job.task_id || null) !== taskId) throw durableError('TOKEN_ACCOUNTING_CONTEXT', 'Model scope must match the owning job.');
+    if (taskId !== null && !this.tasks.get(taskId)) throw durableError('TOKEN_ACCOUNTING_CONTEXT', 'Model scope requires an existing workspace task.');
+    const fence = taskId === null ? null : this.capture(taskId);
+    const reasoner = this.engine.reasoner, privacyEpoch = this.database.get('privacy_epoch'), modelVersion = this.database.get('model_version', '0');
+    return guardModelContext(Object.freeze(taskId === null ? { scope: 'workspace' } : { scope: 'task', taskId }), () =>
+      !this.closed && !this.suspended && this.engine.reasoner === reasoner
+      && this.database.get('privacy_epoch') === privacyEpoch && this.database.get('model_version', '0') === modelVersion
+      && (!job || this.jobs.owns(job)) && (taskId === null || this.isCurrent(taskId, fence)));
+  }
+  budgetRetryAllowed({ taskId = null, eventId = null } = {}) {
+    const scope = this.current();
+    if (!scope?.job || scope.job.last_error_class !== 'budget' || !this.jobs.owns(scope.job)) return false;
+    return taskId !== null ? this.canRun(taskId) : eventId !== null && this.canDiscover(eventId);
+  }
+  reasoningFailureCommitOptions(error, expectedFence = null, { nativeModelFailure = false } = {}) {
+    if (!isModelControlFailure(error) && !(nativeModelFailure === true && error && typeof error === 'object')) return undefined;
+    const scope = this.current(), job = scope?.job;
+    if (expectedFence?.jobId && (!job || job.id !== expectedFence.jobId || job.lease_token !== expectedFence.leaseToken)) {
+      throw durableError('LEASE_LOST', 'The model failure no longer belongs to this worker invocation.');
+    }
+    if (!job) return undefined;
+    scope.reasoningFailure = error;
+    // Capture this invocation's owner, not a later job found by task id. The
+    // store runs this hook inside the transaction that syncs the work state.
+    return { afterSync: () => {
+      try {
+        // The durable claim must not become due before its persisted reasoning
+        // checkpoint. Otherwise the worker can skip the still-delayed retry and
+        // incorrectly complete a job that has an uncommitted model result.
+        const work = scope.taskId ? this.store.state.tasks[scope.taskId]?.reasoningWork
+          : scope.eventId ? this.store.state.events.find(event => event.id === scope.eventId)?.reasoning : null;
+        const sameOwner = scope.taskId ? work?.durableFence?.jobId === job.id && work.durableFence.leaseToken === job.lease_token
+          : Boolean(scope.eventId && expectedFence?.jobId === job.id && expectedFence.leaseToken === job.lease_token);
+        const retryAt = sameOwner && work.status === 'failed' && work.retryable && !work.terminalReason
+          ? Date.parse(work.retryAt) : NaN;
+        const failure = Number.isFinite(retryAt) && retryAt > this.database.now()
+          ? Object.create(error, { retryAfterMs: { value: Math.max(Number(error.retryAfterMs) || 0, retryAt - this.database.now()) } })
+          : error;
+        return this.jobs.fail(job, failure, { reasoningTerminal: nativeModelFailure === true && sameOwner && work?.status === 'failed'
+          && Boolean(work.terminalReason || work.retryable === false) });
+      }
+      catch (failure) { scope.reasoningFailure = failure; throw failure; }
+    } };
+  }
+  captureReasoningFailure(error) {
+    const scope = this.current();
+    if (scope?.job && isModelControlFailure(error)) scope.reasoningFailure = error;
+  }
   artifactLifecycle(taskId) {
     const task = this.tasks.get(taskId);
     if (!task) throw durableError('TASK_NOT_FOUND', 'This task does not exist.', 404);
@@ -208,20 +370,108 @@ export class DurableRuntime {
   canRun(taskId) {
     const scope = this.current();
     if (!scope || scope.taskId !== taskId || !scope.run || !this.jobs.owns(scope.job)) return false;
-    try { this.tasks.preResume(scope.run, scope.job); return true; } catch { return false; }
+    try { this.tasks.preResume(scope.run, scope.job); return this.planningContextCurrent(taskId); } catch { return false; }
+  }
+  /** Check consumed native context against the live clock and sources, not
+   * only the workspace version. No writes or model/provider calls occur. */
+  planningContextCurrent(taskId) {
+    const manifest = this.contextManifest(taskId) || this.tasks.get(taskId)?.contextManifest;
+    if (!manifest) return true;
+    const selected = manifest.selected || [], deferred = manifest.deferred || [];
+    if (!Array.isArray(selected) || !Array.isArray(deferred) || selected.length + deferred.length > 64) return false;
+    const refs = [...selected, ...deferred];
+    const memoryIds = refs.filter(item => item?.kind === 'memory').map(item => item.id);
+    const eligible = eligibleMemoryIds(this.database, memoryIds);
+    return refs.every(item => {
+      if (item?.kind === 'memory') {
+        if (!eligible.has(item.id)) return false;
+        if (item.version != null || item.expectedVersion != null) {
+          // Legacy memories expose an ISO edit token as expectedVersion while
+          // their SQL retrieval projection retains a numeric version. Keep the
+          // two domains separate and verify every captured token.
+          const current = this.memorySpace.get(item.id).memory;
+          if (item.version != null && current.version !== item.version) return false;
+          if (item.expectedVersion != null && current.expectedVersion !== item.expectedVersion) return false;
+        }
+        return true;
+      }
+      if (item?.kind === 'experience') {
+        const experience = this.experiences.get(item.id);
+        return experience?.status === 'active' && this.experiences.validTrialPass(experience);
+      }
+      return false;
+    });
+  }
+  assertPlanningContextCurrent(taskId) {
+    if (!this.planningContextCurrent(taskId)) {
+      throw Object.assign(durableError('CONTEXT_CHANGED', 'Planning context expired or changed. Rebuild it before continuing.', 409), { definitiveNoEffect: true });
+    }
+  }
+  #invalidateExpiredPlanning(taskId, run, job) {
+    this.tasks.assertRun(run, { job, allowDirty: true });
+    this.store.mutate(state => {
+      const task = state.tasks[taskId];
+      if (!task) return;
+      const next = (task.planningContextRevision || 0) + 1;
+      if (!Number.isSafeInteger(next) || next < 1) throw durableError('CONTEXT_CHANGED', 'The planning revision requires repair.');
+      task.planningContextRevision = next;
+      task.modelReview = null; task.reasoningWork = null; task.reasoning = null;
+      task.reasoningAttemptedFor = null; task.mcpInvestigatedFor = null; task.mcpInvestigation = null;
+      if (task.draft?.userEdited) task.userDraftStale = true;
+      else task.draft = null;
+      delete task.preparedWork;
+      task.contextReadRequired = true;
+      task.status = 'waiting_for_information'; task.reason = 'Planning context changed. Rechecking current sources.';
+    });
   }
   capture(taskId) {
-    const task = this.tasks.get(taskId);
+    const task = this.tasks.get(taskId), selection = task?.draft?.experienceTrial;
     return task && { inputVersion: task.inputVersion, runGeneration: task.runGeneration, privacyEpoch: task.privacyEpoch,
-      contextVersion: Number(this.database.get('context_version')), jobId: this.current()?.job?.id || null, leaseToken: this.current()?.job?.lease_token || null };
+      contextVersion: Number(this.database.get('context_version')), jobId: this.current()?.job?.id || null, leaseToken: this.current()?.job?.lease_token || null,
+      planningContextRevision: task.planningContextRevision || 0, experienceTrial: selection ? { ...selection } : null };
   }
   isCurrent(taskId, fence, { allowDirty = false } = {}) {
     const task = this.tasks.get(taskId);
     if (!task || !fence || task.privacyInvalidated || task.control?.paused || ['cancelled', 'completed'].includes(task.status)
       || task.privacyEpoch !== fence.privacyEpoch || task.runGeneration !== fence.runGeneration || !allowDirty && task.inputVersion !== fence.inputVersion
-      || Number(this.database.get('context_version')) !== fence.contextVersion) return false;
+      || Number(this.database.get('context_version')) !== fence.contextVersion
+      || (task.planningContextRevision || 0) !== (fence.planningContextRevision || 0) || !this.planningContextCurrent(taskId)) return false;
     if (fence.jobId) { const job = this.jobs.get(fence.jobId); if (!job || job.lease_token !== fence.leaseToken || !this.jobs.owns(job)) return false; }
+    // A supervised draft preview is bound to the exact Experience revision,
+    // pass, case set and authorization it was prepared under. The database
+    // clock, not a cached context version, decides whether a selected pass has
+    // expired while the preview was in flight.
+    if (fence.experienceTrial) {
+      const live = task.draft?.experienceTrial;
+      if (!live || live.stepId !== fence.experienceTrial.stepId || live.experienceId !== fence.experienceTrial.experienceId
+        || live.revision !== fence.experienceTrial.revision) return false;
+      if (!this.selectedTrialCurrent(fence.experienceTrial)) return false;
+    }
     return true;
+  }
+  /** Read-only check for a selected supervised trial. It never creates a grant
+   * and never starts provider I/O. */
+  selectedTrialCurrent(selection) {
+    if (!selection) return true;
+    const experience = this.experiences.get(selection.experienceId);
+    if (!experience || !['active', 'candidate'].includes(experience.status)) return false;
+    if (selection.revision != null && experience.revision !== selection.revision) return false;
+    if (selection.contentDigest && experienceContentDigest(experience) !== selection.contentDigest) return false;
+    if (this.experiences.sourceUnavailable(experience.id) || this.experiences.sourceRevoked(experience.id)) return false;
+    if (!this.experiences.authorizationValid(experience)) return false;
+    if (selection.passExpiresAt && !(Date.parse(selection.passExpiresAt) > this.database.now())) return false;
+    if (selection.caseSetVersion != null) {
+      const current = this.experiences.caseSetState(experience.id);
+      if (current.version !== selection.caseSetVersion || current.digest !== selection.caseSetDigest) return false;
+    }
+    return true;
+  }
+  experienceChangeAffects(task, experienceIds) {
+    const manifest = task?.contextManifest;
+    if (task?.draft?.experienceTrial?.experienceId && experienceIds.has(task.draft.experienceTrial.experienceId)) return true;
+    if (!manifest) return false;
+    return [manifest.selected, manifest.deferred, manifest.overridden].some(list => Array.isArray(list)
+      && list.some(item => item.kind === 'experience' && experienceIds.has(item.id)));
   }
   scheduleTask(taskId, reason = 'context') {
     const task = this.tasks.get(taskId);
@@ -395,11 +645,11 @@ export class DurableRuntime {
     const memories = this.memoryGuidance(matches, scopes);
     return { version, memories };
   }
-  async loadContext(task, run) {
-    try { return this.buildContext(task, run, await this.#preparedMemories(task)); }
+  async loadContext(task, run, options = {}) {
+    try { return this.buildContext(task, run, await this.#preparedMemories(task), options); }
     catch (error) { if (error.code === 'CONTEXT_CHANGED') error.status = 503; throw error; }
   }
-  buildContext(task, run, prepared = null) {
+  buildContext(task, run, prepared = null, { purpose = 'automatic', allowedExperienceId = null } = {}) {
     this.experiences.refreshStaleness();
     const version = prepared?.version ?? Number(this.database.get('context_version'));
     if (prepared && Number(this.database.get('context_version')) !== prepared.version) throw durableError('CONTEXT_CHANGED', 'The retrieval context version is stale.');
@@ -408,7 +658,7 @@ export class DurableRuntime {
     if (!prepared && this.memory.usesAsyncEncoder()) throw durableError('ASYNC_EMBEDDING', 'Prepare memories before searching inside a transaction.', 400);
     const memoryScopes = this.memoryScopesFor(task);
     const memories = prepared ? prepared.memories : this.memoryGuidance(this.memory.search(`${task.subject || ''} ${task.request?.text || ''}`, { scopes: memoryScopes, limit: 8, expectedContextVersion: version }), memoryScopes);
-    const experiences = this.experiences.retrieve({ scopes, features, contextVersion: version });
+    const experiences = this.experiences.retrieve({ scopes, features, contextVersion: version, purpose, allowedExperienceId });
     const activation = this.policies.evaluate(features, scopes, version);
     const arbitration = arbitrateExperiences({ policies: activation.policyIds.map(id => { const policy = this.policies.get(id); return { ...policy, directiveKey: policy.effect.directiveKey || null }; }), experiences });
     const events = this.db.prepare(`SELECT e.id,e.event_json FROM durable_inbox e JOIN task_events a ON a.event_id=e.id
@@ -546,6 +796,7 @@ export class DurableRuntime {
         signal?.throwIfAborted();
         this.jobs.assert(job);
         if (this.tasks.hasPendingSemantic(task.id)) { this.tasks.finish(run, job, 'waiting'); return; }
+        if (!this.planningContextCurrent(task.id)) this.#invalidateExpiredPlanning(task.id, run, job);
         const current = this.tasks.assertRun(run, { job, allowDirty: true });
         const context = await this.loadContext(current, run); this.current().context = context; this.current().contextReadOffsets = new Map();
         this.store.mutateIfChanged(state => {
@@ -570,12 +821,15 @@ export class DurableRuntime {
         this.experiences.step({ taskRunId: run.id, logicalStepId: `context:${run.input_version}`, planVersion: segment + 1, stepKind: 'context_revalidation', expectedEffect: { contextVersion: context.version },
           experiences: context.experiences.map(experience => ({ id: experience.id, relation: 'predicate_matched' })) });
         const pending = this.store.state.tasks[task.id]?.reasoningWork;
-        if (pending && ['pending', 'running', 'failed'].includes(pending.status) && pending.inputVersion === current.inputVersion) this.engine.retryPendingReasoning(task.id);
+        if (pending && ['pending', 'running', 'failed', 'budget_deferred'].includes(pending.status) && pending.inputVersion === current.inputVersion) this.engine.retryPendingReasoning(task.id, { now: this.database.now() });
         else this.engine.recheckTaskGuidance(task.id);
         await this.engine.whenSettled();
+        if (!this.jobs.owns(job)) return;
+        if (this.current()?.reasoningFailure) throw this.current().reasoningFailure;
         if (this.tasks.hasPendingSemantic(task.id)) { this.tasks.finish(run, job, 'waiting'); return; }
         const latest = this.tasks.get(task.id);
         if (!latest || latest.privacyInvalidated || latest.runGeneration !== run.run_generation || latest.privacyEpoch !== run.privacy_epoch) return;
+        if (!this.planningContextCurrent(task.id)) continue;
         if (latest.inputVersion === run.input_version && Number(this.database.get('context_version')) === context.version) {
           this.tracePlan(latest, run, context);
           this.tasks.acknowledgeEvidence(run, job);
@@ -586,6 +840,8 @@ export class DurableRuntime {
         }
       }
       this.tasks.finish(run, job, 'waiting');
+      if (!this.planningContextCurrent(task.id)) this.jobs.enqueue({ type: 'task_continue', taskId: task.id,
+        key: `planning-context:${job.id}`, payload: { taskId: task.id } });
       const pending = this.db.prepare("SELECT id FROM task_signals WHERE task_id=? AND signal_type='EVIDENCE_CHANGED' AND status='PENDING' ORDER BY created_at,id LIMIT 1").get(task.id);
       if (pending) this.jobs.enqueue({ type: 'task_continue', taskId: task.id, key: `signals:${task.id}:${pending.id}`, payload: { taskId: task.id } });
     });
@@ -594,7 +850,8 @@ export class DurableRuntime {
     const event = this.store.state.events.find(event => event.id === job.payload.eventId);
     if (!event || this.privacy.forgotten('event', event.id) || job.payload.privacyEpoch !== Number(this.database.get('privacy_epoch'))) return;
     await this.scope.run({ eventId: event.id, job, privacyEpoch: job.payload.privacyEpoch }, async () => {
-      this.engine.retryPendingReasoning(); await this.engine.whenSettled();
+      this.engine.retryPendingReasoning(null, { now: this.database.now() }); await this.engine.whenSettled();
+      if (this.jobs.owns(job) && this.current()?.reasoningFailure) throw this.current().reasoningFailure;
     });
   }
   syncStandingIntent(intent) {
@@ -627,7 +884,7 @@ export class DurableRuntime {
     const intent = this.intents.get(task.standingIntentId);
     if (!this.flags().standingIntents || !intent || intent.status !== 'active' || !task.request?.text) return;
     const outcome = effectiveTaskRequest(task, this.store.state).text;
-    let sources, body, kind = 'source_brief', title = task.subject, evidenceRefs = [];
+    let sources, body, kind = 'source_brief', title = task.subject, evidenceRefs = [], privateContext = null;
     const fence = this.capture(task.id), generation = this.database.get('activation_generation:standingIntents', '0'), modelVersion = this.database.get('model_version', '0');
     const current = () => this.isCurrent(task.id, fence) && this.flags().standingIntents && this.database.get('activation_generation:standingIntents', '0') === generation
       && this.database.get('model_version', '0') === modelVersion && this.intents.get(intent.id)?.status === 'active' && this.intents.get(intent.id)?.version === intent.version && this.activationFor(this.tasks.get(task.id)).activate;
@@ -640,12 +897,18 @@ export class DurableRuntime {
       body = [outcome, ...sources.map(({ fields }) => `${fields.subject}\n\n${fields.body}`)].join('\n\n');
       if (this.engine.reasoner.available?.() && typeof this.engine.reasoner.prepareTask === 'function') {
         this.store.mutateIfChanged(state => { const entry = state.tasks[task.id]; delete entry.preparedWork; entry.status = 'investigating'; entry.reasoning = { status: 'running', at: iso(this.database.now()) }; });
+        const externalTools = this.engine.externalTools({ taskId: task.id, isCurrent: current }).filter(tool => tool.name !== 'create_work_artifact');
+        privateContext = this.taskModelContext(task.id, { key: `prepare:${task.id}:${task.inputVersion}:c${context.version}:p${task.planningContextRevision || 0}:i${intent.version}:m${modelVersion}`, durableFence: fence },
+          { stage: 'planning', catalogVersion: stableDigest(externalTools.map(({ name, parameters, effect }) => ({ name, parameters, effect }))), extraCurrent: current });
         const result = await this.engine.reasoner.prepareTask({ task: { id: task.id, request: { text: outcome }, primarySourceEventId: primary.eventId, sourceEventIds: sources.map(({ event }) => event.id) },
-          externalTools: this.engine.externalTools({ taskId: task.id, isCurrent: current }).filter(tool => tool.name !== 'create_work_artifact'), planningContext: this.planningContext(task.id) }, `prepare:${task.id}:${task.inputVersion}:m${modelVersion}:job:${this.current().job.id}:a${this.current().job.attempts}`);
+          externalTools, planningContext: this.planningContext(task.id) }, `prepare:${task.id}:${task.inputVersion}:m${modelVersion}:job:${this.current().job.id}:a${this.current().job.attempts}`, privateContext || this.modelAccountingContext({ taskId: task.id }));
         if (!current()) throw durableError('PREPARATION_CHANGED', 'The task changed during preparation.');
         if (!result || typeof result.title !== 'string' || !result.title.trim() || result.title.length > 300 || typeof result.body !== 'string' || !result.body.trim() || result.body.length > 12000
           || !Array.isArray(result.evidenceRefs) || !result.evidenceRefs.length || result.evidenceRefs.length > 12 || !result.evidenceRefs.some(ref => ref?.eventId === primary.eventId)
-          || result.evidenceRefs.some(ref => typeof ref?.quote !== 'string' || !ref.quote.trim() || ref.quote.length > 500 || !sources.some(({ event, fields }) => event.id === ref.eventId && `${fields.subject}\n${fields.body}`.includes(ref.quote)))) throw durableError('INVALID_PREPARATION', 'The draft needs bounded text and quotations from the actual task sources.', 400);
+          || result.evidenceRefs.some(ref => typeof ref?.quote !== 'string' || !ref.quote.trim() || ref.quote.length > 500 || !sources.some(({ event, fields }) => event.id === ref.eventId && `${fields.subject}\n${fields.body}`.includes(ref.quote)))) {
+          if (privateContext && this.modelCommits.hasInvocation(privateContext)) this.modelCommits.reject(privateContext, 'invalid_preparation_final');
+          throw durableError('INVALID_PREPARATION', 'The draft needs bounded text and quotations from the actual task sources.', 400);
+        }
         if (!this.contextReady(task.id)) throw durableError('CONTEXT_READ_REQUIRED', 'Read deferred task context before preparing the draft.', 409);
         body = result.body; title = result.title; evidenceRefs = result.evidenceRefs; kind = 'draft';
       }
@@ -655,17 +918,24 @@ export class DurableRuntime {
     }
     if (!current()) return;
     const id = `intent-brief:${task.id}:${task.inputVersion}:c${context.version}:m${modelVersion}:${effectDigest([kind, body])}`;
-    this.store.mutateIfChanged(state => {
+    // Creating the artifact after SQL projection observes the new situation
+    // version; the hook still commits or rolls back with the draft and ACK.
+    const persistArtifact = () => {
+      if (!this.db.prepare('SELECT 1 FROM artifacts WHERE id=?').get(id)) {
+        const step = this.experiences.step({ taskRunId: run.id, logicalStepId: id, stepKind: 'source_brief', expectedEffect: { type: 'local_preparation', outcome }, experiences: [] });
+        this.experiences.artifact({ id, taskId: task.id, taskRunId: run.id, planStepId: step.id, content: body, version: task.inputVersion });
+      }
+    };
+    const commit = privateContext && this.modelCommits.hasInvocation(privateContext)
+      ? mutation => this.modelCommits.commit(privateContext, mutation, { afterSync: persistArtifact })
+      : mutation => this.store.mutate(mutation, { afterSync: persistArtifact });
+    commit(state => {
       const current = state.tasks[task.id];
       current.preparedWork = { id, kind, title, body, evidenceRefs, inputVersion: task.inputVersion, contextVersion: context.version, modelVersion, sourceEventIds: sources.map(({ event }) => event.id), requiresReview: true };
       current.reasoning = { status: 'ok', at: iso(this.database.now()) };
       current.status = 'ready_for_approval';
       current.reason = kind === 'draft' ? 'A draft is ready for review against your goal.' : 'A source brief is ready for review against your goal.';
     });
-    if (!this.db.prepare('SELECT 1 FROM artifacts WHERE id=?').get(id)) {
-      const step = this.experiences.step({ taskRunId: run.id, logicalStepId: id, stepKind: 'source_brief', expectedEffect: { type: 'local_preparation', outcome }, experiences: [] });
-      this.experiences.artifact({ id, taskId: task.id, taskRunId: run.id, planStepId: step.id, content: body, version: task.inputVersion });
-    }
   }
   retryPreparedWork(taskId, { inputVersion } = {}) {
     const task = this.tasks.get(taskId);
@@ -754,14 +1024,33 @@ export class DurableRuntime {
         .run(eventId, taskId, taskId, eventId);
     });
   }
+  deltaSourceVersion(event) { return stableDigest({ type: event.type, connectorId: event.connectorId, payload: event.payload, meta: event.meta }); }
+  deltaTargetFences(situationId) {
+    return this.db.prepare("SELECT id FROM tasks WHERE situation_id=? AND status NOT IN ('completed','cancelled') ORDER BY id").all(situationId).map(({ id }) => {
+      const task = this.tasks.get(id);
+      return { id, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch,
+        scope: stableDigest({ subject: task.subject, request: task.request }), control: stableDigest(task.control || {}) };
+    });
+  }
+  deltaTargetsCurrent(receipt, situationId) {
+    const fences = parse(receipt.target_fences_json) || [];
+    return fences.every(fence => {
+      const task = this.tasks.get(fence.id);
+      return task && task.situationId === situationId && !task.privacyInvalidated && !task.userDismissed
+        && !['completed', 'cancelled'].includes(task.status) && task.inputVersion === fence.inputVersion && task.privacyEpoch === fence.privacyEpoch
+        && stableDigest({ subject: task.subject, request: task.request }) === fence.scope && stableDigest(task.control || {}) === fence.control;
+    });
+  }
   async runSituationDelta(job) {
+    if (this.closed || this.suspended) throw durableError('CONTEXT_CHANGED', 'State delivery is waiting for the active workspace.', 503);
     const { eventId, situationId, privacyEpoch } = job.payload;
     if (this.privacy.forgotten('event', eventId)) return;
     const row = this.db.prepare('SELECT event_json FROM durable_inbox WHERE id=?').get(eventId);
     if (!row) return;
     if (privacyEpoch !== Number(this.database.get('privacy_epoch'))) { this.finishUninterpretable(parse(row.event_json), 'context_revoked', situationId); return; }
     let prior = this.db.prepare("SELECT outcome FROM activation_decisions WHERE stage='state_delta' AND event_a=? AND situation_id=? ORDER BY created_at DESC LIMIT 1").get(eventId, situationId);
-    let interpreted = null;
+    let receipt = this.db.prepare('SELECT * FROM situation_delta_results WHERE event_id=? AND situation_id=?').get(eventId, situationId);
+    let interpreted = receipt ? parse(receipt.delta_json) : null;
     if (this.store.state.events.some(event => event.id === eventId)) {
       let released = [];
       this.database.atomic(() => { released = this.tasks.releaseSemantic(eventId); if (prior?.outcome === 'UNRELATED') this.removeUnrelatedTaskLineage(eventId, released); });
@@ -770,6 +1059,7 @@ export class DurableRuntime {
       return;
     }
     const event = parse(row.event_json);
+    if (prior && !receipt) { this.finishUninterpretable(event, 'state_delta_receipt_missing', situationId); return; }
     if (!prior) {
       const situation = this.tasks.situations.get(situationId);
       const threadTargets = this.situationTargets(event);
@@ -779,7 +1069,7 @@ export class DurableRuntime {
         this.finishUninterpretable(event, 'situation_changed', situationId); return;
       }
       if (!this.engine.reasoner?.available?.() || typeof this.engine.reasoner.extractSituationDelta !== 'function') {
-        if (job.attempts >= job.max_attempts) {
+        if (effectiveJobAttempts(job) >= job.max_attempts) {
           this.jobs.assert(job);
           this.finishUninterpretable(event, 'state_delta_unavailable', situationId);
         }
@@ -788,11 +1078,31 @@ export class DurableRuntime {
       const contextVersion = Number(this.database.get('context_version')), modelVersion = this.database.get('model_version', '0');
       const fields = unquotedMessageFields(event.payload), boundedEvent = { subject: fields.subject.slice(0, 200), body: fields.body.slice(0, 600) };
       const missingEvidence = Array.isArray(situation.closureCondition?.missingEvidence) ? situation.closureCondition.missingEvidence.slice(0, 3).map(item => String(item).slice(0, 120)) : [];
+      const memoryContext = await this.activationMemoryContext([event], { situationId, job });
+      const targetFences = this.deltaTargetFences(situationId), sourceVersion = this.deltaSourceVersion(event);
+      const input = { situation: { id: situation.id, summary: situation.summary.slice(0, 200), missingEvidence }, event: boundedEvent };
+      const deltaCurrent = () => {
+        const current = this.tasks.situations.get(situationId), source = this.db.prepare('SELECT event_json FROM durable_inbox WHERE id=?').get(eventId);
+        const targets = this.situationTargets(event), recalled = targets.length ? [] : this.situationRecall(event);
+        const same = targets.length === 1 && targets[0].id === situationId || targets.length === 0 && recalled.length === 1 && recalled[0].id === situationId;
+        return current?.version === situation.version && ['OPEN','OBSERVING'].includes(current.lifecycle_state) && same
+          && !(targets[0]?.activeTasks > 1 && !this.flags().scopedCancellation) && !this.privacy.permissionRevoked(event.connectorId)
+          && source && this.deltaSourceVersion(parse(source.event_json)) === sourceVersion
+          && stableDigest(this.deltaTargetFences(situationId)) === stableDigest(targetFences);
+      };
+      const privateContext = this.activationModelContext(job, { key: `delta:${eventId}:${situationId}:v${situation.version}`,
+        input: { ...input, targetFences, sourceVersion }, memoryContext, eventIds: [eventId], extraCurrent: deltaCurrent });
       let proposal;
-      try { proposal = await this.engine.reasoner.extractSituationDelta({ situation: { id: situation.id, summary: situation.summary.slice(0, 200), missingEvidence }, event: boundedEvent, memoryContext: await this.activationMemoryContext([event], { situationId, job }) }, `delta:${job.id}:attempt:${job.attempts}`); }
+      try { proposal = await this.engine.reasoner.extractSituationDelta({ ...input, memoryContext }, `delta:${job.id}:attempt:${job.attempts}`, privateContext || this.modelAccountingContext({ taskId: job.task_id || null, job })); }
       catch (error) {
+        if (privateContext && error?.code === 'SESSION_NOT_CURRENT' && this.jobs.owns(job)
+          && privacyEpoch === Number(this.database.get('privacy_epoch')) && !this.privacy.forgotten('event', eventId)
+          && !this.privacy.permissionRevoked(event.connectorId)) {
+          throw durableError('CONTEXT_CHANGED', 'The state interpretation context changed; rebuild before retrying.', 503);
+        }
+        if (isModelControlFailure(error)) throw error;
         if (error?.code === 'REASONING_BUDGET') { error.status = 429; error.retryAfterMs = Math.max(Number(error.retryAfterMs) || 0, 60000); }
-        if (classifyFailure(error) === 'permanent' || job.attempts >= job.max_attempts) {
+        if (classifyFailure(error) === 'permanent' || effectiveJobAttempts(job) >= job.max_attempts) {
           this.jobs.assert(job);
           if (privacyEpoch === Number(this.database.get('privacy_epoch')) && !this.privacy.forgotten('event', eventId)) {
             this.finishUninterpretable(event, 'state_delta_failed', situationId);
@@ -806,9 +1116,10 @@ export class DurableRuntime {
       if (this.privacy.forgotten('event', eventId)) return;
       if (privacyEpoch !== Number(this.database.get('privacy_epoch'))) { this.finishUninterpretable(event, 'context_revoked', situationId); return; }
       if (!delta) {
+        if (privateContext && this.modelCommits.hasInvocation(privateContext)) this.modelCommits.reject(privateContext, 'invalid_state_delta_final');
         this.finishUninterpretable(event, 'invalid_state_delta', situationId); return;
       }
-      this.database.atomic(() => {
+      const mutation = () => {
         this.jobs.assert(job);
         const current = this.tasks.situations.get(situationId);
         const threadTargets = this.situationTargets(event);
@@ -845,22 +1156,61 @@ export class DurableRuntime {
               cancelled ? json([{ kind: 'event', id: eventId }]) : current.closure_evidence_json, json(condition), iso(this.database.now()), situationId);
         }
         this.db.prepare('INSERT INTO activation_decisions VALUES(?,?,NULL,?,?,?,?,?,?)').run(randomUUID(), eventId, situationId, 'state_delta', outcome, delta.associated ? 'grounded_interpretation' : 'semantic_unrelated', '1', iso(this.database.now()));
+        const scopedIds = ['CANCEL','SUPERSEDE'].includes(outcome) && targetFences.length > 1 ? this.scopedTaskIds(situationId, delta) : [];
+        const receiptContext = { sourceVersion, modelVersion, contextVersion,
+          authorityVersion: stableDigest({ shadow: this.engine.policy.shadow, rules: this.engine.policy.rules }),
+          memories: memoryContext.memories.map(memory => ({ id: memory.id, version: memory.version, expectedVersion: memory.expectedVersion })) };
+        this.db.prepare('INSERT OR REPLACE INTO situation_delta_results(event_id,situation_id,delta_json,target_fences_json,scoped_task_ids_json,situation_version,privacy_epoch,context_json) VALUES(?,?,?,?,?,?,?,?)')
+          .run(eventId, situationId, json(delta), json(targetFences), json(scopedIds), this.tasks.situations.get(situationId).version, privacyEpoch, json(receiptContext));
         prior = { outcome };
-      });
+      };
+      if (privateContext && this.modelCommits.hasInvocation(privateContext)) {
+        const committed = this.modelCommits.commitSql(privateContext, mutation, { canCommit: deltaCurrent });
+        if (!committed.committed) throw durableError('CONTEXT_CHANGED', 'The Situation changed before state interpretation commit.', 503);
+      } else this.database.atomic(mutation);
+      this.store.refresh();
+      receipt = this.db.prepare('SELECT * FROM situation_delta_results WHERE event_id=? AND situation_id=?').get(eventId, situationId);
     }
     this.jobs.assert(job);
+    if (this.closed || this.suspended) throw durableError('CONTEXT_CHANGED', 'State delivery is waiting for the active workspace.', 503);
     if (privacyEpoch !== Number(this.database.get('privacy_epoch')) || this.privacy.forgotten('event', eventId)) return;
     const activeTasks = this.db.prepare("SELECT id FROM tasks WHERE situation_id=? AND status NOT IN ('completed','cancelled')").all(situationId).map(task => task.id);
-    if (activeTasks.length > 1 && this.flags().scopedCancellation) {
-      const scoped = ['CANCEL', 'SUPERSEDE'].includes(prior.outcome) && interpreted ? this.scopedTaskIds(situationId, interpreted) : [];
+    const storedScoped = receipt ? parse(receipt.scoped_task_ids_json) || [] : [];
+    const receiptContext = receipt ? parse(receipt.context_json) || {} : {};
+    const receiptContextCurrent = () => {
+      const source = this.db.prepare('SELECT event_json,state FROM durable_inbox WHERE id=?').get(eventId);
+      return source && source.state !== 'forgotten' && receiptContext.sourceVersion === this.deltaSourceVersion(parse(source.event_json))
+      && receiptContext.modelVersion === this.database.get('model_version', '0')
+      && receiptContext.contextVersion === Number(this.database.get('context_version'))
+      && receiptContext.authorityVersion === stableDigest({ shadow: this.engine.policy.shadow, rules: this.engine.policy.rules })
+      && this.activationMemoryCurrent({ memories: receiptContext.memories || [] }) && !this.privacy.permissionRevoked(event.connectorId);
+    };
+    if (receipt && !receipt.scoped_applied && (!this.deltaTargetsCurrent(receipt, situationId) || receipt.privacy_epoch !== privacyEpoch
+      || !receiptContextCurrent() || storedScoped.length && !this.flags().scopedCancellation
+      || this.tasks.situations.get(situationId)?.version !== receipt.situation_version)) {
+      this.recordSituationObservation(event, 'state_delta_target_changed', situationId, activeTasks, activeTasks.length > 0, false);
+      this.database.atomic(() => this.tasks.releaseSemantic(eventId));
+      return;
+    }
+    if (storedScoped.length || activeTasks.length > 1 && this.flags().scopedCancellation) {
+      const scoped = receipt ? storedScoped : ['CANCEL', 'SUPERSEDE'].includes(prior.outcome) && interpreted ? this.scopedTaskIds(situationId, interpreted) : [];
       if (scoped.length === 1) {
         const cancel = prior.outcome === 'CANCEL';
-        this.tasks.applyControl(scoped[0], cancel ? 'CANCELLATION' : 'SUPERSESSION', eventId, data => {
-          if (cancel) data.status = 'cancelled';
-          data.control = { ...(data.control || {}), paused: true, pauseReason: cancel ? 'scoped_cancellation' : 'scoped_supersession', updatedAt: iso(this.database.now()) };
-          if (!cancel) data.supersededByEventId = eventId;
+        this.database.atomic(() => {
+          this.jobs.assert(job);
+          const currentReceipt = this.db.prepare('SELECT * FROM situation_delta_results WHERE event_id=? AND situation_id=?').get(eventId, situationId);
+          if (currentReceipt?.scoped_applied) return;
+          if (currentReceipt && (!this.deltaTargetsCurrent(currentReceipt, situationId) || !receiptContextCurrent() || !this.flags().scopedCancellation
+            || this.tasks.situations.get(situationId)?.version !== currentReceipt.situation_version)) throw durableError('CONTEXT_CHANGED', 'The scoped control target changed.', 503);
+          this.tasks.applyControl(scoped[0], cancel ? 'CANCELLATION' : 'SUPERSESSION', eventId, data => {
+            if (cancel) data.status = 'cancelled';
+            data.control = { ...(data.control || {}), paused: true, pauseReason: cancel ? 'scoped_cancellation' : 'scoped_supersession', updatedAt: iso(this.database.now()) };
+            if (!cancel) data.supersededByEventId = eventId;
+          });
+          this.database.lineage('event', eventId, 'task', scoped[0]);
+          if (currentReceipt) this.db.prepare('UPDATE situation_delta_results SET scoped_applied=1 WHERE event_id=? AND situation_id=?').run(eventId, situationId);
         });
-        this.database.lineage('event', eventId, 'task', scoped[0]);
+        this.store.refresh();
         this.recordSituationObservation(event, cancel ? 'scoped_cancellation' : 'scoped_supersession', situationId, scoped, false, true);
       } else this.recordSituationObservation(event, prior.outcome === 'CANCEL' ? 'ambiguous_situation' : `state_delta_${String(prior.outcome || 'unknown').toLowerCase()}`, situationId, activeTasks, true, false);
       this.database.atomic(() => this.tasks.releaseSemantic(eventId));
@@ -935,7 +1285,7 @@ export class DurableRuntime {
     const availableAt = [intentBudgetOpen ? null : this.intents.nextBudgetAt(intent), globalBudgetOpen ? null : this.intents.nextGlobalBudgetAt()].filter(Boolean).sort().pop();
     this.database.atomic(() => {
       this.jobs.assert(job);
-      this.intents.record(intent.id, eventId, 'DEFERRED', intentBudgetOpen ? 'global_budget_exhausted' : 'budget_exhausted');
+      this.intents.record(intent.id, eventId, 'DEFERRED', !intentBudgetOpen ? 'budget_exhausted' : !globalBudgetOpen ? 'global_budget_exhausted' : 'budget_recheck');
       const generation = Number(job.payload.deferralGeneration || 0) + 1;
       const deferred = this.jobs.enqueue({ type: 'standing_intent_match', key: `intent-budget:${intent.id}:${eventId}:v${intent.version}:a${generation}`, availableAt, payload: { ...job.payload, deferralGeneration: generation } });
       this.database.lineage('event', eventId, 'job', deferred.id);
@@ -953,11 +1303,18 @@ export class DurableRuntime {
     const event = this.store.state.events.find(item => item.id === eventId) || parse(row.event_json);
     if (!this.intents.matchesPrefilter(intent, event) || !this.activationForEvent(event).activate) return;
     const intentBudgetOpen = this.intents.budgetOpen(intent), globalBudgetOpen = this.intents.globalBudgetOpen();
-    if (!intentBudgetOpen || !globalBudgetOpen) {
+    const nativePredicate = Boolean(intent.predicate && nativeClassicReasoner(this.engine.reasoner));
+    if (!nativePredicate && (!intentBudgetOpen || !globalBudgetOpen)) {
       this.#deferStandingIntent(job, intent, eventId, { intentBudgetOpen, globalBudgetOpen });
       return;
     }
-    let matched = !intent.predicate, quote = null;
+    const senderIdentityRequired = intent.predicate && /\b(?:sender|from|sent by)\b|发件|寄件|发送者|發送者|来自|來自/iu.test(intent.predicate);
+    const senderIdentity = event.type === 'email.received' ? normalizeAddress(event.payload?.from) : null;
+    if (senderIdentityRequired && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(senderIdentity || '')) {
+      this.database.atomic(() => this.intents.record(intent.id, eventId, 'UNKNOWN', 'sender_identity_unavailable'));
+      return;
+    }
+    let matched = !intent.predicate, quote = null, privateContext = null;
     const memoryContext = intent.predicate ? await this.activationMemoryContext([event], { intent, job }) : { contextVersion: this.memory.version(), memories: [] };
     if (intent.predicate) {
       if (typeof this.engine.reasoner?.assessStandingIntent !== 'function' || !this.engine.reasoner.available?.()) {
@@ -965,14 +1322,63 @@ export class DurableRuntime {
         return;
       }
       const fields = event.type === 'email.received' ? unquotedMessageFields(event.payload) : eventContext(event);
+      const input = { predicate: intent.predicate, event: { id: event.id, subject: fields.subject.slice(0, 200), body: fields.body.slice(0, 600), ...(senderIdentity ? { senderIdentity } : {}) } };
+      const sourceVersion = stableDigest(event.payload);
+      const intentCurrent = () => {
+        const current = this.intents.get(intentId), source = this.store.state.events.find(item => item.id === eventId);
+        return activationCurrent() && current?.status === 'active' && current.version === intentVersion
+          && this.intents.matchesPrefilter(current, source || event) && this.activationForEvent(source || event).activate
+          && !this.privacy.permissionRevoked(event.connectorId) && stableDigest((source || event).payload) === sourceVersion;
+      };
+      privateContext = this.activationModelContext(job, { key: `standing:${intentId}:v${intentVersion}:${eventId}`,
+        input: { ...input, intentVersion, activationVersion: job.payload.activationVersion || 0 }, memoryContext, eventIds: [eventId], extraCurrent: intentCurrent });
+      if (privateContext) {
+        // Keep semantic ownership separate from RPC admission: a cached final
+        // or completed session can be recovered without spending another slot.
+        const current = privateContext.session.isCurrent;
+        guardModelContext(privateContext, () => {
+          if (!current()) return false;
+          const latest = this.intents.get(intentId);
+          if (!this.intents.budgetOpen(latest) || !this.intents.globalBudgetOpen()) {
+            throw durableError('STANDING_BUDGET_WAIT', 'Standing evaluation is waiting for its admission budget.', 409);
+          }
+          return true;
+        });
+      }
       let proposal;
-      try { proposal = await this.engine.reasoner.assessStandingIntent({ predicate: intent.predicate, memoryContext, event: { id: event.id, subject: fields.subject.slice(0, 200), body: fields.body.slice(0, 600) } }, `intent:${job.id}:${job.attempts}`); }
-      finally { this.engine.pruneReasoningBudget({ finishedJobId: job.id }); }
+      try { proposal = await this.engine.reasoner.assessStandingIntent({ ...input, memoryContext }, `intent:${job.id}:${job.attempts}`, privateContext || this.modelAccountingContext({ taskId: job.task_id || null, job })); }
+      catch (error) {
+        if (privateContext && error?.code === 'SESSION_ACKED' && !this.modelCommits.hasInvocation(privateContext)) return;
+        if (privateContext && error?.code === 'STANDING_BUDGET_WAIT') {
+          const current = this.intents.get(intentId);
+          if (intentCurrent()) this.#deferStandingIntent(job, current, eventId, { intentBudgetOpen: this.intents.budgetOpen(current), globalBudgetOpen: this.intents.globalBudgetOpen() });
+          return;
+        }
+        if (privateContext && error?.code === 'SESSION_NOT_CURRENT' && this.jobs.owns(job) && intentCurrent()
+          && privacyEpoch === Number(this.database.get('privacy_epoch'))
+          && (!this.activationMemoryCurrent(memoryContext) || memoryContext.contextVersion !== this.memory.version())) {
+          throw durableError('CONTEXT_CHANGED', 'Activation memory expired; rebuild before retrying.', 503);
+        }
+        throw error;
+      } finally { this.engine.pruneReasoningBudget({ finishedJobId: job.id }); }
       if (!activationCurrent()) return;
       quote = proposal?.quote;
       matched = proposal?.matched === true && typeof quote === 'string' && quote.length > 0 && (`${fields.subject}\n${fields.body}`).includes(quote) && proposal.confidence >= 0.8;
+      const validNative = proposal && typeof proposal.matched === 'boolean' && Number.isFinite(proposal.confidence)
+        && proposal.confidence >= 0 && proposal.confidence <= 1 && (proposal.quote === null || typeof proposal.quote === 'string')
+        && (!proposal.matched || matched);
+      if (privateContext && !validNative) {
+        if (this.modelCommits.hasInvocation(privateContext)) this.modelCommits.reject(privateContext, 'invalid_standing_final');
+        throw durableError('INVALID_STANDING_RESULT', 'The standing predicate did not return a grounded valid assessment.', 400);
+      }
       if (!matched) {
-        this.database.atomic(() => this.intents.record(intent.id, eventId, proposal ? 'UNRELATED' : 'INVALID', proposal ? 'semantic_unrelated' : 'ungrounded_or_invalid'));
+        const negative = () => this.intents.record(intent.id, eventId, proposal ? 'UNRELATED' : 'INVALID', proposal ? 'semantic_unrelated' : 'ungrounded_or_invalid');
+        if (privateContext && this.modelCommits.hasInvocation(privateContext)) {
+          const committed = this.modelCommits.commitSql(privateContext, negative, { canCommit: () => intentCurrent()
+            && this.intents.budgetOpen(this.intents.get(intentId)) && this.intents.globalBudgetOpen() });
+          if (!committed.committed && intentCurrent()) this.#deferStandingIntent(job, this.intents.get(intentId), eventId,
+            { intentBudgetOpen: this.intents.budgetOpen(this.intents.get(intentId)), globalBudgetOpen: this.intents.globalBudgetOpen() });
+        } else this.database.atomic(negative);
         return;
       }
     }
@@ -987,14 +1393,14 @@ export class DurableRuntime {
       this.#deferStandingIntent(job, commitIntent, eventId, { intentBudgetOpen: commitIntentBudgetOpen, globalBudgetOpen: commitGlobalBudgetOpen });
       return;
     }
-    this.database.atomic(() => {
+    const mutation = () => {
       this.jobs.assert(job);
       const current = this.intents.get(intentId);
       if (memoryContext.contextVersion !== this.memory.version()) throw durableError('CONTEXT_CHANGED', 'Memory changed before activation commit.', 503);
       if (typeof current?.desiredOutcome !== 'string' || !current.desiredOutcome.trim()) throw durableError('INVALID_INTENT_OUTCOME', 'The standing intent has no grounded outcome.', 400);
       if (!current || current.version !== intentVersion || current.status !== 'active' || !this.intents.matchesPrefilter(current, event) || !this.intents.budgetOpen(current) || !this.intents.globalBudgetOpen()) return;
       if (privacyEpoch !== Number(this.database.get('privacy_epoch')) || this.privacy.permissionRevoked(event.connectorId) || this.privacy.forgotten('event', eventId)) return;
-      if (this.db.prepare("SELECT 1 FROM activation_decisions WHERE stage='standing_intent' AND event_a=? AND evaluator_version=? AND outcome='MATCHED'").get(eventId, intentId)) return;
+      if (!privateContext && this.db.prepare("SELECT 1 FROM activation_decisions WHERE stage='standing_intent' AND event_a=? AND evaluator_version=? AND outcome='MATCHED'").get(eventId, intentId)) return;
       const existing = this.db.prepare(`SELECT DISTINCT s.id FROM situations s JOIN event_situation_links l ON l.situation_id=s.id JOIN durable_inbox e ON e.id=l.event_id
         WHERE s.standing_intent_id=? AND s.lifecycle_state IN ('OPEN','OBSERVING') AND e.provider=? AND COALESCE(json_extract(e.event_json,'$.payload.accountId'),'')=?
         AND ((? IS NOT NULL AND json_extract(e.event_json,'$.payload.threadId')=?) OR (? IS NULL AND json_extract(e.event_json,'$.payload.id')=?)) ORDER BY s.id LIMIT 1`)
@@ -1019,7 +1425,20 @@ export class DurableRuntime {
       }
       this.intents.record(current.id, eventId, 'MATCHED', current.predicate ? 'semantic_prefilter' : 'prefilter', situation.id);
       this.database.lineage('standing_intent', current.id, 'situation', situation.id);
-    });
+    };
+    if (privateContext && this.modelCommits.hasInvocation(privateContext)) {
+      const committed = this.modelCommits.commitSql(privateContext, mutation, { canCommit: () => {
+        const current = this.intents.get(intentId);
+        return current?.version === intentVersion && current.status === 'active' && this.intents.budgetOpen(current) && this.intents.globalBudgetOpen();
+      } });
+      if (!committed.committed) {
+        const current = this.intents.get(intentId);
+        if (current?.version === intentVersion && current.status === 'active') this.#deferStandingIntent(job, current, eventId,
+          { intentBudgetOpen: this.intents.budgetOpen(current), globalBudgetOpen: this.intents.globalBudgetOpen() });
+        return;
+      }
+      this.store.refresh();
+    } else this.database.atomic(mutation);
     this.engine.changed();
   }
   pairEligible(event) {
@@ -1072,6 +1491,7 @@ export class DurableRuntime {
     const { eventIds, evaluatorVersion, privacyEpoch } = job.payload;
     if (!Array.isArray(eventIds) || eventIds.length !== 2 || evaluatorVersion !== this.pairEvaluatorVersion() || privacyEpoch !== Number(this.database.get('privacy_epoch'))) return;
     const events = eventIds.map(id => this.store.state.events.find(event => event.id === id));
+    if (events.some(event => !event)) return;
     const sameThread = events[0].connectorId === events[1].connectorId && events[0].payload.threadId === events[1].payload.threadId && (events[0].payload.accountId || null) === (events[1].payload.accountId || null);
     const lexical = job.payload.lane === 'lexical' && this.flags().lexicalRecall && scopesCompatible(events[0].payload, events[1].payload)
       && entityKeys(events[0]).some(item => item.role !== 'thread' && entityKeys(events[1]).some(other => other.key === item.key && other.role === item.role));
@@ -1085,15 +1505,31 @@ export class DurableRuntime {
       if (!longest || !longest.event[longest.field]) return;
       longest.event[longest.field] = longest.event[longest.field].slice(0, Math.floor(longest.event[longest.field].length / 2));
     }
+    const memoryContext = await this.activationMemoryContext(events, { job });
+    const sourceVersion = stableDigest(events.map(event => ({ id: event.id, connectorId: event.connectorId, payload: event.payload })));
+    const pairCurrent = () => {
+      const current = eventIds.map(id => this.store.state.events.find(event => event.id === id));
+      return evaluatorVersion === this.pairEvaluatorVersion() && current.every(event => this.pairEligible(event))
+        && stableDigest(current.map(event => ({ id: event.id, connectorId: event.connectorId, payload: event.payload }))) === sourceVersion;
+    };
+    const privateContext = this.activationModelContext(job, { key: `pair:${eventIds.join(':')}:${evaluatorVersion}`,
+      input, memoryContext, eventIds, extraCurrent: pairCurrent });
     let proposed;
-    try { proposed = await this.engine.reasoner.assessSituationPair({ events: input, memoryContext: await this.activationMemoryContext(events, { job }) }, `pair:${job.id}:attempt:${job.attempts}`); }
+    try { proposed = await this.engine.reasoner.assessSituationPair({ events: input, memoryContext }, `pair:${job.id}:attempt:${job.attempts}`, privateContext || this.modelAccountingContext({ taskId: job.task_id || null, job })); }
     catch (error) {
+      if (error?.code === 'SESSION_NOT_CURRENT' && this.jobs.owns(job)
+        && privacyEpoch === Number(this.database.get('privacy_epoch')) && pairCurrent()
+        && (!this.activationMemoryCurrent(memoryContext) || contextVersion !== Number(this.database.get('context_version')))) {
+        throw durableError('CONTEXT_CHANGED', 'Activation context changed; rebuild it before retrying.', 503);
+      }
+      if (isModelControlFailure(error)) throw error;
       if (error?.code === 'REASONING_BUDGET') { error.status = 429; error.retryAfterMs = Math.max(Number(error.retryAfterMs) || 0, 60000); }
       throw error;
     } finally { this.engine.pruneReasoningBudget({ finishedJobId: job.id }); }
     const result = validatePairAssessment(proposed, input.map(event => ({ id: event.id, payload: { subject: event.subject, body: event.body } })));
     const currentEvents = eventIds.map(id => this.store.state.events.find(event => event.id === id));
     if (!result) {
+      if (privateContext && this.modelCommits.hasInvocation(privateContext)) this.modelCommits.reject(privateContext, 'invalid_pair_final');
       this.database.atomic(() => {
         this.jobs.assert(job);
         if (privacyEpoch === Number(this.database.get('privacy_epoch')) && currentEvents.every(event => this.pairEligible(event)))
@@ -1101,7 +1537,7 @@ export class DurableRuntime {
       });
       throw durableError('INVALID_PAIR_RESULT', 'The pair assessment did not pass grounded validation.', 400);
     }
-    this.database.atomic(() => {
+    const mutation = () => {
       this.jobs.assert(job);
       if (privacyEpoch !== Number(this.database.get('privacy_epoch')) || contextVersion !== Number(this.database.get('context_version')) || modelVersion !== this.database.get('model_version', '0') || !currentEvents.every(event => this.pairEligible(event))) return;
       if (result.outcome === 'UNRELATED') {
@@ -1115,7 +1551,12 @@ export class DurableRuntime {
       const situation = this.tasks.situations.create({ kind: 'related_observations', summary: result.evidence[0].quote, lifecycleState: 'OBSERVING',
         closureCondition: { kind: 'AWAIT_EVIDENCE', missingEvidence, reevaluationCondition: result.reevaluationCondition }, sourceEventIds: eventIds, associationMethod: 'semantic' });
       this.db.prepare('INSERT INTO activation_decisions VALUES(?,?,?,?,?,?,?,?,?)').run(randomUUID(), ...eventIds, situation.id, 'pair_association', 'RELATED_WAIT', result.outcome === 'ACTIONABLE' ? 'action_requires_validation' : 'missing_evidence', evaluatorVersion, iso(this.database.now()));
-    });
+    };
+    if (privateContext && this.modelCommits.hasInvocation(privateContext)) {
+      const committed = this.modelCommits.commitSql(privateContext, mutation, { canCommit: pairCurrent });
+      if (!committed.committed) return;
+      this.store.refresh();
+    } else this.database.atomic(mutation);
     this.engine.changed();
   }
   scheduleSituation(situationId, scheduledAt) {
@@ -1283,6 +1724,7 @@ export class DurableRuntime {
     return planningContextManifest(scope.context, { taskId, inputVersion: task?.inputVersion, privacyEpoch: task?.privacyEpoch, guidance: task?.guidance });
   }
   contextReady(taskId) {
+    if (!this.planningContextCurrent(taskId)) return false;
     const scope = this.current(), manifest = this.contextManifest(taskId);
     if (!manifest) return !this.tasks.get(taskId)?.contextReadRequired;
     return manifest.deferred.every(({ id }) => {
@@ -1309,16 +1751,23 @@ export class DurableRuntime {
       // A read is cancelled either by its own call or by the job deadline.
       const combined = scope.signal && signal ? AbortSignal.any([scope.signal, signal]) : scope.signal || signal || null;
       this.tasks.preResume(scope.run, scope.job);
+      this.assertPlanningContextCurrent(taskId);
       const key = `read:${scope.run.id}:${id}`;
       const intent = this.ledger.intent({ taskId, run: scope.run, job: scope.job, provider: tool.contextProvider === 'workspace' ? 'workspace' : provider, tool: tool.name, actionFamily: 'context.read', resourceId: tool.name, key,
         effect: { type: 'read', tool: tool.name, argumentsDigest: effectDigest(args) }, payload: {}, isWrite: false });
-      return this.ledger.dispatch(intent, { run: scope.run, job: scope.job, signal: combined, send: currentSignal => {
+      return this.ledger.dispatch(intent, { run: scope.run, job: scope.job, signal: combined, send: async currentSignal => {
+        this.assertPlanningContextCurrent(taskId);
         this.gateway.authorizeRead();
-        return tool.execute(id, args, currentSignal);
+        const result = await tool.execute(id, args, currentSignal);
+        this.assertPlanningContextCurrent(taskId);
+        return result;
       } });
     } }));
   }
   async external(task, { provider, tool, actionFamily, resourceId, key, effect, payload, send, verify = null, conditionalVersion = null, planStepId = null, deferDispatch = false }) {
+    if (task.draft?.experienceTrial && !this.selectedTrialCurrent(task.draft.experienceTrial)) {
+      throw durableError('EXPERIENCE_TRIAL_STALE', 'The Experience trial changed or expired. Review a fresh trial before sending.');
+    }
     const artifact = task.draft && this.db.prepare('SELECT * FROM artifacts WHERE task_id=? AND latest_digest=? ORDER BY created_at DESC LIMIT 1').get(task.id, effectDigest(task.draft.body));
     if (actionFamily === 'email.send' && artifact) effect = { ...effect, artifactId: artifact.id };
     const existing = this.ledger.byKey(key);
@@ -1327,6 +1776,7 @@ export class DurableRuntime {
       return parse(existing.result_json);
     }
     if (existing && !['failed', 'cancelled'].includes(existing.status)) throw Object.assign(durableError('RECONCILIATION_REQUIRED', 'This external intent must be reconciled before retry.'), { ambiguous: true });
+    this.assertPlanningContextCurrent(task.id);
     if (actionFamily === 'email.send') await this.recheckSourceMessage(task);
     let job, run, step, intent, claimIds = [], claimsCommitted = false, settledError = null;
     try {
@@ -1340,6 +1790,7 @@ export class DurableRuntime {
         if (!job) throw Object.assign(durableError('EXECUTION_BUSY', 'This external action is already running or awaiting recovery.'), { ambiguous: true });
         run = this.tasks.beginRun(job, { advanceGeneration: false });
         const current = this.tasks.get(task.id);
+        this.assertPlanningContextCurrent(task.id);
         if (this.flags().globalCoordination) {
           const providerId = provider.kind || provider.id || String(provider);
           const holder = current.situationId || `task:${current.id}`;
@@ -1357,6 +1808,12 @@ export class DurableRuntime {
         }
         const expectedInputVersion = task.action?.inputVersion ?? task.inputVersion;
         if (expectedInputVersion !== current.inputVersion) throw durableError('TASK_DIRTY', 'The approved context changed. Review a refreshed action before sending.');
+        // The lease between preview and dispatch is short, but expiry is owned
+        // by the database clock. Check again immediately before any intent so a
+        // pass that expired while the action was being prepared cannot send.
+        if (current.draft?.experienceTrial && !this.selectedTrialCurrent(current.draft.experienceTrial)) {
+          throw durableError('EXPERIENCE_TRIAL_STALE', 'The Experience trial changed or expired. Review a fresh trial before sending.');
+        }
         const context = this.buildContext(current, run, prepared);
         if (!context.activation.activate && task.action?.permission !== 'user_approved' && !task.patchAuthorization) throw durableError('ACTIVATION_SUPPRESSED', 'An explicit user policy suppresses this task action.', 403);
         if (context.activation.requiresReview && task.action?.permission !== 'user_approved' && !task.patchAuthorization) throw durableError('REVIEW_REQUIRED', 'An explicit user policy requires review of this exact action.', 403);
@@ -1366,7 +1823,10 @@ export class DurableRuntime {
         step = selectedStep ? this.db.prepare('SELECT * FROM plan_steps WHERE id=?').get(selectedStep) : this.experiences.step({ taskRunId: run.id, logicalStepId: key, stepKind: 'external_action', actionFamily, expectedEffect: effect });
         if (!step || selectedStep && effectDigest(parse(step.expected_effect_json)) !== effectDigest(effect)) throw durableError('PLAN_CHANGED', 'The approved Experience trial no longer matches this action.');
         if (step.status === 'proposed') this.experiences.transitionStep(step.id, 'proposed', 'approved');
-        const authorize = () => this.gateway.authorize({ taskId: task.id, provider, tool, actionFamily, resourceId, key, payload, effect, conditionalVersion, patchAuthorization: task.patchAuthorization });
+        const authorize = () => {
+          this.assertPlanningContextCurrent(task.id);
+          return this.gateway.authorize({ taskId: task.id, provider, tool, actionFamily, resourceId, key, payload, effect, conditionalVersion, patchAuthorization: task.patchAuthorization });
+        };
         intent = this.ledger.intent({ taskId: task.id, run, job, provider: provider.kind || provider.id || provider, tool, actionFamily, resourceId, key, effect, payload,
           conditionalVersion, providerIdempotent: provider.live === false || provider.nativeIdempotency === true, planStepId: step.id,
           expectedInputVersion, authorize });
@@ -1570,7 +2030,7 @@ export class DurableRuntime {
     // is the exception: nothing else will ever converge this task, and leaving it
     // in `verifying` is the silent stall this whole path exists to prevent.
     if (!exhausted && task.action && ['executing', 'accepted_live', 'uncertain'].includes(task.action.status)) return null;
-    const attempts = Number(job.attempts) || 0, maxAttempts = Number(job.max_attempts) || attempts;
+    const attempts = effectiveJobAttempts(job), maxAttempts = Number(job.max_attempts) || attempts;
     const errorClass = job.last_error_class || classifyFailure(error);
     const reason = `Stopped after ${attempts} of ${maxAttempts} attempt(s): the last failure was classified ${errorClass}. The evidence gathered so far is kept.`;
     const at = iso(this.database.now());
@@ -1579,7 +2039,7 @@ export class DurableRuntime {
       if (!entry || entry.privacyInvalidated || ['completed', 'cancelled'].includes(entry.status)) return;
       entry.status = 'blocked';
       entry.reason = reason;
-      entry.failure = { jobId: job.id, jobType: job.job_type, attempts, maxAttempts, errorClass, at };
+      entry.failure = { jobId: job.id, jobType: job.job_type, attempts, totalAttempts: job.attempts, maxAttempts, errorClass, at };
       emitNotification(state.notifications, notification({
         kind: 'blocker', priority: 'high', dedupeKey: `blocker:${taskId}`, taskId, at,
         headline: 'Work stopped before it was finished',
@@ -1621,10 +2081,79 @@ export class DurableRuntime {
     }
     this.jobs.recover(job.id, () => ({ state: ['external_dispatch', 'privacy_reconcile', 'reconcile_execution'].includes(job.job_type) ? 'completed' : 'queued', safeToRepeat: true }));
   }
-  async compile(summary, job) {
+  compilationModelContext(job, summary) {
+    if (this.generateExperience || !nativeClassicReasoner(this.engine.reasoner) || !this.engine.reasoner.available?.()) return null;
+    this.jobs.assert(job);
+    const persisted = this.jobs.get(job.id);
+    if (persisted.job_type !== 'compile_experience' || persisted.queue_name !== 'learning'
+      || persisted.task_id !== job.task_id || stableDigest(persisted.payload) !== stableDigest(job.payload)) {
+      throw durableError('INVALID_COMPILATION', 'The native compiler must use its persisted learning job.', 400);
+    }
+    if (!job.payload.compilationInputDigest || job.payload.sourceKind !== 'feedback' || !summary.feedback || (summary.feedback.task_id || null) !== (job.task_id || null)) {
+      throw durableError('INVALID_COMPILATION', 'A native compiler needs its real feedback/task attribution.', 400);
+    }
+    const taskId = job.task_id || null, task = taskId ? this.tasks.get(taskId) : null;
+    if (taskId && !task) throw durableError('SESSION_TASK_MISSING', 'The compilation task is unavailable.', 404);
+    const reasoner = this.engine.reasoner, epoch = this.database.get('privacy_epoch'), modelVersion = this.database.get('model_version', '0');
+    const authority = () => stableDigest({ shadow: this.engine.policy.shadow, rules: this.engine.policy.rules, learning: this.experiences.policy });
+    const authorityVersion = authority(), inputVersion = stableDigest(summary), contextVersion = stableDigest({ summary, learningPolicy: this.experiences.policy });
+    return this.modelCommits.context({ scope: taskId ? 'task' : 'workspace', taskId, stage: 'discovery', owner: { kind: 'job', job },
+      key: `compile:${job.payload.sourceId}:${stableDigest({ authorityVersion, modelVersion, epoch, inputVersion, contextVersion })}`,
+      bindings: { authorityVersion, modelVersion, contextVersion, privacyEpoch: task?.privacyEpoch ?? epoch, inputVersion,
+        purpose: 'experience_compile', compilationSourceId: job.payload.sourceId, compilationInputDigest: job.payload.compilationInputDigest, catalogVersion: 'experience-compile/no-tools/v1' },
+      sourceRefs: [{ kind: 'feedback', id: job.payload.sourceId }, ...(taskId ? [{ kind: 'task', id: taskId }] : [])],
+      isCurrent: () => {
+        if (this.closed || this.suspended || this.engine.reasoner !== reasoner || !this.jobs.owns(job)
+          || this.database.get('privacy_epoch') !== epoch || this.database.get('model_version', '0') !== modelVersion
+          || authority() !== authorityVersion) return false;
+        const liveJob = this.jobs.get(job.id);
+        if (liveJob.job_type !== 'compile_experience' || liveJob.queue_name !== 'learning' || liveJob.task_id !== taskId
+          || stableDigest(liveJob.payload) !== stableDigest(job.payload)) return false;
+        const current = taskId ? this.tasks.get(taskId) : null;
+        if (taskId && (!current || current.privacyInvalidated || current.userDismissed || current.control?.paused)) return false;
+        try { return stableDigest(this.experiences.compilationInput(job).summary) === inputVersion; } catch { return false; }
+      } });
+  }
+  async runCompilation(job, guard) {
+    let privateContext = null;
+    const sourceStillCurrent = () => {
+      const task = job.task_id ? this.tasks.get(job.task_id) : null;
+      if (job.task_id && (!task || task.privacyInvalidated || task.userDismissed || task.control?.paused)) return false;
+      if (!job.payload.compilationInputDigest) return false;
+      try { this.experiences.compilationInput(job, { allowEpochChange: true }); return true; } catch { return false; }
+    };
+    try {
+      if (job.payload.privacyEpoch !== Number(this.database.get('privacy_epoch')) && sourceStillCurrent()) {
+        this.database.atomic(() => {
+          this.jobs.assert(job);
+          if (!sourceStillCurrent()) throw durableError('PRIVACY_CHANGED', 'The compilation source was revoked.');
+          const payload = { ...job.payload, privacyEpoch: Number(this.database.get('privacy_epoch')) };
+          this.db.prepare("UPDATE jobs SET payload_json=? WHERE id=? AND state='running' AND lease_token=?").run(json(payload), job.id, job.lease_token);
+          job = this.jobs.get(job.id);
+        });
+      }
+      return await this.experiences.compile(job, summary => {
+        privateContext = this.compilationModelContext(job, summary);
+        return this.compile(summary, job, privateContext);
+      }, { ...guard, commit: mutation => {
+        if (privateContext) return this.modelCommits.commitSql(privateContext, mutation).value;
+        return this.database.write(mutation);
+      } });
+    } catch (error) {
+      if (privateContext && error?.code === 'SESSION_ACKED' && !this.modelCommits.hasInvocation(privateContext)) return [];
+      if (privateContext && error?.code === 'SESSION_NOT_CURRENT' && this.jobs.owns(job) && sourceStillCurrent()) {
+        throw durableError('CONTEXT_CHANGED', 'The compiler context changed; retry from the unchanged source.', 503);
+      }
+      if (privateContext && this.modelCommits.hasInvocation(privateContext) && !isModelControlFailure(error) && classifyFailure(error) === 'permanent') {
+        try { this.modelCommits.reject(privateContext, 'invalid_compilation_final'); } catch { /* keep the original validation failure */ }
+      }
+      throw error;
+    }
+  }
+  async compile(summary, job, privateContext = null) {
     try {
       if (this.generateExperience) return await this.generateExperience(summary);
-      if (this.engine.reasoner.compileExperiences?.bind && this.engine.reasoner.available()) return await this.engine.reasoner.compileExperiences(summary, `compile:${job.id}`);
+      if (this.engine.reasoner.compileExperiences?.bind && this.engine.reasoner.available()) return await this.engine.reasoner.compileExperiences(summary, `compile:${job.id}:a${job.attempts}`, privateContext || this.modelAccountingContext({ taskId: job.task_id || null, job }));
       // No compiler/model is required for P0. Absence never fabricates learning.
       return [];
     } finally { this.engine.pruneReasoningBudget({ finishedJobId: job?.id }); }
@@ -1685,7 +2214,7 @@ export class DurableRuntime {
     const task = this.tasks.get(job.task_id), experience = this.experiences.get(job.payload.experienceId);
     if (!task?.draft || task.action || draftReviewToken(task) !== job.payload.reviewToken || !experience || !['candidate', 'active'].includes(experience.status)) throw durableError('REVIEW_CHANGED', 'The reviewed trial context is no longer current.');
     const run = this.tasks.beginRun(job);
-    const context = await this.loadContext(this.tasks.get(task.id), run);
+    const context = await this.loadContext(this.tasks.get(task.id), run, { purpose: 'supervised_trial', allowedExperienceId: experience.id });
     if (!context.activation.activate || context.arbitration.conflicts.length) throw durableError('TRIAL_POLICY', 'Resolve the current policy or guidance conflict before a trial.');
     if (!context.experiences.some(record => record.id === experience.id) || experience.effect.type !== 'draft_format') throw durableError('TRIAL_SCOPE', 'The candidate does not apply to this task.');
     const original = task.draft.body;
@@ -1697,10 +2226,18 @@ export class DurableRuntime {
     const effect = { type: 'email_reply', artifactId, to: task.draft.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(body).digest('hex') };
     const step = this.experiences.step({ taskRunId: run.id, logicalStepId: `trial:${experience.id}`, stepKind: 'draft_preparation', actionFamily: 'email.send', expectedEffect: effect,
       experiences: [{ id: experience.id, relation: 'user_confirmed' }] });
+    // The preview is fenced to the exact revision, content, saved case set and
+    // (when one exists) the current pass expiry. Expiry is checked against the
+    // database clock in capture/isCurrent and immediately before any send.
+    const trialPass = experience.status === 'active' ? this.experiences.currentTrialPass(experience) : null;
+    const caseSet = this.experiences.caseSetState(experience.id);
+    const selection = { experienceId: experience.id, stepId: step.id, revision: experience.revision,
+      contentDigest: experienceContentDigest(experience), passExpiresAt: trialPass?.expires_at || null,
+      caseSetVersion: caseSet.version, caseSetDigest: caseSet.digest };
     this.store.mutate(state => {
       const current = state.tasks[task.id];
       if (draftReviewToken(current) !== job.payload.reviewToken) throw durableError('REVIEW_CHANGED', 'The draft changed during the trial.');
-      current.draft = { ...current.draft, body, experienceTrial: { experienceId: experience.id, stepId: step.id } };
+      current.draft = { ...current.draft, body, experienceTrial: selection };
       current.guidanceReviewRequired = true; current.updatedAt = iso(this.database.now());
     });
     this.database.atomic(() => {
@@ -1738,6 +2275,16 @@ export class DurableRuntime {
     for (const task of Object.values(this.store.state.tasks)) {
       if (changed && !this.memoryChangeAffects(task, changed)) continue;
       if (!this.hasQueuedTaskJob(task.id)) this.scheduleTask(task.id, `context:${version}`);
+    }
+  }
+  /** A changed Experience only invalidates tasks whose last planning context
+   * actually selected it. Other scopes keep their current runs. */
+  contextChangedForExperiences(experienceIds) {
+    this.memory.invalidate();
+    const ids = new Set(experienceIds), version = this.database.get('context_version');
+    for (const task of Object.values(this.store.state.tasks || {})) {
+      if (!this.experienceChangeAffects(task, ids)) continue;
+      if (!this.hasQueuedTaskJob(task.id)) this.scheduleTask(task.id, `experience_context:${version}`);
     }
   }
   importUncertainActions() {
@@ -1872,6 +2419,11 @@ export class DurableRuntime {
     if (this.pending) { this.kickAgain = true; return; }
     this.pending = Promise.resolve().then(() => this.scope.run(undefined, async () => {
       this.database.atomic(() => { this.tasks.situations.expireDue(); this.coordination.releaseExpired(); });
+      // Capacity facts survive crashes and drain in bounded, indexed batches.
+      // The ordinary interval continues any backlog without a retry spin.
+      for (const event of this.jobs.pendingBudgetWakes({ limit: 4 })) {
+        this.jobs.wakeBudgetDeferred({ eventId: event.id, limit: 50 });
+      }
       await this.inboxWorker.drain();
       await this.worker.drain();
       await this.kickServices();
@@ -1938,32 +2490,100 @@ export class DurableRuntime {
     const key = kind === 'network' ? 'activation_network_calls' : 'activation_external_actions';
     this.database.atomic(() => this.database.set(key, String(Number(this.database.get(key, '0')) + 1)));
   }
-  async backfill(connectorId, { limit = 20, once = false } = {}) {
+  /**
+   * The trusted facts that authorize a history-discovery pull. Checked before
+   * the provider call, after every await and immediately before any ingest,
+   * seen marker or backfill cursor write. A callback that throws is treated as
+   * no longer current, so the fence fails closed.
+   */
+  #backfillFence(connectorId, { signal = null, isCurrent = null, connector = null, privacyEpoch = null, entryLive = false } = {}) {
+    if (signal?.aborted) return 'aborted';
+    if (this.closed) return 'runtime_unavailable';
+    // A trusted caller (the webhook path) must also stop while the workspace
+    // is suspended. Direct unfenced polling keeps its previous behaviour.
+    if (this.suspended && typeof isCurrent === 'function') return 'runtime_unavailable';
+    if (typeof isCurrent === 'function') {
+      try { if (isCurrent() === false) return 'authorization_changed'; }
+      catch { return 'authorization_changed'; }
+    }
+    try {
+      if (this.privacy.permissionRevoked(connectorId)) return 'permission_revoked';
+      if (privacyEpoch != null && Number(this.database.get('privacy_epoch', '0')) !== privacyEpoch) return 'privacy_changed';
+    } catch { return 'runtime_unavailable'; }
+    const current = this.connectorFor(connectorId);
+    if (current !== connector) return 'connector_changed';
+    if (entryLive && current?.live !== true) return 'connector_unavailable';
+    return null;
+  }
+
+  #backfillAborted(reason, networkCalls = null) {
+    return { blocked: true, aborted: true, reason, advanced: 0,
+      networkCalls: Number.isFinite(networkCalls) ? networkCalls : null, historyDiscovery: 'aborted' };
+  }
+
+  async backfill(connectorId, { limit = 20, once = false, signal = null, isCurrent = null } = {}) {
     if (typeof connectorId !== 'string' || !connectorId) throw durableError('INVALID_BACKFILL', 'A connector id is required.', 400);
-    if (this.privacy.permissionRevoked(connectorId)) return { blocked: true, reason: 'permission_revoked', networkCalls: 0 };
-    const seen = `backfill-seen:${connectorId}:${Number(this.database.get('privacy_epoch', '0'))}`;
+    const connector = this.connectorFor(connectorId);
+    let privacyEpoch;
+    try { privacyEpoch = Number(this.database.get('privacy_epoch', '0')); }
+    catch { return this.#backfillAborted('runtime_unavailable', 0); }
+    const fence = { signal, isCurrent, connector, privacyEpoch, entryLive: connector?.live === true };
+    let reason = this.#backfillFence(connectorId, fence);
+    if (reason) return this.#backfillAborted(reason, 0);
+    const seen = `backfill-seen:${connectorId}:${fence.privacyEpoch}`;
     if (once && this.database.get(seen)) return { advanced: 0, skipped: true, cursor: this.database.get(`backfill:${connectorId}`, ''), networkCalls: 0, historyDiscovery: 'already' };
     const cap = Math.max(1, Math.min(50, limit));
-    const connector = this.connectorFor(connectorId);
     if (typeof connector?.listHistoricalEvents === 'function') {
-      const discovered = await connector.listHistoricalEvents({ limit: cap });
+      let discovered;
+      try {
+        // Connectors that understand a signal can cancel their request; those
+        // that do not still must not have a late result accepted below.
+        discovered = await connector.listHistoricalEvents({ limit: cap, signal });
+      } catch (error) {
+        reason = this.#backfillFence(connectorId, fence);
+        if (reason) return this.#backfillAborted(reason);
+        throw error;
+      }
+      const observedCalls = Number.isFinite(Number(discovered?.networkCalls)) ? Number(discovered.networkCalls) : null;
+      reason = this.#backfillFence(connectorId, fence);
+      if (reason) return this.#backfillAborted(reason, observedCalls);
       if (!discovered?.unavailable) {
         let ingested = 0;
         for (const event of (discovered.events || []).slice(0, cap)) {
+          reason = this.#backfillFence(connectorId, fence);
+          if (reason) return this.#backfillAborted(reason, observedCalls);
           const providerEventId = eventDeliveryKey(event);
           if (this.db.prepare('SELECT 1 FROM durable_inbox WHERE id=? OR (provider=? AND provider_event_id=?)').get(event.id, connectorId, providerEventId)) continue;
-          this.ingest(event, input => this.engine.ingestLegacy(input));
+          const outcome = this.ingest(event, input => this.engine.ingestLegacy(input));
+          if (outcome?.disposition === 'permission_revoked') return this.#backfillAborted('permission_revoked', observedCalls);
           ingested += 1;
         }
         const networkCalls = Number(discovered.networkCalls) || 0;
-        for (let index = 0; index < networkCalls; index += 1) this.noteObservation('network');
-        if (once) this.database.atomic(() => this.database.set(seen, iso(this.database.now())));
+        // The last check and the persistent writes are one synchronous
+        // section: an old permit is never reused after an await.
+        let late = null;
+        this.database.atomic(() => {
+          late = this.#backfillFence(connectorId, fence);
+          if (late) return;
+          for (let index = 0; index < networkCalls; index += 1) this.noteObservation('network');
+          if (once) this.database.set(seen, iso(this.database.now()));
+        });
+        if (late) return this.#backfillAborted(late, observedCalls);
         return { advanced: ingested, cursor: this.database.get(`backfill:${connectorId}`, ''), networkCalls, historyDiscovery: 'available' };
       }
     }
+    reason = this.#backfillFence(connectorId, fence);
+    if (reason) return this.#backfillAborted(reason, 0);
     const cursor = this.database.get(`backfill:${connectorId}`, '');
     const rows = this.db.prepare("SELECT received_at FROM durable_inbox WHERE provider=? AND state='processed' AND received_at>? ORDER BY received_at LIMIT ?").all(connectorId, cursor, cap);
-    if (rows.length) this.database.atomic(() => this.database.set(`backfill:${connectorId}`, rows.at(-1).received_at));
+    if (rows.length) {
+      let late = null;
+      this.database.atomic(() => {
+        late = this.#backfillFence(connectorId, fence);
+        if (!late) this.database.set(`backfill:${connectorId}`, rows.at(-1).received_at);
+      });
+      if (late) return this.#backfillAborted(late, 0);
+    }
     return { advanced: rows.length, cursor: this.database.get(`backfill:${connectorId}`, ''), networkCalls: 0, historyDiscovery: 'unavailable' };
   }
   activationMetrics(options) { return activationMetrics(this.database, options); }

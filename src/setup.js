@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
-import { connectionProvider, validClientSecret, validPublicClientId } from './connection-catalog.js';
+import { connectionProvider, validBrokerOrigin, validClientSecret, validPublicClientId } from './connection-catalog.js';
+import { validOpaqueId, validRefreshProof } from './notion-broker-protocol.js';
 import { readRegularFile } from './local-files.js';
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
@@ -56,6 +57,8 @@ export function googleWorkspacePath(directory, accountId) {
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 function validText(value, max = 8192) { return typeof value === 'string' && value.trim().length > 0 && value.length <= max; }
+const BROKER_CAPABILITY_PATTERN = /^v1\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{43}$/;
+const NOTION_ACCOUNT_ID_PATTERN = /^[0-9a-f-]{32,80}$/i;
 
 function normalise(state) {
   const result = clone(DEFAULT_STATE);
@@ -174,21 +177,122 @@ export class LocalSetupStore {
     return this.#write({ ...state, connections: { ...state.connections, [id]: next } });
   }
 
+  /** Stage the public Notion broker descriptor. An active authorization keeps
+   * its exact client/grant binding: a different descriptor waits as pending
+   * until the next consent succeeds instead of replacing working credentials. */
+  saveConnectionBrokerClient(id, { clientId, brokerUrl } = {}) {
+    if (id !== 'notion') throw new Error('Only Notion uses a broker client descriptor.');
+    if (!validPublicClientId(clientId)) throw new Error('A public Notion Client ID is required.');
+    const origin = validBrokerOrigin(brokerUrl);
+    if (!origin) throw new Error('The Notion broker URL must be an exact HTTPS origin.');
+    const state = this.get();
+    const old = state.connections[id] || {};
+    const active = Boolean(old.accessToken && (old.broker || old.clientSecret));
+    let next;
+    if (active && (old.clientId !== clientId || old.brokerUrl !== origin)) {
+      next = { ...old, pendingClientId: clientId, pendingBrokerUrl: origin };
+    } else {
+      next = { ...old, clientId, brokerUrl: origin };
+      delete next.pendingClientId;
+      delete next.pendingBrokerUrl;
+      // A broker descriptor is secretless. Without an active authorization it
+      // replaces stale owner-private configuration instead of mixing modes.
+      if (!old.accessToken) delete next.clientSecret;
+    }
+    // Choosing a broker descriptor cancels an uncommitted direct-consent draft.
+    delete next.pendingClientSecret;
+    return this.#write({ ...state, connections: { ...state.connections, [id]: next } });
+  }
+
+  /** Persist a complete broker-backed authorization. The broker proof stays in
+   * the private 0600 setup file; an owner-private client secret is never
+   * inherited into a broker grant. */
+  saveConnectionBrokerAuthorization(id, authorization = {}) {
+    if (id !== 'notion') throw new Error('Only Notion uses broker authorization.');
+    const clientId = authorization.clientId;
+    const brokerUrl = validBrokerOrigin(authorization.brokerUrl);
+    if (!validPublicClientId(clientId) || !brokerUrl) throw new Error('A valid Notion broker client is required.');
+    const broker = authorization.broker;
+    if (!broker || broker.issuer !== brokerUrl || !validOpaqueId(broker.grantId)
+      || typeof broker.refreshCapability !== 'string' || !BROKER_CAPABILITY_PATTERN.test(broker.refreshCapability)
+      || !validRefreshProof(broker.refreshProof)) throw new Error('The Notion broker authorization is incomplete.');
+    const source = authorization.account;
+    if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('A verified provider account is required.');
+    const { id: accountId, userId, workspaceId, label } = source;
+    // Local DTOs must carry actual strings; coercion would let an array or an
+    // object-shaped value pass as a bounded account identifier.
+    if (typeof accountId !== 'string' || typeof userId !== 'string' || typeof workspaceId !== 'string' || typeof label !== 'string'
+      || !validText(authorization.accessToken, 32_000) || !validText(accountId, 512) || !validText(label, 320)
+      || !NOTION_ACCOUNT_ID_PATTERN.test(userId) || !NOTION_ACCOUNT_ID_PATTERN.test(workspaceId)
+      || accountId !== `${workspaceId}:${userId}`) throw new Error('A verified provider account is required.');
+    const account = { id: accountId, userId, workspaceId, label };
+    for (const [key, max] of [['name', 200], ['workspaceName', 200]]) {
+      if (source[key] == null) continue;
+      if (typeof source[key] !== 'string' || !validText(source[key], max)) throw new Error('A verified provider account is required.');
+      account[key] = source[key];
+    }
+    if (authorization.refreshToken != null && !validText(authorization.refreshToken, 32_000)) throw new Error('The Notion broker returned an invalid refresh token.');
+    if (authorization.expiresAt != null && (typeof authorization.expiresAt !== 'string' || !Number.isFinite(Date.parse(authorization.expiresAt)))) throw new Error('The Notion broker returned an invalid expiry.');
+    const state = this.get();
+    const previous = state.connections[id] || {};
+    const record = {
+      clientId,
+      brokerUrl,
+      accessToken: authorization.accessToken,
+      refreshToken: authorization.refreshToken || null,
+      expiresAt: authorization.expiresAt || null,
+      account,
+      scopes: Array.isArray(authorization.scopes) ? authorization.scopes.filter(scope => typeof scope === 'string') : [],
+      authorizedAt: previous.account?.id === account.id ? previous.authorizedAt : new Date().toISOString(),
+      broker: { issuer: brokerUrl, grantId: broker.grantId, refreshCapability: broker.refreshCapability, refreshProof: broker.refreshProof }
+    };
+    return this.#write({ ...state, connections: { ...state.connections, [id]: record } });
+  }
+
+  /** Persist a narrow reconnect requirement only while the saved grant is still
+   * exactly the one that produced the ambiguous refresh. The whole private
+   * binding takes part, so a same-grant rebind with a new proof/capability or
+   * account is left untouched. */
+  markConnectionBrokerReauthorization(id, expected = {}) {
+    if (id !== 'notion') throw new Error('Only Notion uses broker authorization.');
+    const state = this.get();
+    const current = state.connections[id] || {};
+    if (!current.broker || current.brokerReauthorizationRequired === true) return this.get();
+    const text = value => typeof value === 'string' && value.length > 0;
+    if (!text(expected.clientId) || !text(expected.issuer) || !text(expected.grantId)
+      || !text(expected.refreshCapability) || !text(expected.refreshProof)
+      || !text(expected.accountId) || !text(expected.userId) || !text(expected.workspaceId)) return this.get();
+    if (current.clientId !== expected.clientId || current.broker.issuer !== expected.issuer
+      || current.broker.grantId !== expected.grantId || current.broker.refreshCapability !== expected.refreshCapability
+      || current.broker.refreshProof !== expected.refreshProof
+      || (current.refreshToken || null) !== (expected.refreshToken || null)
+      || current.account?.id !== expected.accountId || current.account?.userId !== expected.userId
+      || current.account?.workspaceId !== expected.workspaceId) return this.get();
+    const next = { ...current, brokerReauthorizationRequired: true };
+    return this.#write({ ...state, connections: { ...state.connections, [id]: next } });
+  }
+
   saveConnectionCredentials(id, { clientId, clientSecret } = {}) {
     const provider = connectionProvider(id);
     if (provider.flow !== 'code') throw new Error('This provider does not use a client secret.');
     if (!validPublicClientId(clientId) || (id !== 'slack' || clientSecret != null) && !validClientSecret(clientSecret)) throw new Error('Enter the registered Client ID and Client Secret, not an access token.');
     const state = this.get();
     const old = state.connections[id] || {};
-    if (old.clientId === clientId && old.clientSecret === clientSecret) return state;
+    if (old.clientId === clientId && old.clientSecret === clientSecret && !(id === 'notion' && old.pendingBrokerUrl)) return state;
     // Starting a new consent must not destroy a working authorization. Keep
     // the active token until the new consent succeeds; the session carries the
-    // new client credentials to the token exchange.
+    // new client credentials to the token exchange. A broker-backed Notion
+    // record keeps its mode instead of mixing a secret into the active grant.
+    const brokerBound = id === 'notion' && Boolean(old.broker || old.brokerUrl);
     const next = old.accessToken
-      ? old.clientId === clientId
+      ? old.clientId === clientId && !brokerBound
         ? { ...old, clientSecret }
         : { ...old, pendingClientId: clientId, pendingClientSecret: clientSecret }
       : { ...old, clientId, clientSecret };
+    if (id === 'notion') {
+      delete next.pendingBrokerUrl;
+      if (!old.accessToken) delete next.brokerUrl;
+    }
     return this.#write({ ...state, connections: { ...state.connections, [id]: next } });
   }
 
@@ -216,8 +320,31 @@ export class LocalSetupStore {
     const provider = connectionProvider(id);
     const state = this.get(), saved = state.connections[id] || {}, kept = {};
     if (saved.clientId) kept.clientId = saved.clientId;
-    if (provider.flow === 'code' && validClientSecret(saved.clientSecret)) kept.clientSecret = saved.clientSecret;
+    if (id === 'notion' && validBrokerOrigin(saved.brokerUrl)) {
+      // Broker reconnect needs only the public descriptor. Tokens, grant
+      // capability, refresh proof and any stale owner secret are erased.
+      kept.brokerUrl = validBrokerOrigin(saved.brokerUrl);
+    } else if (provider.flow === 'code' && validClientSecret(saved.clientSecret)) {
+      kept.clientSecret = saved.clientSecret;
+    }
     return this.#write({ ...state, connections: { ...state.connections, [id]: kept } });
+  }
+
+  /** Public per-connection status. Never includes a secret, token, broker
+   * proof, capability, grant identifier or the private broker object. */
+  publicConnection(id) {
+    const provider = connectionProvider(id);
+    const saved = this.getConnection(id);
+    const brokerMode = id === 'notion' && Boolean(validBrokerOrigin(saved.brokerUrl));
+    const configured = provider.flow === 'token' ? true
+      : brokerMode ? Boolean(validPublicClientId(saved.clientId) && validBrokerOrigin(saved.brokerUrl))
+        : provider.flow === 'code' ? Boolean(saved.clientId && (id === 'slack' || saved.clientSecret))
+          : Boolean(saved.clientId);
+    return {
+      clientId: saved.pendingClientId || saved.clientId || null,
+      configured,
+      ...(id === 'notion' ? { authMode: brokerMode ? 'broker' : 'owner-private' } : {})
+    };
   }
 
   setMonitoring(patch) {

@@ -9,6 +9,7 @@ import { DurableRuntime } from '../src/durable/runtime.js';
 import { WorkEngine } from '../src/engine.js';
 import { NullReasoner, OpenAiCompatibleReasoner, PiReasoner } from '../src/reasoning.js';
 import { lexicalEmbedding } from '../src/durable/memory.js';
+import { DurableReasoningSessions, runWithOperation } from '../src/durable/reasoning-sessions.js';
 
 const quote = 'Cedar approved budget is ¥62,000 including tax.';
 const corrected = 'Cedar approved budget is ¥65,000 including tax.';
@@ -81,6 +82,32 @@ test('a real task tool call remembers a source quote, commits provenance and wri
   });
   assert.equal(env.store.db.prepare('SELECT COUNT(*) n FROM user_memories WHERE id=?').get(id).n, 1);
   assert.equal(env.store.state.outbox.length, 0);
+});
+
+test('a session operation and its verified memory receipt commit through one stable operation id', async t => {
+  const env = fixture(t);
+  const sessions = new DurableReasoningSessions(env.runtime.database);
+  const owner = { kind: 'workspace', ownerId: 'memory-harness', token: 'memory-token' };
+  const session = sessions.begin({ logicalKey: 'memory-receipt-session', owner,
+    bindings: { authorityVersion: 1, privacyEpoch: 0, contextVersion: 0, inputVersion: 0, catalogVersion: 1 }, isCurrent: () => true });
+  const operationId = 'memory-operation-1';
+  sessions.toolIntent({ id: session.id, owner, turn: 0, callIndex: 0, tool: 'update_memory', effect: 'write',
+    args: { operation: 'remember' }, operationId, sourceRefs: [{ kind: 'event', id: 'event:budget' }], isCurrent: () => true, claimId: session.claimId });
+  await env.inRun(async tools => {
+    const operation = { sessionId: session.id, operationId, turn: 0, callIndex: 0, tool: 'update_memory', effect: 'write', argsDigest: 'digest' };
+    const result = unpack(await runWithOperation(operation, () => tools.update_memory.execute('remember', {
+      operation: 'remember', evidenceFrom: 'task_source', quote, text: quote
+    })));
+    const mapped = env.store.db.prepare('SELECT session_id,operation_id,status,execution_id,local_ref FROM reasoning_session_operations WHERE operation_id=?').get(operationId);
+    assert.equal(mapped.session_id, session.id);
+    assert.equal(mapped.status, 'completed');
+    assert.equal(mapped.local_ref, result.memory.id);
+    const execution = env.runtime.ledger.get(mapped.execution_id);
+    assert.equal(execution.status, 'verified');
+    assert.equal(execution.tool, 'update_memory');
+    assert.equal(env.store.db.prepare('SELECT COUNT(*) n FROM user_memories WHERE id=?').get(result.memory.id).n, 1);
+    assert.equal(env.store.db.prepare("SELECT COUNT(*) n FROM tool_executions WHERE tool='update_memory'").get().n, 1);
+  });
 });
 
 test('the harness applies a current user correction to the same memory store the Explorer reads', async t => {

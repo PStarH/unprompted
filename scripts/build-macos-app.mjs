@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { publicClientConfiguration } from '../src/connection-catalog.js';
+import { distributionClientConfiguration } from './distribution-clients.mjs';
 import { readRegularFile } from '../src/local-files.js';
 import { copyApplicationTree, copyDependencyTree } from './bundle-files.mjs';
 
@@ -19,6 +19,10 @@ const ARCH_MAP = { arm64: 'arm64', x64: 'x64' };
 const arch = ARCH_MAP[process.arch];
 if (process.platform !== 'darwin' || !arch) {
   throw new Error(`The local app builder needs macOS arm64 or x64; found ${process.platform}/${process.arch}.`);
+}
+const applicationVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+if (typeof applicationVersion !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(applicationVersion)) {
+  throw new Error('package.json must declare a numeric major.minor.patch version before building the local app.');
 }
 
 const args = process.argv.slice(2);
@@ -45,7 +49,7 @@ if (googleClientFile) {
 if (fs.existsSync(output)) throw new Error(`Output already exists; move it aside or choose --out PATH: ${output}`);
 let provisionedConnectorClients = null;
 if (connectorClientFile) {
-  provisionedConnectorClients = publicClientConfiguration(JSON.parse(readRegularFile(connectorClientFile, { maxBytes: 64 * 1024 })));
+  provisionedConnectorClients = distributionClientConfiguration(JSON.parse(readRegularFile(connectorClientFile, { maxBytes: 64 * 1024 })));
 }
 
 const archiveName = `node-${NODE_VERSION}-darwin-${arch}.tar.gz`;
@@ -115,6 +119,13 @@ try {
   const dependencies = dependencyList(nodePath);
   assertSystemDependencies(dependencies);
 
+  const runtimeRoot = path.dirname(nodePath);
+  const runtimeLicensePath = path.join(runtimeRoot, 'LICENSE');
+  run('tar', ['-xzf', archivePath, '--strip-components=1', '-C', runtimeRoot, `${archiveName.slice(0, -7)}/LICENSE`]);
+  const runtimeLicenseStats = fs.lstatSync(runtimeLicensePath);
+  if (!runtimeLicenseStats.isFile() || runtimeLicenseStats.size === 0) throw new Error('The official Node archive did not contain a nonempty root LICENSE.');
+  const runtimeLicenseSha256 = await sha256(runtimeLicensePath);
+
   fs.mkdirSync(appRoot, { recursive: true });
   copyApplicationTree(path.join(ROOT, 'src'), path.join(appRoot, 'src'));
   copyApplicationTree(path.join(ROOT, 'public'), path.join(appRoot, 'public'));
@@ -123,6 +134,16 @@ try {
   if (provisionedConnectorClients) fs.writeFileSync(path.join(appRoot, 'connector-clients.json'), JSON.stringify(provisionedConnectorClients) + '\n');
   const lockPath = path.join(ROOT, 'package-lock.json');
   if (fs.existsSync(lockPath)) fs.copyFileSync(lockPath, path.join(appRoot, 'package-lock.json'));
+  const applicationLicensePath = path.join(appRoot, 'LICENSE');
+  fs.copyFileSync(path.join(ROOT, 'LICENSE'), applicationLicensePath);
+  const applicationLicenseStats = fs.lstatSync(applicationLicensePath);
+  if (!applicationLicenseStats.isFile() || applicationLicenseStats.size === 0) throw new Error('The application LICENSE is missing or empty.');
+  const applicationLicenseSha256 = await sha256(applicationLicensePath);
+  const applicationNoticePath = path.join(appRoot, 'NOTICE');
+  fs.copyFileSync(path.join(ROOT, 'NOTICE'), applicationNoticePath);
+  const applicationNoticeStats = fs.lstatSync(applicationNoticePath);
+  if (!applicationNoticeStats.isFile() || applicationNoticeStats.size === 0) throw new Error('The application NOTICE is missing or empty.');
+  const applicationNoticeSha256 = await sha256(applicationNoticePath);
 
   const piPackages = ['@earendil-works/pi-agent-core', '@earendil-works/pi-ai'];
   const piInstalled = piPackages.every(name => fs.existsSync(path.join(ROOT, 'node_modules', name, 'package.json')));
@@ -208,8 +229,8 @@ done
 <key>CFBundleName</key><string>Unprompted</string>
 <key>CFBundleDisplayName</key><string>Unprompted</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
-<key>CFBundleVersion</key><string>0.3.0</string>
+<key>CFBundleShortVersionString</key><string>${applicationVersion}</string>
+<key>CFBundleVersion</key><string>${applicationVersion}</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Unprompted reads the Notes folders and Reminders lists you select. It can create notes in a selected folder when you explicitly authorize it.</string>
@@ -220,6 +241,7 @@ done
   const verification = {
     runtime: 'Node.js',
     version: nodeVersion,
+    applicationVersion,
     architecture: arch,
     binaryArchitectures,
     archiveName,
@@ -227,6 +249,9 @@ done
     checksumSource: checksumsUrl,
     archiveSha256: actualArchiveSha256,
     bundledBinarySha256: nodeBinarySha256,
+    applicationLicenseSha256,
+    applicationNoticeSha256,
+    runtimeLicenseSha256,
     linkedLibraries: dependencies,
     linkedLibraryCheck: 'all linked libraries are in /System/Library or /usr/lib',
     packageLockIncluded: fs.existsSync(path.join(appRoot, 'package-lock.json')),

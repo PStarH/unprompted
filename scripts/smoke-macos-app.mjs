@@ -54,7 +54,28 @@ if (manifest.piHarness?.available) {
   assert.doesNotMatch(JSON.stringify(manifest.piHarness), /available.*true/);
 }
 run('/bin/bash', ['-n', path.join(contents, 'MacOS', 'Unprompted')]);
-run('/usr/bin/plutil', ['-lint', path.join(contents, 'Info.plist')]);
+const infoPlist = path.join(contents, 'Info.plist');
+run('/usr/bin/plutil', ['-lint', infoPlist]);
+const bundledVersion = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version;
+const shortVersion = run('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', infoPlist]).trim();
+const bundleVersion = run('/usr/bin/plutil', ['-extract', 'CFBundleVersion', 'raw', '-o', '-', infoPlist]).trim();
+assert.equal(shortVersion, bundledVersion, 'Info.plist CFBundleShortVersionString matches the bundled package.json version');
+assert.equal(bundleVersion, bundledVersion, 'Info.plist CFBundleVersion matches the bundled package.json version');
+assert.equal(manifest.applicationVersion, bundledVersion, 'verification.json applicationVersion matches the bundled package version');
+const applicationLicensePath = path.join(appRoot, 'LICENSE');
+const runtimeLicensePath = path.join(resources, 'runtime', 'LICENSE');
+for (const [filename, label] of [[applicationLicensePath, 'app LICENSE'], [runtimeLicensePath, 'runtime LICENSE']]) {
+  const stats = fs.lstatSync(filename, { throwIfNoEntry: false });
+  assert.ok(stats?.isFile(), `${label} is a regular file`);
+  assert.ok(stats.size > 0, `${label} is not empty`);
+}
+assert.equal(manifest.applicationLicenseSha256, sha256(applicationLicensePath), 'app LICENSE hash matches the build manifest');
+assert.equal(manifest.runtimeLicenseSha256, sha256(runtimeLicensePath), 'runtime LICENSE hash matches the build manifest');
+const applicationNoticePath = path.join(appRoot, 'NOTICE');
+const applicationNoticeStats = fs.lstatSync(applicationNoticePath, { throwIfNoEntry: false });
+assert.ok(applicationNoticeStats?.isFile(), 'app NOTICE is a regular file');
+assert.ok(applicationNoticeStats.size > 0, 'app NOTICE is not empty');
+assert.equal(manifest.applicationNoticeSha256, sha256(applicationNoticePath), 'app NOTICE hash matches the build manifest');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-app-smoke-'));
 let port;

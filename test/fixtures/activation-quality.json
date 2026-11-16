@@ -1,0 +1,2127 @@
+{
+  "schema": 1,
+  "fixtureVersion": "activation-quality-fixture-2026-11-13.1",
+  "oracleVersion": "central-activation-gold-2026-11-12.1",
+  "authoredBy": "central Codex before candidate execution",
+  "oracleRules": [
+    "不得从production输出或被测model答案反推expected",
+    "case说明与期望不得为取绿改写；歧义交中央",
+    "同Situation关联不等于provider event合成一个，provenance保持",
+    "fakeprovider只表示来源模拟；actualmodel subset单独计数"
+  ],
+  "provenance": {
+    "sourceGoldPath": ".internal/agents/codex/2026-11-12-central/56-activation-quality-gold.json",
+    "sourceGoldSha256": "2d80200cbfbb78a788b2467008a3f0c3b603420d719c2b7c612bd3639b377523",
+    "copyRule": "id, axis, description, expected and notes are copied verbatim; input, execution, measure and fixture metadata are implementer additions.",
+    "clockStart": "2026-10-28T12:00:00.000Z"
+  },
+  "cases": [
+    {
+      "id": "D1",
+      "axis": "dedupe",
+      "description": "同一Slack消息同provider/account/id/revision与完全相同正文连续送达三次：Alex直接请Sam审核Atlas proposal。",
+      "expected": {
+        "activation": "once",
+        "grouping": "unchanged",
+        "externalWrites": 0
+      },
+      "notes": "首次处理完后重复输入不得新增assessment/model调用或task。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:D1",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:slack:ATLAS:msg-d1",
+            "providerRevision": "rev-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": null,
+            "meta": {},
+            "payload": {
+              "id": "slack:ATLAS:msg-d1",
+              "threadId": "slack:ATLAS:thread-d1",
+              "from": "Alex",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please review the Atlas proposal and send me your comments by Monday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            },
+            "repeat": 3
+          }
+        ]
+      }
+    },
+    {
+      "id": "D2",
+      "axis": "dedupe",
+      "description": "相同GitHub repository+issue native id+revision由同一pull分页重复出现。",
+      "expected": {
+        "activation": "once",
+        "grouping": "unchanged",
+        "externalWrites": 0
+      },
+      "notes": "只一份工作身份，保留实际provider identity。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:D2",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "github_issue",
+            "providerEventId": "issue:acct:101",
+            "providerRevision": "rev-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "github:acct:101",
+              "title": "Review proposal",
+              "body": "Please review the proposal.",
+              "repository": "team-fixture/atlas",
+              "number": 7,
+              "state": "open",
+              "assigned": true,
+              "assignee": "sam",
+              "accountId": "acct",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "url": "https://github.com/team-fixture/atlas/issues/7",
+              "author": "alex"
+            },
+            "repeat": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "D3",
+      "axis": "dedupe",
+      "description": "同一个standing谓词遇到相同event ID被队列重复投递。",
+      "expected": {
+        "activation": "once",
+        "grouping": "unchanged",
+        "externalWrites": 0
+      },
+      "notes": "意图/evaluator version一致，重复不新增评估。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:D3",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "setup": [
+          {
+            "kind": "intent",
+            "spec": {
+              "description": "Watch Atlas review requests",
+              "desiredOutcome": "Prepare Atlas review comments",
+              "prefilter": {
+                "connectorIds": [
+                  "google"
+                ],
+                "eventTypes": [
+                  "email.received"
+                ],
+                "roles": [
+                  "DIRECT_ACTOR"
+                ],
+                "tokens": [
+                  "atlas"
+                ]
+              },
+              "prohibited": [
+                "external_write"
+              ]
+            }
+          }
+        ],
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:d3-event",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "d3-event",
+              "threadId": "thread-d3-event",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas status",
+              "body": "Atlas proposal status note.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            },
+            "repeat": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "D4",
+      "axis": "dedupe",
+      "description": "未变化的Drive文档同id+etag重复观察；之前已有相关Atlas任务。",
+      "expected": {
+        "activation": "no_new",
+        "grouping": "unchanged",
+        "externalWrites": 0
+      },
+      "notes": "不能仅轮询到达就重做LLM规划。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:D4",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:d4-mail",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "d4-mail",
+              "threadId": "thread-d4-mail",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal update",
+              "body": "Please update the Atlas proposal with the latest experiment results and send it by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          },
+          {
+            "kind": "document",
+            "connectorId": "google",
+            "source": "google",
+            "eventType": "document.modified",
+            "providerEventId": "drive:atlas-doc",
+            "providerRevision": "etag-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "drive:atlas-doc",
+              "title": "Atlas proposal",
+              "content": "Atlas proposal with experiment results",
+              "modifiedAt": "2026-10-28T12:00:00.000Z",
+              "kind": "document"
+            },
+            "repeat": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "U1",
+      "axis": "revision",
+      "description": "同Slack native消息r1请求Friday proposal，r2明确改为Monday且增加sample size，迟到r1最后到达。",
+      "expected": {
+        "activation": "latest",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "最新任务是r2，迟到r1不覆盖/重新激活。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:U1",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:slack:ATLAS:msg-u1",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": null,
+            "meta": {},
+            "payload": {
+              "id": "slack:ATLAS:msg-u1",
+              "threadId": "slack:ATLAS:thread-u1",
+              "from": "Alex",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please send the Atlas proposal by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "updatedAt": "2026-10-28T12:00:00.000Z"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:slack:ATLAS:msg-u1",
+            "providerRevision": "r2",
+            "at": "2026-10-28T13:00:00.000Z",
+            "role": null,
+            "meta": {},
+            "payload": {
+              "id": "slack:ATLAS:msg-u1",
+              "threadId": "slack:ATLAS:thread-u1",
+              "from": "Alex",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please send the Atlas proposal by Monday and include the sample size.",
+              "receivedAt": "2026-10-28T13:00:00.000Z",
+              "updatedAt": "2026-10-28T13:00:00.000Z"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:slack:ATLAS:msg-u1",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": null,
+            "meta": {},
+            "payload": {
+              "id": "slack:ATLAS:msg-u1",
+              "threadId": "slack:ATLAS:thread-u1",
+              "from": "Alex",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please send the Atlas proposal by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "updatedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "U2",
+      "axis": "revision",
+      "description": "GitHub issue分配给Sam后明确取消分配，再迟到重复assigned旧revision。",
+      "expected": {
+        "activation": "withdrawn",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "保留历史provenance，撤回后不自动重新激活。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:U2",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "github_issue",
+            "providerEventId": "issue:acct:102",
+            "providerRevision": "rev-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "github:acct:102",
+              "title": "Review proposal",
+              "body": "Please review the proposal.",
+              "repository": "team-fixture/atlas",
+              "number": 8,
+              "state": "open",
+              "assigned": true,
+              "assignee": "sam",
+              "accountId": "acct",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "url": "https://github.com/team-fixture/atlas/issues/8",
+              "author": "alex"
+            }
+          },
+          {
+            "kind": "github_issue",
+            "providerEventId": "issue:acct:102",
+            "providerRevision": "rev-2",
+            "at": "2026-10-28T13:00:00.000Z",
+            "payload": {
+              "id": "github:acct:102",
+              "title": "Review proposal",
+              "body": "Please review the proposal.",
+              "repository": "team-fixture/atlas",
+              "number": 8,
+              "state": "open",
+              "assigned": false,
+              "assignee": "sam",
+              "accountId": "acct",
+              "updatedAt": "2026-10-28T13:00:00.000Z",
+              "url": "https://github.com/team-fixture/atlas/issues/8",
+              "author": "alex"
+            }
+          },
+          {
+            "kind": "github_issue",
+            "providerEventId": "issue:acct:102",
+            "providerRevision": "rev-1-late",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "github:acct:102",
+              "title": "Review proposal",
+              "body": "Please review the proposal.",
+              "repository": "team-fixture/atlas",
+              "number": 8,
+              "state": "open",
+              "assigned": true,
+              "assignee": "sam",
+              "accountId": "acct",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "url": "https://github.com/team-fixture/atlas/issues/8",
+              "author": "alex"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "U3",
+      "axis": "revision",
+      "description": "当前Calendar event已取消，随后到达旧etag的未取消event。",
+      "expected": {
+        "activation": "withdrawn",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "取消事实不被旧版本复活。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:U3",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "document",
+            "connectorId": "google",
+            "source": "google",
+            "eventType": "document.modified",
+            "providerEventId": "calendar:primary:cal-1",
+            "providerRevision": "etag-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "google:calendar:primary:cal-1",
+              "title": "Atlas review meeting",
+              "kind": "calendar_event",
+              "content": "Atlas review meeting\nStart: 2026-10-30",
+              "modifiedAt": "2026-10-28T12:00:00.000Z"
+            }
+          },
+          {
+            "kind": "document",
+            "connectorId": "google",
+            "source": "google",
+            "eventType": "document.unavailable",
+            "providerEventId": "calendar:primary:cal-1:unavailable",
+            "providerRevision": "etag-2",
+            "at": "2026-10-28T13:00:00.000Z",
+            "payload": {
+              "id": "google:calendar:primary:cal-1",
+              "title": "Atlas review meeting",
+              "reason": "cancelled",
+              "modifiedAt": "2026-10-28T13:00:00.000Z"
+            }
+          },
+          {
+            "kind": "document",
+            "connectorId": "google",
+            "source": "google",
+            "eventType": "document.modified",
+            "providerEventId": "calendar:primary:cal-1",
+            "providerRevision": "etag-old",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "google:calendar:primary:cal-1",
+              "title": "Atlas review meeting",
+              "kind": "calendar_event",
+              "content": "Atlas review meeting",
+              "modifiedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "U4",
+      "axis": "revision",
+      "description": "Notion同page新revision移除了一段唯一supporting quote，旧revision迟到。",
+      "expected": {
+        "activation": "latest",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "旧quote不能使缺证据工作变完成/免审。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:U4",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "document",
+            "connectorId": "notion",
+            "source": "notion",
+            "eventType": "document.modified",
+            "providerEventId": "notion:page-1",
+            "providerRevision": "rev-2",
+            "at": "2026-10-28T13:00:00.000Z",
+            "payload": {
+              "id": "notion:page-1",
+              "title": "Atlas proposal",
+              "content": "Atlas proposal without the supporting quote.",
+              "modifiedAt": "2026-10-28T13:00:00.000Z",
+              "kind": "document"
+            }
+          },
+          {
+            "kind": "document",
+            "connectorId": "notion",
+            "source": "notion",
+            "eventType": "document.modified",
+            "providerEventId": "notion:page-1",
+            "providerRevision": "rev-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "notion:page-1",
+              "title": "Atlas proposal",
+              "content": "Atlas proposal with the supporting quote: delivery is confirmed.",
+              "modifiedAt": "2026-10-28T12:00:00.000Z",
+              "kind": "document"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G1",
+      "axis": "grouping",
+      "description": "邮件和Slack都明确要求Sam审核同一canonical repo team-fixture/atlas issue#7，意图与目标一致。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "两provider事件仍独立，Situation可共同关联；不得把provenance丢成单event。",
+      "execution": "not_executed",
+      "semanticQuality": "unknown",
+      "executionReason": "Semantic same-Situation grouping requires a model; deterministic baseline only records provider identity and task distinctness.",
+      "measure": "measure:G1",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g1-mail",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g1-mail",
+              "threadId": "thread-g1-mail",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas issue 7 review",
+              "body": "Please review the Atlas issue 7 proposal and send comments by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g1-slack",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": null,
+            "meta": {},
+            "payload": {
+              "id": "g1-slack",
+              "threadId": "thread-g1-slack",
+              "from": "Alex",
+              "to": "sam@example.test",
+              "subject": "Message from Alex",
+              "body": "Please review the Atlas issue 7 proposal and send comments by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G2",
+      "axis": "grouping",
+      "description": "GitHub repo team-fixture/atlas issue#7与team-fixture/boreal issue#7，标题都Review proposal。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "distinct",
+        "externalWrites": 0
+      },
+      "notes": "同标题/issue number不够合并。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:G2",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "github_issue",
+            "providerEventId": "issue:acct:201",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "github:acct:201",
+              "title": "Review proposal",
+              "body": "Please review the proposal.",
+              "repository": "team-fixture/atlas",
+              "number": 7,
+              "state": "open",
+              "assigned": true,
+              "assignee": "sam",
+              "accountId": "acct",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "url": "https://github.com/team-fixture/atlas/issues/7",
+              "author": "alex"
+            }
+          },
+          {
+            "kind": "github_issue",
+            "providerEventId": "issue:acct:202",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "github:acct:202",
+              "title": "Review proposal",
+              "body": "Please review the proposal.",
+              "repository": "team-fixture/boreal",
+              "number": 7,
+              "state": "open",
+              "assigned": true,
+              "assignee": "sam",
+              "accountId": "acct",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "url": "https://github.com/team-fixture/boreal/issues/7",
+              "author": "alex"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G3",
+      "axis": "grouping",
+      "description": "同项目Atlas分别要求Sam交付pricing spreadsheet和legal review memo，未声明替代关系。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "distinct",
+        "externalWrites": 0
+      },
+      "notes": "相关项目不是同责任。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:G3",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g3-spreadsheet",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g3-spreadsheet",
+              "threadId": "thread-g3-spreadsheet",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas pricing spreadsheet",
+              "body": "Please prepare the Atlas pricing spreadsheet and send it by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g3-memo",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g3-memo",
+              "threadId": "thread-g3-memo",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas legal review memo",
+              "body": "Please prepare the Atlas legal review memo and send it by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G4",
+      "axis": "grouping",
+      "description": "两个明确不同客户实体Atlas China与Atlas Europe，都要求proposal review。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "distinct",
+        "externalWrites": 0
+      },
+      "notes": "表面关键词不得跨实体并。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:G4",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g4-china",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g4-china",
+              "threadId": "thread-g4-china",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas China proposal",
+              "body": "Please review the Atlas China proposal and send comments by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas-china"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g4-europe",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g4-europe",
+              "threadId": "thread-g4-europe",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas Europe proposal",
+              "body": "Please review the Atlas Europe proposal and send comments by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas-europe"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G5",
+      "axis": "grouping",
+      "description": "两个不同已授权本地根目录都有proposal.md，内容和来源路径分别属于Atlas/Boreal。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "distinct",
+        "externalWrites": 0
+      },
+      "notes": "文件名相同不能跨根identity并。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:G5",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "document",
+            "connectorId": "local_files",
+            "source": "local_files",
+            "eventType": "document.modified",
+            "providerEventId": "local:root-atlas:proposal",
+            "providerRevision": "1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "local_files:root-atlas:document:proposal",
+              "title": "proposal.md",
+              "content": "Atlas proposal",
+              "modifiedAt": "2026-10-28T12:00:00.000Z",
+              "kind": "document",
+              "accountId": "root-atlas"
+            }
+          },
+          {
+            "kind": "task_observed",
+            "connectorId": "local_files",
+            "source": "local_files",
+            "providerEventId": "local:root-atlas:task-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "local_files:root-atlas:task-1",
+              "title": "Review the Atlas proposal",
+              "state": "open",
+              "documentId": "local_files:root-atlas:document:proposal",
+              "documentTitle": "proposal.md",
+              "accountId": "root-atlas",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "sourceObservationRevision": 1,
+              "url": "http://127.0.0.1/api/local-sources/documents/local_files%3Aroot-atlas%3Adocument%3Aproposal",
+              "line": 3
+            }
+          },
+          {
+            "kind": "document",
+            "connectorId": "local_files",
+            "source": "local_files",
+            "eventType": "document.modified",
+            "providerEventId": "local:root-boreal:proposal",
+            "providerRevision": "1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "local_files:root-boreal:document:proposal",
+              "title": "proposal.md",
+              "content": "Boreal proposal",
+              "modifiedAt": "2026-10-28T12:00:00.000Z",
+              "kind": "document",
+              "accountId": "root-boreal"
+            }
+          },
+          {
+            "kind": "task_observed",
+            "connectorId": "local_files",
+            "source": "local_files",
+            "providerEventId": "local:root-boreal:task-1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "payload": {
+              "id": "local_files:root-boreal:task-1",
+              "title": "Review the Boreal proposal",
+              "state": "open",
+              "documentId": "local_files:root-boreal:document:proposal",
+              "documentTitle": "proposal.md",
+              "accountId": "root-boreal",
+              "updatedAt": "2026-10-28T12:00:00.000Z",
+              "sourceObservationRevision": 1,
+              "url": "http://127.0.0.1/api/local-sources/documents/local_files%3Aroot-boreal%3Adocument%3Aproposal",
+              "line": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G6",
+      "axis": "grouping",
+      "description": "相同remote resource string但两个不同租户/账号，明确不同source connection绑定。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "distinct",
+        "externalWrites": 0
+      },
+      "notes": "权限/账号边界不能被semantic link合并掉。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:G6",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g6-a",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g6-a",
+              "threadId": "shared-resource-thread",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please review the Atlas proposal and send comments by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas",
+              "accountId": "tenant-a"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g6-b",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g6-b",
+              "threadId": "shared-resource-thread",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please review the Atlas proposal and send comments by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas",
+              "accountId": "tenant-b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G7",
+      "axis": "grouping",
+      "description": "邮件要求修改明确Drive doc URL，Drive新revision提供同URL修改后的证据，均为Atlas这一次请求。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "source/evidence关联同Situation，不把document observation变第二封新request。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:G7",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g7-mail",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g7-mail",
+              "threadId": "thread-g7-mail",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal update",
+              "body": "Please update the Atlas proposal document at https://docs.example.test/document/d/atlas-doc with the latest experiment results and send it by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas",
+              "documentUrl": "https://docs.example.test/document/d/atlas-doc"
+            }
+          },
+          {
+            "kind": "document",
+            "connectorId": "google",
+            "source": "google",
+            "eventType": "document.modified",
+            "providerEventId": "drive:atlas-doc",
+            "providerRevision": "etag-1",
+            "at": "2026-10-28T13:00:00.000Z",
+            "payload": {
+              "id": "drive:atlas-doc",
+              "title": "Atlas proposal",
+              "content": "Atlas proposal experiment results",
+              "modifiedAt": "2026-10-28T13:00:00.000Z",
+              "kind": "document",
+              "url": "https://docs.example.test/document/d/atlas-doc"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "G8",
+      "axis": "grouping",
+      "description": "同一Atlas doc、同一责任出现两条矛盾明确用户要求，一条说删除法律段，一条说保留该段。",
+      "expected": {
+        "activation": "review_required",
+        "grouping": "same",
+        "externalWrites": 0
+      },
+      "notes": "关联同Situation但保留冲突，不能强行选其中一个当用户已许可。",
+      "execution": "proposal_contract",
+      "semanticQuality": "unknown",
+      "executionReason": "Scripted CONTRADICT delta verifies the downstream conflict defence, not model semantic quality.",
+      "measure": "measure:G8",
+      "input": {
+        "runner": "events",
+        "model": "contract",
+        "contract": {
+          "extractSituationDelta": {
+            "associated": true,
+            "polarity": "CONTRADICT",
+            "confidence": 0.95,
+            "evidenceRefs": [
+              {
+                "field": "body",
+                "quote": "keep the legal section"
+              }
+            ],
+            "stateDelta": {
+              "deadlineUpdates": [],
+              "commitments": [],
+              "closureConditionUpdates": [],
+              "probeTargets": [],
+              "missingEvidence": []
+            }
+          },
+          "expectCalls": {
+            "extractSituationDelta": 1
+          }
+        },
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g8-a",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g8-a",
+              "threadId": "thread-g8",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal update",
+              "body": "Please update the Atlas proposal and delete the legal section.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:g8-b",
+            "providerRevision": "r2",
+            "at": "2026-10-28T13:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "g8-b",
+              "threadId": "thread-g8",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal update",
+              "body": "Please update the Atlas proposal and keep the legal section exactly as it is.",
+              "receivedAt": "2026-10-28T13:00:00.000Z",
+              "updatedAt": "2026-10-28T13:00:00.000Z",
+              "projectId": "atlas"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A1",
+      "axis": "activation",
+      "description": "Alex直接给当前用户Sam：Please review the Atlas proposal and send me your comments by Monday.",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A1",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a1",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a1",
+              "threadId": "thread-a1",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please review the Atlas proposal and send me your comments by Monday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A2",
+      "axis": "activation",
+      "description": "自动发件人构建成功通知：Atlas build passed，未包含用户责任或standing匹配。",
+      "expected": {
+        "activation": "no_new",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A2",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a2",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a2",
+              "threadId": "thread-a2",
+              "from": "notifications@builds.example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas build passed",
+              "body": "Atlas build passed successfully. No action needed.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A3",
+      "axis": "activation",
+      "description": "群消息引用旧记录Sam was asked last month，当前仅FYI，无新任务/未命中standing。",
+      "expected": {
+        "activation": "no_new",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A3",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a3",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test",
+                "lee@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a3",
+              "threadId": "thread-a3",
+              "from": "lee@example.test",
+              "to": "sam@example.test, lee@example.test",
+              "subject": "Atlas history",
+              "body": "FYI: Sam was asked last month about the Atlas proposal. Just sharing context.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A4",
+      "axis": "activation",
+      "description": "Sam明确转发一段来源并写Please handle this for me，引用内容包含可核验交付目标。",
+      "expected": {
+        "activation": "actionable",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "直接委托与纯引用证人区分。",
+      "execution": "proposal_contract",
+      "semanticQuality": "unknown",
+      "executionReason": "Scripted delegation proposal verifies grounding defence, not model semantic quality.",
+      "measure": "measure:A4",
+      "input": {
+        "runner": "events",
+        "model": "contract",
+        "contract": {
+          "discoverRequestCandidate": {
+            "deliverable": "proposal",
+            "deliverableQuote": "proposal",
+            "subjectEntity": "Atlas",
+            "entityQuote": "Atlas",
+            "intent": "update",
+            "intentQuote": "Please handle this for me",
+            "requiredContent": [
+              {
+                "text": "experiment results",
+                "sourceQuote": "experiment results"
+              }
+            ]
+          },
+          "expectCalls": {
+            "discoverRequestCandidate": 1
+          }
+        },
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a4",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a4",
+              "threadId": "thread-a4",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Fwd: Atlas proposal",
+              "body": "Please handle this for me.\n\n> Forwarded: update the Atlas proposal with the latest experiment results and send it by Friday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A5",
+      "axis": "activation",
+      "description": "任务指派给Alex而当前用户是Sam；消息说明Sam仅旁观，未命中standing。",
+      "expected": {
+        "activation": "no_new",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A5",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a5",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "alex@example.test"
+              ],
+              "cc": [
+                "sam@example.test"
+              ]
+            },
+            "payload": {
+              "id": "a5",
+              "threadId": "thread-a5",
+              "from": "alex@example.test",
+              "to": "alex@example.test",
+              "cc": "sam@example.test",
+              "subject": "Atlas proposal for Alex",
+              "body": "Please review the Atlas proposal and send comments by Monday. This is assigned to Alex; Sam is only observing.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A6",
+      "axis": "activation",
+      "description": "明确scope suppression规则匹配当前event，event正文仍是直接actionable。",
+      "expected": {
+        "activation": "suppressed",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "当前用户策略优先于模型建议。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A6",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "setup": [
+          {
+            "kind": "policy",
+            "spec": {
+              "instruction": "Suppress Atlas work requests",
+              "predicate": {
+                "op": "eq",
+                "feature": "project.id",
+                "value": "atlas"
+              },
+              "effect": {
+                "type": "suppress"
+              },
+              "scopeType": "project",
+              "scopeKey": "atlas",
+              "confirmed": true
+            }
+          }
+        ],
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a6",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a6",
+              "threadId": "thread-a6",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please review the Atlas proposal and send me your comments by Monday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A7",
+      "axis": "activation",
+      "description": "同source权限已撤销，之后replay历史actionable event。",
+      "expected": {
+        "activation": "suppressed",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "不能借模型提议重新取权。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A7",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "setup": [
+          {
+            "kind": "revoke",
+            "connectorId": "google"
+          }
+        ],
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a7",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a7",
+              "threadId": "thread-a7",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas proposal review",
+              "body": "Please review the Atlas proposal and send me your comments by Monday.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A8",
+      "axis": "activation",
+      "description": "standing匹配谓词true但该scope预算为0，其他授权条件正常。",
+      "expected": {
+        "activation": "deferred",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "不是no_work/完成，不允许网络准入绕限；预算提升可同责任恢复。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:A8",
+      "input": {
+        "runner": "events",
+        "model": "disabled",
+        "setup": [
+          {
+            "kind": "intent",
+            "spec": {
+              "description": "Watch Atlas review requests",
+              "desiredOutcome": "Prepare Atlas review comments",
+              "prefilter": {
+                "connectorIds": [
+                  "google"
+                ],
+                "eventTypes": [
+                  "email.received"
+                ],
+                "roles": [
+                  "DIRECT_ACTOR"
+                ],
+                "tokens": [
+                  "atlas"
+                ]
+              },
+              "prohibited": [
+                "external_write"
+              ],
+              "budget": {
+                "maxMatches": 1,
+                "windowMs": 86400000
+              }
+            }
+          }
+        ],
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a8-first",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a8-first",
+              "threadId": "thread-a8-first",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas status",
+              "body": "Atlas proposal status note.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a8-second",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a8-second",
+              "threadId": "thread-a8-second",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas status",
+              "body": "Atlas proposal status note again.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A9",
+      "axis": "activation",
+      "description": "standing谓词缺少必要可信sender.identity观测，模型文本自称sender匹配。",
+      "expected": {
+        "activation": "unknown",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "缺feature不是false的肯定证据，更不是true；不自动激活。",
+      "execution": "proposal_contract",
+      "semanticQuality": "unknown",
+      "executionReason": "Scripted standing-intent claim verifies identity defence, not model semantic quality.",
+      "measure": "measure:A9",
+      "input": {
+        "runner": "events",
+        "model": "contract",
+        "contract": {
+          "assessStandingIntent": {
+            "matched": true,
+            "quote": "Atlas proposal status note.",
+            "confidence": 0.99
+          },
+          "expectCalls": {
+            "assessStandingIntent": 1
+          }
+        },
+        "setup": [
+          {
+            "kind": "intent",
+            "spec": {
+              "description": "Watch Atlas review requests",
+              "desiredOutcome": "Prepare Atlas review comments",
+              "prefilter": {
+                "connectorIds": [
+                  "google"
+                ],
+                "eventTypes": [
+                  "email.received"
+                ],
+                "roles": [
+                  "DIRECT_ACTOR"
+                ],
+                "tokens": [
+                  "atlas"
+                ]
+              },
+              "prohibited": [
+                "external_write"
+              ],
+              "predicate": "The sender is the trusted Sam"
+            }
+          }
+        ],
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a9",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": null,
+            "meta": {
+              "principalRole": "DIRECT_ACTOR",
+              "roleEvidence": {
+                "basis": "provider_assignment"
+              }
+            },
+            "payload": {
+              "id": "a9",
+              "threadId": "thread-a9",
+              "from": "Sam",
+              "to": "sam@example.test",
+              "subject": "Atlas status",
+              "body": "Atlas proposal status note.",
+              "receivedAt": "2026-10-28T12:00:00.000Z"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "A10",
+      "axis": "activation",
+      "description": "模型给跨租户高置信度same-situation提议，但可信连接身份不同且无用户合并动作。",
+      "expected": {
+        "activation": "review_or_reject",
+        "grouping": "distinct",
+        "externalWrites": 0
+      },
+      "notes": "模型置信度不越过来源/权限边界。",
+      "execution": "proposal_contract",
+      "semanticQuality": "unknown",
+      "executionReason": "Scripted high-confidence cross-tenant proposal verifies the source-boundary defence, not model semantic quality.",
+      "measure": "measure:A10",
+      "input": {
+        "runner": "events",
+        "model": "contract",
+        "contract": {
+          "assessSituationPair": {
+            "outcome": "RELATED_WAIT",
+            "summary": "same",
+            "missingEvidence": [],
+            "reevaluationCondition": "later",
+            "confidence": 0.99,
+            "evidence": []
+          },
+          "expectCalls": {
+            "assessSituationPair": 0
+          }
+        },
+        "steps": [
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a10-a",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a10-a",
+              "threadId": "shared-thread",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas status",
+              "body": "Atlas proposal status note.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas",
+              "accountId": "tenant-a"
+            }
+          },
+          {
+            "kind": "email",
+            "provider": "google",
+            "connectorId": "google",
+            "source": "google",
+            "providerEventId": "gmail:a10-b",
+            "providerRevision": "r1",
+            "at": "2026-10-28T12:00:00.000Z",
+            "role": {
+              "accountEmail": "sam@example.test",
+              "to": [
+                "sam@example.test"
+              ],
+              "cc": []
+            },
+            "payload": {
+              "id": "a10-b",
+              "threadId": "shared-thread",
+              "from": "alex@example.test",
+              "to": "sam@example.test",
+              "subject": "Atlas status",
+              "body": "Atlas proposal status note.",
+              "receivedAt": "2026-10-28T12:00:00.000Z",
+              "projectId": "atlas",
+              "accountId": "tenant-b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "N1",
+      "axis": "priority",
+      "description": "同一可用通知slot，young high和young low同时等待，且无critical/quiet。",
+      "expected": {
+        "activation": "priority_high_first",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:N1",
+      "input": {
+        "runner": "attention",
+        "model": "disabled",
+        "steps": [
+          {
+            "configure": {
+              "maxInteractivePerHour": 3,
+              "minIntervalMs": 0,
+              "quietHours": {
+                "startHour": 12,
+                "endHour": 13,
+                "timeZone": "UTC"
+              }
+            }
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "low",
+              "what": "Decision low",
+              "why": "Because it matters",
+              "checked": [
+                "Checked source"
+              ],
+              "decision": "Choose one",
+              "dedupeKey": "low"
+            },
+            "issueKey": "low"
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "high",
+              "what": "Decision high",
+              "why": "Because it matters",
+              "checked": [
+                "Checked source"
+              ],
+              "decision": "Choose one",
+              "dedupeKey": "high"
+            },
+            "issueKey": "high"
+          },
+          {
+            "advanceMs": 360000
+          },
+          {
+            "configure": {
+              "maxInteractivePerHour": 1,
+              "minIntervalMs": 0,
+              "quietHours": null
+            }
+          },
+          {
+            "release": true
+          },
+          {
+            "advanceMs": 3600000
+          },
+          {
+            "release": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "N2",
+      "axis": "priority",
+      "description": "low等待两小时后每个slot前持续加入fresh high，hourly cap=1，无其他block。",
+      "expected": {
+        "activation": "bounded_low_service",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "52的持续竞争上界，不通过停止新high流取巧。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:N2",
+      "input": {
+        "runner": "attention",
+        "model": "disabled",
+        "steps": [
+          {
+            "configure": {
+              "maxInteractivePerHour": 1,
+              "minIntervalMs": 0,
+              "quietHours": null
+            }
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "normal",
+              "what": "Decision seed",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Choose",
+              "dedupeKey": "seed"
+            },
+            "issueKey": "seed"
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "low",
+              "what": "Decision low",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Choose",
+              "dedupeKey": "low"
+            },
+            "issueKey": "low"
+          },
+          {
+            "advanceMs": 3600000
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "high",
+              "what": "Decision high-1",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Choose",
+              "dedupeKey": "high-1"
+            },
+            "issueKey": "high-1"
+          },
+          {
+            "release": true
+          },
+          {
+            "advanceMs": 3600000
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "high",
+              "what": "Decision high-2",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Choose",
+              "dedupeKey": "high-2"
+            },
+            "issueKey": "high-2"
+          },
+          {
+            "release": true
+          },
+          {
+            "advanceMs": 3600000
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "high",
+              "what": "Decision high-3",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Choose",
+              "dedupeKey": "high-3"
+            },
+            "issueKey": "high-3"
+          },
+          {
+            "release": true
+          },
+          {
+            "advanceMs": 3600000
+          },
+          {
+            "offer": {
+              "kind": "opportunity",
+              "priority": "high",
+              "what": "Decision high-4",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Choose",
+              "dedupeKey": "high-4"
+            },
+            "issueKey": "high-4"
+          },
+          {
+            "release": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "N3",
+      "axis": "attention",
+      "description": "一个issue在断网/重试/恢复中重复100次，当前hourly交互预算=1。",
+      "expected": {
+        "activation": "deduped_notice",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "独立issue key一次可行动通知，恢复后清resolved；无通知风暴。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:N3",
+      "input": {
+        "runner": "attention",
+        "model": "disabled",
+        "steps": [
+          {
+            "configure": {
+              "maxInteractivePerHour": 1,
+              "minIntervalMs": 0,
+              "quietHours": null
+            }
+          },
+          {
+            "offer": {
+              "kind": "blocker",
+              "priority": "high",
+              "what": "Issue needs a decision",
+              "why": "Repeated recovery",
+              "checked": [
+                "Checked retries"
+              ],
+              "decision": "Retry or stop",
+              "dedupeKey": "issue:atlas:7"
+            },
+            "issueKey": "issue:atlas:7",
+            "repeat": 100
+          },
+          {
+            "release": true
+          },
+          {
+            "offer": {
+              "kind": "blocker",
+              "priority": "high",
+              "what": "Issue needs a decision",
+              "why": "Repeated recovery",
+              "checked": [
+                "Checked retries"
+              ],
+              "decision": "Retry or stop",
+              "dedupeKey": "issue:atlas:7"
+            },
+            "issueKey": "issue:atlas:7",
+            "repeat": 100
+          },
+          {
+            "release": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "N4",
+      "axis": "attention",
+      "description": "quiet hours或者interactive cap=0，后来事件priority被设high。",
+      "expected": {
+        "activation": "no_interruption",
+        "grouping": "not_applicable",
+        "externalWrites": 0
+      },
+      "notes": "priority/aging不能绕预算或静默，保留digest/可观测状态。",
+      "execution": "deterministic",
+      "semanticQuality": "not_applicable",
+      "executionReason": null,
+      "measure": "measure:N4",
+      "input": {
+        "runner": "attention",
+        "model": "disabled",
+        "steps": [
+          {
+            "configure": {
+              "maxInteractivePerHour": 3,
+              "minIntervalMs": 0,
+              "quietHours": {
+                "startHour": 0,
+                "endHour": 23,
+                "timeZone": "UTC"
+              }
+            }
+          },
+          {
+            "offer": {
+              "kind": "risk",
+              "priority": "high",
+              "what": "High risk",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Decide",
+              "dedupeKey": "n4-quiet"
+            },
+            "issueKey": "n4-quiet"
+          },
+          {
+            "release": true
+          },
+          {
+            "configure": {
+              "maxInteractivePerHour": 0,
+              "minIntervalMs": 0,
+              "quietHours": null
+            }
+          },
+          {
+            "offer": {
+              "kind": "risk",
+              "priority": "high",
+              "what": "High risk later",
+              "why": "Because",
+              "checked": [
+                "Checked"
+              ],
+              "decision": "Decide",
+              "dedupeKey": "n4-cap0"
+            },
+            "issueKey": "n4-cap0"
+          },
+          {
+            "release": true
+          }
+        ]
+      }
+    }
+  ]
+}

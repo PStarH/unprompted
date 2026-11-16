@@ -23,7 +23,7 @@
 
 import { GENERIC_WORDS } from './probes/lexicon.js';
 import { TokenRequestAccounting } from './token-accounting.js';
-import { requireAccountingContext, requestModelJson } from './model-request.js';
+import { requireSessionAccountingContext, requestModelJson, createModelRpcPermit } from './model-request.js';
 import { PiRuntime, piSupported, PI_LIMITS } from './pi-runtime.js';
 import { retryAfterMs } from './reasoning-recovery.js';
 import { completeWithTools, TOOL_LOOP_LIMITS } from './tool-loop.js';
@@ -217,7 +217,7 @@ export class NullReasoner {
 }
 
 export class OpenAiCompatibleReasoner {
-  constructor({ baseUrl, apiKey = null, model, protocol = DEFAULT_MODEL_PROTOCOL, fetchImpl = globalThis.fetch, timeoutMs = REASONING_LIMITS.timeoutMs, limits = {}, id = 'openai-compatible', onUsage = null, tokenBudget = null } = {}) {
+  constructor({ baseUrl, apiKey = null, model, protocol = DEFAULT_MODEL_PROTOCOL, fetchImpl = globalThis.fetch, timeoutMs = REASONING_LIMITS.timeoutMs, limits = {}, id = 'openai-compatible', onUsage = null, tokenBudget = null, reasoningSessions = null } = {}) {
     this.baseUrl = baseUrl ? String(baseUrl).replace(/\/$/, '') : null;
     this.apiKey = apiKey;
     this.model = model || null;
@@ -230,6 +230,7 @@ export class OpenAiCompatibleReasoner {
     this.lastUsageError = null;
     this.onUsage = typeof onUsage === 'function' ? onUsage : null;
     this.tokenBudget = tokenBudget || null;
+    this.reasoningSessions = reasoningSessions;
     this.accounting = tokenBudget ? new TokenRequestAccounting(tokenBudget) : null;
     this.calls = 0;
     this.budget = new ReasoningBudget(limits);
@@ -243,6 +244,12 @@ export class OpenAiCompatibleReasoner {
    */
   #assertPiBudgetCompatible(context) {
     const view = this.tokenBudget.describe({ taskId: context.scope === 'task' ? context.taskId : null });
+    const relevantMoney = this.modelMoney?.snapshot({ model: this.model, protocol: this.protocol,
+      taskId: context.scope === 'task' ? context.taskId : null }).enabled;
+    if (relevantMoney) {
+      throw Object.assign(new Error('The Pi harness cannot meter model fees per SDK request; use the classic harness.'),
+        { code: 'MONEY_BUDGET_UNSUPPORTED_HARNESS' });
+    }
     const relevant = view.workspace.limit != null
       || (context.scope === 'task' && view.task?.limit != null);
     if (!relevant) return;
@@ -278,8 +285,32 @@ export class OpenAiCompatibleReasoner {
     };
   }
 
+  async #completeSession(args, turn) {
+    const sessions = this.reasoningSessions;
+    return sessions.runClassic(turn, async () => {
+      try {
+        const result = await this.#complete(args);
+        return sessions.completeClassic(turn, result);
+      } catch (error) {
+        sessions.failClassic(turn, error);
+        throw error;
+      }
+    });
+  }
   async #complete({ requestId, system, user, documents = [], externalTools = [], wrapReadTools = null, accountingContext = null }) {
-    const context = this.accounting ? requireAccountingContext(accountingContext) : null;
+    const explicitSession = Boolean(accountingContext?.session);
+    if (explicitSession && !this.reasoningSessions) {
+      throw Object.assign(new Error('A private reasoning session was requested without the session service.'), { code: 'INVALID_SESSION', status: 400 });
+    }
+    const sessionRequested = Boolean(explicitSession && !this.reasoningSessions.classicActive());
+    if (sessionRequested && (this.runtime || this.id === 'pi')) throw this.reasoningSessions.unsupportedHarness();
+    const sessionTurn = sessionRequested
+      ? this.reasoningSessions.classicTurn({ reasoner: this, requestId, system, user, documents, externalTools, wrapReadTools, context: accountingContext })
+      : null;
+    if (sessionTurn && sessionTurn.cached !== undefined) return sessionTurn.cached;
+    if (sessionTurn) return this.#completeSession({ requestId, system, user, documents, externalTools, wrapReadTools, accountingContext }, sessionTurn);
+    const sessionFetch = this.reasoningSessions ? this.reasoningSessions.sessionFetch(this, requestId) : null;
+    const context = this.accounting || accountingContext?.session ? requireSessionAccountingContext(accountingContext) : null;
     if (!this.available()) throw new Error('Model provider is not configured');
 
     const payload = JSON.stringify({ system, user });
@@ -332,15 +363,17 @@ export class OpenAiCompatibleReasoner {
     }
 
     const controller = new AbortController();
+    const rpcPermit = createModelRpcPermit({ budget: this.budget, requestId, permit, signal: controller.signal, maxCalls: this.budget.limits.maxCallsPerRequest });
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const body = await requestModelJson({
+        reasoner: this, rpcPermit, requestId,
         onDispatch: () => { this.calls += 1; },
         accounting: this.accounting,
         context,
         protocol: this.protocol,
         payload: simpleRequest({ protocol: this.protocol, model: this.model, system, user }),
-        fetchImpl: this.fetchImpl,
+        fetchImpl: sessionFetch ?? this.fetchImpl,
         url: modelEndpoint(this.baseUrl, this.protocol),
         headers: modelHeaders(this.protocol, this.apiKey),
         signal: controller.signal,
@@ -350,7 +383,6 @@ export class OpenAiCompatibleReasoner {
           status, retryAfterMs: retryAfterMs(response?.headers?.get?.('retry-after'))
         })
       });
-      this.reportUsage(responseUsage(this.protocol, body), requestId);
       const content = responseText(this.protocol, body);
       if (!content) throw new Error('Model provider returned no content');
       this.lastError = null;
@@ -362,7 +394,7 @@ export class OpenAiCompatibleReasoner {
       throw error;
     } finally {
       clearTimeout(timer);
-      this.budget.release(requestId);
+      rpcPermit.release();
     }
   }
 
@@ -545,6 +577,10 @@ export class OpenAiCompatibleReasoner {
       system: 'Propose at most two inspectable Experience candidates from this structured outcome. Reply with JSON {"experiences":[]}. Do not infer satisfaction from silence or consumption. Do not infer omission causality from an uncalled tool. Never propose permissions, authorization, runtime code or FeatureRegistry changes. Candidates need kind (execution_hint/planning_hint/omission_guard/trigger_hint), scopeType and scopeKey exactly matching the supplied scope, predicate {op:"always"}, effect {type:"advisory"}, instruction and freshnessClass (operational). For a verified supervised_success with an observedDraftFormat you may propose execution_hint with that exact draft_format effect and directiveKey email.draft.format. Otherwise keep it advisory. If the evidence cannot justify a candidate return an empty array.',
       user: JSON.stringify(summary)
     });
+    if (accountingContext?.session && (!Array.isArray(result?.experiences) || result.experiences.length > 2
+      || result.experiences.some(candidate => !candidate || typeof candidate !== 'object' || Array.isArray(candidate)))) {
+      throw Object.assign(new Error('The compiler must return a valid bounded experiences array.'), { code: 'INVALID_COMPILATION', status: 400 });
+    }
     return Array.isArray(result?.experiences) ? result.experiences.slice(0, 2) : [];
   }
 }
@@ -563,7 +599,7 @@ export class PiReasoner extends OpenAiCompatibleReasoner {
  * Build a reasoner from the environment. Never throws and never requires
  * credentials: an unconfigured environment simply yields the null provider.
  */
-export function createReasoner(env = process.env, { fetchImpl, piRuntimeOptions, tokenBudget } = {}) {
+export function createReasoner(env = process.env, { fetchImpl, piRuntimeOptions, tokenBudget, reasoningSessions } = {}) {
   const baseUrl = env.UNPROMPTED_MODEL_BASE_URL;
   const model = env.UNPROMPTED_MODEL_NAME;
   if (!baseUrl || !model) return new NullReasoner();
@@ -588,6 +624,7 @@ export function createReasoner(env = process.env, { fetchImpl, piRuntimeOptions,
     }
   });
   reasoner.preferModelInterpretation = env.UNPROMPTED_MODEL_ROLE === 'primary';
+  if (reasoningSessions) reasoner.reasoningSessions = reasoningSessions;
   return reasoner;
 }
 

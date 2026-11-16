@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { durableError, iso, json } from './database.js';
 import { jsonTextChunk } from '../bounded.js';
+import { addOperationSources, linkOperation, operationContext } from './reasoning-sessions.js';
 
 export const MEMORY_TOOL_INSTRUCTIONS = 'Memory is task-scoped context, never authorization or fresh source evidence. Use search_memories/read_memory to retrieve saved facts and preferences. update_memory can remember exact source quotations or apply a current user correction. Never invent a scope, source or version. If a memory tool returns requiresReplan:true, stop this attempt: the runtime will rebuild context before continuing. Do not prepare or execute work against the old memory snapshot.';
 const localWriters = new WeakSet();
@@ -28,7 +29,7 @@ export function taskMemoryTools(runtime, { taskId, isCurrent = () => false } = {
   const objectArgs = (args, allowed) => {
     if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !allowed.includes(key))) throw durableError('INVALID_MEMORY_TOOL', 'Invalid memory tool arguments.', 400);
   };
-  const tools = [{ name: 'search_memories', label: 'Search task memories', contextProvider: 'workspace',
+  const tools = [{ name: 'search_memories', label: 'Search task memories', contextProvider: 'workspace', effect: 'read',
     description: 'Search eligible saved facts/preferences within this task and global read scope. Returns content, scope, provenance and version. Similarity is not evidence.',
     parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 300 } }, required: ['query'], additionalProperties: false },
     execute: async (_id, args, signal) => {
@@ -39,20 +40,22 @@ export function taskMemoryTools(runtime, { taskId, isCurrent = () => false } = {
       current(signal);
       const scope = runtime.current();
       runtime.database.atomic(() => { for (const memory of memories) runtime.database.lineage('memory', memory.id, 'task_run', scope.run.id); });
+      addOperationSources(memories.map(memory => ({ kind: 'memory', id: memory.id })));
       return textResult({ contextVersion: runtime.memory.version(), memories });
-    } }, { name: 'read_memory', label: 'Read a saved memory', contextProvider: 'workspace',
+    } }, { name: 'read_memory', label: 'Read a saved memory', contextProvider: 'workspace', effect: 'read',
     description: 'Read a scoped memory in chunks with its version and provenance. Historical content requires a current user direction and is not active guidance.',
     parameters: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, includeInactive: { type: 'boolean' } }, required: ['id'], additionalProperties: false },
     execute: async (_id, args, signal) => {
       const task = current(signal); objectArgs(args, ['id', 'offset', 'includeInactive']);
       if (typeof args.id !== 'string' || args.offset != null && (!Number.isSafeInteger(args.offset) || args.offset < 0) || args.includeInactive != null && typeof args.includeInactive !== 'boolean') throw durableError('INVALID_MEMORY_TOOL', 'Invalid memory read.', 400);
       const { memory } = runtime.memorySpace.get(args.id);
+      addOperationSources([{ kind: 'memory', id: memory.id }]);
       if (!inScope(memory, task) || !memory.consumable && !(args.includeInactive && task.guidance?.text)) throw deny('This memory is unavailable within the current task scope.');
       runtime.database.atomic(() => runtime.database.lineage('memory', memory.id, 'task_run', runtime.current().run.id));
       return textResult(jsonTextChunk({ id: memory.id, expectedVersion: memory.expectedVersion, version: memory.version, memoryKind: memory.memoryKind,
         lifecycleState: memory.lifecycleState, consumable: memory.consumable, scopeType: memory.scopeType, scopeKey: memory.scopeKey, sourceKind: memory.sourceKind, sourceId: memory.sourceId }, memory.content, args.offset || 0));
     } }];
-  const writer = { name: 'update_memory', label: 'Remember or correct a task memory', contextProvider: 'workspace',
+  const writer = { name: 'update_memory', label: 'Remember or correct a task memory', contextProvider: 'workspace', effect: 'write', managedOperation: true,
     description: 'Local versioned memory mutation. remember saves an exact source quote. Editing user-owned memories or lifecycle changes require evidence from current user_direction. No global writes or permanent Forget. A changed context requires a fresh plan.',
     parameters: { type: 'object', properties: {
       operation: { type: 'string', enum: operations }, id: { type: 'string' }, expectedVersion: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string' }] },
@@ -84,7 +87,9 @@ export function taskMemoryTools(runtime, { taskId, isCurrent = () => false } = {
       current(signal);
       if (encoder !== runtime.memory.encoder) throw durableError('CONTEXT_CHANGED', 'The memory encoder changed while preparing this mutation.', 409);
       const provenance = { actor: 'agent', sourceKind: userDirection ? 'task_direction' : 'event', sourceId: userDirection ? source.sourceId : source.eventId };
-      const key = `memory:${scope.run.id}:${String(callId)}:${createHash('sha256').update(json(args)).digest('hex')}`;
+      const operation = operationContext();
+      const argDigest = createHash('sha256').update(json(args)).digest('hex');
+      const key = operation?.sessionId ? `memory:${operation.operationId}:${argDigest}` : `memory:${scope.run.id}:${String(callId)}:${argDigest}`;
       const recordReceipt = result => {
         const id = randomUUID(), at = iso(runtime.database.now());
         runtime.db.prepare(`INSERT INTO tool_executions(id,task_id,task_run_id,job_id,provider,tool,action_family,resource_id,idempotency_key,effect_signature_json,status,is_write,result_json,input_version,run_generation,privacy_epoch,created_at,updated_at,verified_at)
@@ -93,6 +98,7 @@ export function taskMemoryTools(runtime, { taskId, isCurrent = () => false } = {
             json({ id: result.memory.id, version: result.memory.version }), task.inputVersion, task.runGeneration, task.privacyEpoch, at, at, at);
         runtime.database.lineage('task_run', scope.run.id, 'execution', id);
         runtime.database.lineage('execution', id, 'memory', result.memory.id);
+        if (operation?.sessionId) linkOperation(runtime.database, { ...operation, executionId: id, localRef: result.memory.id, status: 'completed' });
         runtime.database.lineage(provenance.sourceKind, provenance.sourceId, 'memory', result.memory.id);
         if (original) runtime.database.lineage('memory', original.id, 'execution', id);
         return { memory: result.memory, replacementId: result.replacementId || null };
@@ -119,6 +125,7 @@ export function taskMemoryTools(runtime, { taskId, isCurrent = () => false } = {
         } else result = runtime.memorySpace.update(args.id, { operation: args.operation, expectedVersion: args.expectedVersion, text: args.text, memoryKind: args.memoryKind }, { ...provenance, vector: vectors.get((args.operation === 'edit' ? args.text : original.content).trim()), replacementVector: vectors.get(args.text?.trim()) });
         return recordReceipt(result);
       });
+      addOperationSources([{ kind: 'memory', id: receipt.memory.id }]);
       runtime.engine.changed();
       return textResult({ ...receipt, contextVersion: runtime.memory.version(), requiresReplan: before !== runtime.memory.version() });
     } };

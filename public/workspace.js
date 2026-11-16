@@ -124,11 +124,12 @@ export function createWorkspace({ context, update, post, applyState, notify, ren
     if (status === 'needs_user') return task.draft ? t('回复草稿已备好 · 点击审阅', 'Draft ready · review reply') : task.reason || t('点击查看待确认事项', 'Open to review the next step');
     if (task.guidance) return task.guidance.text;
     if (status === 'working') return t('正在关联来源并核对要求', 'Linking sources and checking requirements');
+    const suggestion = status === 'observing' && task.mcpInvestigation?.nextStep ? ` · ${t('建议：', 'Suggested: ')}${task.mcpInvestigation.nextStep}` : '';
+    if (status === 'observing' && task.kind === 'external_issue') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进已分配的 issue', 'Following assigned issue')}${suggestion}`;
+    if (status === 'observing' && task.kind === 'external_review') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进需要你处理的 PR', 'Following a pull request that needs you')}${suggestion}`;
+    if (status === 'observing' && task.kind === 'external_change') return `GitHub · ${task.externalSource.repository} · ${task.externalSource.marker} · ${t('跟进仓库内容变化', 'Following a repository change')}${suggestion}`;
+    if (status === 'observing' && task.kind === 'external_check') return `GitHub · ${task.externalSource.repository} · ${task.externalSource.marker} · ${t('跟进 GitHub Actions', 'Following a GitHub Actions run')}${suggestion}`;
     if (status === 'observing' && task.mcpInvestigation?.nextStep) return `${t('建议：', 'Suggested: ')}${task.mcpInvestigation.nextStep}`;
-    if (status === 'observing' && task.kind === 'external_issue') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进已分配的 issue', 'Following assigned issue')}`;
-    if (status === 'observing' && task.kind === 'external_review') return `GitHub · ${task.externalSource.repository} #${task.externalSource.number} · ${t('跟进需要你处理的 PR', 'Following a pull request that needs you')}`;
-    if (status === 'observing' && task.kind === 'external_change') return `GitHub · ${task.externalSource.repository} · ${task.externalSource.marker} · ${t('跟进仓库内容变化', 'Following a repository change')}`;
-    if (status === 'observing' && task.kind === 'external_check') return `GitHub · ${task.externalSource.repository} · ${task.externalSource.marker} · ${t('跟进 GitHub Actions', 'Following a GitHub Actions run')}`;
     if (status === 'observing') return t('只读跟进，不会修改来源', 'Read-only monitoring. Source unchanged.');
     const missing = (task.evidence?.criteria || []).filter(item => item.status !== 'satisfied');
     if (missing.length) return t(`等待 ${missing.length} 项要求的证据`, `Waiting for evidence for ${missing.length} requirement${missing.length === 1 ? '' : 's'}`);

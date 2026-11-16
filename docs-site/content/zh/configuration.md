@@ -47,14 +47,14 @@ description: 运行模式、设置保存在哪里，以及会改变行为的环�
 | GitHub | 公开 Client ID，设备码流程，以及议题、拉取请求、内容、Actions 和 Metadata 的读取权限。不要申请 `repo` 范围 | **获取授权码** |
 | Outlook | 公开 Client ID，浏览器 PKCE 授权；移动和桌面平台的重定向 URI 为 `http://localhost/oauth/microsoft`。委托权限为 `openid`、`profile`、`offline_access`、`User.Read` 和 `Mail.Read`。草稿以后再加 `Mail.ReadWrite` | **连接**，然后登录并同意 |
 | Slack | Client ID 和 Client Secret，并启用 PKCE。回调为 `http://localhost:53682/oauth/slack`。用户范围是 `im:read`、`im:history`、`mpim:read`、`mpim:history` 和 `users:read`。不要加机器人或写入范围 | **连接** |
-| Notion | Client ID 和 Client Secret。回调为 `http://localhost:53682/oauth/notion`。读取内容和用户信息；用户要创建页面时再开启 **Insert content** | **连接** |
+| Notion | 公开 Client ID 和 broker 的 HTTPS origin；不包含 Client Secret。服务商回调为 `<broker origin>/v1/notion/callback`；本机回调 `http://localhost:53682/oauth/notion` 只是应用接收 broker 交接的地址。读取内容和用户信息；用户要创建页面时再开启 **Insert content** | **连接** |
 | Google | 桌面客户端文件，其中不能有用户的刷新令牌 | **连接 Google** |
 
-GitHub、Outlook、Slack 和 Notion 可以写在被 Git 忽略的 `connector-clients.json` 里，或写在 `UNPROMPTED_CONNECTOR_CLIENTS_FILE` 指向的文件里。环境变量是 `UNPROMPTED_GITHUB_CLIENT_ID`、`UNPROMPTED_MICROSOFT_CLIENT_ID`、`UNPROMPTED_SLACK_CLIENT_ID`、`UNPROMPTED_SLACK_CLIENT_SECRET`、`UNPROMPTED_NOTION_CLIENT_ID` 和 `UNPROMPTED_NOTION_CLIENT_SECRET`。浏览器登录这一对值必须同时存在才会使用。
+GitHub、Outlook、Slack 和 Notion 可以写在被 Git 忽略的 `connector-clients.json` 里，或写在 `UNPROMPTED_CONNECTOR_CLIENTS_FILE` 指向的文件里。环境变量是 `UNPROMPTED_GITHUB_CLIENT_ID`、`UNPROMPTED_MICROSOFT_CLIENT_ID`、`UNPROMPTED_SLACK_CLIENT_ID`、`UNPROMPTED_SLACK_CLIENT_SECRET`、`UNPROMPTED_NOTION_CLIENT_ID`、`UNPROMPTED_NOTION_BROKER_URL` 和 `UNPROMPTED_NOTION_CLIENT_SECRET`。Notion 公开发行使用 Client ID 与 broker URL；owner-private 自托管可在本机改用 Client ID 与 Client Secret。浏览器登录这一对值必须同时存在才会使用。
 
 Google 使用 `google-oauth-client.json`、`--google-client`，或 `UNPROMPTED_GOOGLE_DESKTOP_CLIENT_ID` 与 `UNPROMPTED_GOOGLE_DESKTOP_CLIENT_SECRET`。macOS 应用构建接受 `--connector-clients` 和 `--google-client`，保留这些元数据，并丢弃账号令牌。Google 应用处于测试状态时，刷新令牌大约七天有效，只有被列入的测试用户可以连接。
 
-Slack 和 Notion 在用户的电脑上交换授权码，因此这些密钥会随构建一起分发，并不是放在保密服务器上的密钥。登记步骤见仓库中的[连接器说明](https://github.com/PStarH/unprompted/blob/main/docs/CONNECTORS.md)。
+Notion 公开发行不会把发行方 Secret 放进构建：应用只携带不含 Secret 的 broker 描述符，Secret 留在 broker 服务器。owner-private 自托管仍可在本机提供自己的 Notion Client ID 和 Client Secret，并直接注册本机回调。broker 的注册和 HTTPS 部署仍需发行方完成。登记步骤见仓库中的[连接器说明](https://github.com/PStarH/unprompted/blob/main/docs/CONNECTORS.md)和仓库内的 Notion broker 操作指南。
 
 ## 停止和重置
 

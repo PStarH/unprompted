@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { DurableDatabase, iso } from '../src/durable/database.js';
 import { FeatureRegistry, ActivationPolicies, WorkingContextIndex } from '../src/durable/context.js';
 import { AttentionBudget } from '../src/durable/attention.js';
@@ -78,6 +81,172 @@ test('released notifications prefer high priority without starving low priority'
   assert.deepEqual(attention.releaseDue().map(row => row.dedupe_key), ['high'], 'the freed slot goes to the higher priority');
   context.advance(3700001);
   assert.deepEqual(attention.releaseDue().map(row => row.dedupe_key), ['low'], 'low priority still gets a later slot');
+});
+
+/** A file-backed clock and connections so tests can restart the service and
+ * share one real database between two instances. */
+function attentionFixture(t, options = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-attention-fair-'));
+  const filename = path.join(directory, 'workspace.sqlite');
+  let now = Date.parse('2026-03-01T00:00:00.000Z');
+  const connections = [];
+  const open = () => {
+    const database = new DurableDatabase(filename, { now: () => now });
+    connections.push(database);
+    return { database, attention: new AttentionBudget(database, options) };
+  };
+  const context = {
+    ...open(), open, filename,
+    advance: value => { now += value; },
+    now: () => now
+  };
+  t.after(() => {
+    for (const database of connections) { try { database.close(); } catch { /* already closed */ } }
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  return context;
+}
+const notify = (attention, id, extra = {}) => attention.offer({ id, dedupeKey: id, headline: id, ...extra });
+const lowState = (database, key = 'low') => database.db.prepare('SELECT * FROM notification_deliveries WHERE dedupe_key=?').get(key);
+
+test('sustained fresh high-priority arrivals cannot starve an aged low-priority notification', t => {
+  const context = attentionFixture(t, { maxInteractivePerHour: 1, minIntervalMs: 0, digestWindowMs: 0 });
+  const { attention, database } = context;
+  assert.equal(notify(attention, 'seed').state, 'delivered');
+  assert.equal(notify(attention, 'low', { priority: 'low' }).state, 'pending');
+  const queuedAt = lowState(database).created_at;
+  let deliveredWindow = null;
+  for (let window = 1; window <= 6 && deliveredWindow == null; window++) {
+    context.advance(3600001);
+    // The new high-priority offer arrives before the unified release, which is
+    // the path that used to consume every freed slot first.
+    notify(attention, `high-${window}`, { priority: 'high' });
+    attention.releaseDue();
+    if (lowState(database).state === 'delivered') deliveredWindow = window;
+  }
+  assert.ok(deliveredWindow, 'an aged low-priority decision must eventually use an available interactive slot');
+  assert.ok(deliveredWindow <= 3, `low priority waited ${deliveredWindow} hourly windows`);
+  const low = lowState(database);
+  assert.equal(low.created_at, queuedAt, 'release attempts must not reset the queued time');
+  assert.equal(JSON.parse(low.notification_json).priority, 'low', 'aging must not rewrite the stored user priority');
+});
+
+test('fair release holds when the unified release runs before the fresh high-priority offer', t => {
+  const context = attentionFixture(t, { maxInteractivePerHour: 1, minIntervalMs: 0, digestWindowMs: 0 });
+  const { attention, database } = context;
+  assert.equal(notify(attention, 'seed').state, 'delivered');
+  assert.equal(notify(attention, 'low', { priority: 'low' }).state, 'pending');
+  const queuedAt = lowState(database).created_at;
+  let deliveredWindow = null;
+  for (let window = 1; window <= 6 && deliveredWindow == null; window++) {
+    context.advance(3600001);
+    attention.releaseDue();
+    if (lowState(database).state !== 'delivered') notify(attention, `high-${window}`, { priority: 'high' });
+    if (lowState(database).state === 'delivered') deliveredWindow = window;
+  }
+  assert.ok(deliveredWindow && deliveredWindow <= 3);
+  assert.equal(lowState(database).created_at, queuedAt);
+});
+
+test('fair release survives two service instances and a restart in both arrival orders', t => {
+  for (const order of ['offer-first', 'release-first']) {
+    const context = attentionFixture(t, { maxInteractivePerHour: 1, minIntervalMs: 0, digestWindowMs: 0 }), second = context.open();
+    assert.equal(notify(context.attention, 'seed').state, 'delivered');
+    assert.equal(notify(context.attention, 'low', { priority: 'low' }).state, 'pending');
+    const queuedAt = lowState(context.database).created_at;
+    let deliveredWindow = null;
+    for (let window = 1; window <= 6 && deliveredWindow == null; window++) {
+      context.advance(3600001);
+      if (window === 2) {
+        // Restart the first service while the second connection stays open.
+        context.database.close();
+        const reopened = context.open();
+        context.database = reopened.database; context.attention = reopened.attention;
+      }
+      if (order === 'offer-first') {
+        notify(context.attention, `high-${order}-${window}`, { priority: 'high' });
+        second.attention.releaseDue();
+      } else {
+        second.attention.releaseDue();
+        if (lowState(context.database).state !== 'delivered') notify(context.attention, `high-${order}-${window}`, { priority: 'high' });
+      }
+      if (lowState(context.database).state === 'delivered') deliveredWindow = window;
+    }
+    assert.ok(deliveredWindow && deliveredWindow <= 3, `${order}: a restarted instance must not reset the fairness clock`);
+    assert.equal(lowState(context.database).created_at, queuedAt);
+  }
+});
+
+test('a new interactive offer cannot preempt an aged deliverable queued notification', t => {
+  const context = attentionFixture(t, { maxInteractivePerHour: 2, minIntervalMs: 600000, digestWindowMs: 0 });
+  const { attention } = context;
+  assert.equal(notify(attention, 'seed').state, 'delivered');
+  assert.equal(notify(attention, 'low', { priority: 'low' }).state, 'pending');
+  context.advance(7200001);
+  const high = notify(attention, 'high', { priority: 'high' });
+  assert.equal(high.state, 'pending', 'the freed slot belongs to the older notification at the same effective level');
+  assert.deepEqual(attention.releaseDue().map(row => row.dedupe_key), ['low', 'high']);
+});
+
+test('blocked or not-yet-due old notifications cannot hold back an independent new offer', t => {
+  const blocked = attentionFixture(t, { maxInteractivePerHour: 2, minIntervalMs: 600000, digestWindowMs: 0 });
+  const at = iso(blocked.now());
+  blocked.database.atomic(() => blocked.database.db.prepare('INSERT INTO tasks(id,data_json,status,created_at,updated_at) VALUES(?,?,?,?,?)')
+    .run('yielded-task', JSON.stringify({ yieldState: 'YIELDED_TO_USER' }), 'waiting_for_information', at, at));
+  assert.equal(notify(blocked.attention, 'seed').state, 'delivered');
+  assert.equal(notify(blocked.attention, 'low', { priority: 'low', taskId: 'yielded-task' }).state, 'pending');
+  blocked.advance(7200001);
+  assert.equal(notify(blocked.attention, 'high', { priority: 'high' }).state, 'delivered', 'a readiness-blocked old row is not currently deliverable');
+
+  const future = attentionFixture(t, { maxInteractivePerHour: 2, minIntervalMs: 7200000, digestWindowMs: 0 });
+  assert.equal(notify(future.attention, 'seed').state, 'delivered');
+  assert.equal(notify(future.attention, 'low', { priority: 'low' }).state, 'pending');
+  future.advance(3600001);
+  assert.equal(notify(future.attention, 'high', { priority: 'high' }).state, 'delivered', 'a not-yet-due old row is not currently deliverable');
+});
+
+test('releaseDue reaches due notifications beyond the first 30 blocked rows', t => {
+  const context = attentionFixture(t, { maxInteractivePerHour: 1, minIntervalMs: 0, digestWindowMs: 0 });
+  const { attention, database } = context;
+  const at = iso(context.now());
+  database.atomic(() => database.db.prepare('INSERT INTO tasks(id,data_json,status,created_at,updated_at) VALUES(?,?,?,?,?)')
+    .run('blocked-task', JSON.stringify({ yieldState: 'YIELDED_TO_USER' }), 'waiting_for_information', at, at));
+  assert.equal(notify(attention, 'seed').state, 'delivered');
+  for (let index = 0; index < 40; index++) assert.equal(notify(attention, `blocked-${index}`, { taskId: 'blocked-task' }).state, 'pending');
+  context.advance(1);
+  assert.equal(notify(attention, 'old-due').state, 'pending');
+  assert.equal(notify(attention, 'fresh-high', { priority: 'high' }).state, 'pending');
+  context.advance(3600000);
+  const released = attention.releaseDue().map(row => row.dedupe_key);
+  context.advance(3600001);
+  released.push(...attention.releaseDue().map(row => row.dedupe_key));
+  assert.ok(released.includes('old-due'), 'a due notification behind 40 blocked rows must not be permanently blind');
+  assert.ok(released.includes('fresh-high'), 'a high-priority notification behind 40 blocked rows must not be permanently blind');
+});
+
+test('denied releases and dedupe refreshes keep queued time while critical and quiet boundaries still gate', t => {
+  const critical = attentionFixture(t, { maxInteractivePerHour: 1, minIntervalMs: 0, digestWindowMs: 0 });
+  assert.equal(critical.attention.offer({ id: 'urgent', dedupeKey: 'urgent' }, { class: 'critical', criticalConfigured: true }).state, 'delivered');
+  assert.equal(notify(critical.attention, 'low', { priority: 'low', headline: 'first' }).state, 'pending');
+  const queuedAt = lowState(critical.database).created_at;
+  critical.advance(7200001);
+  assert.deepEqual(critical.attention.releaseDue(), []);
+  assert.equal(lowState(critical.database).created_at, queuedAt, 'a critical-denied release must not reset queued time');
+  notify(critical.attention, 'low', { priority: 'low', headline: 'updated content' });
+  assert.equal(lowState(critical.database).created_at, queuedAt, 'a dedupe content refresh must not reset queued time');
+  critical.attention.resolve('urgent');
+  assert.deepEqual(critical.attention.releaseDue().map(row => row.dedupe_key), ['low']);
+  assert.equal(lowState(critical.database).created_at, queuedAt);
+
+  const quiet = attentionFixture(t, { maxInteractivePerHour: 1, minIntervalMs: 0, digestWindowMs: 0, quietHours: { startHour: 0, endHour: 23, timeZone: 'UTC' } });
+  assert.equal(notify(quiet.attention, 'low', { priority: 'low' }).state, 'pending');
+  const quietQueuedAt = lowState(quiet.database).created_at;
+  quiet.advance(7200001);
+  assert.deepEqual(quiet.attention.releaseDue(), []);
+  assert.equal(lowState(quiet.database).created_at, quietQueuedAt, 'a quiet-hours release must not reset queued time');
+  quiet.attention.configure({ quietHours: null });
+  assert.deepEqual(quiet.attention.releaseDue().map(row => row.dedupe_key), ['low']);
+  assert.equal(lowState(quiet.database).created_at, quietQueuedAt);
 });
 
 test('the portfolio view derives deadlines, critical attention and current claims without writing', t => {

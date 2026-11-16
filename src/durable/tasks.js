@@ -128,7 +128,9 @@ export class DurableTasks {
   assertRun(run, { job = null, allowDirty = false } = {}) {
     if (job) this.jobs.assert(job);
     const task = this.row(run.task_id), current = this.db.prepare('SELECT * FROM task_runs WHERE id=?').get(run.id);
-    if (!task || !current || current.status !== 'running' || task.run_generation !== run.run_generation || task.privacy_epoch !== run.privacy_epoch
+    if (!task || !current || ['task_id', 'job_id', 'job_lease_token', 'input_version', 'run_generation', 'privacy_epoch'].some(field => current[field] !== run[field])
+      || job && (current.job_id !== job.id || current.job_lease_token !== job.lease_token || current.task_id !== (job.task_id || job.payload?.taskId))
+      || current.status !== 'running' || task.run_generation !== run.run_generation || task.privacy_epoch !== run.privacy_epoch
       || parse(task.data_json).control?.paused || task.status === 'cancelled') throw durableError('RUN_INVALIDATED', 'The task run or privacy generation is no longer current.');
     if (!allowDirty && task.input_version !== run.input_version) throw durableError('TASK_DIRTY', 'New task context must be incorporated at a safe checkpoint.');
     return taskProjection(task);

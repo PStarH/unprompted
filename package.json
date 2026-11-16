@@ -20,6 +20,9 @@
     "test:connections": "node test/browser/connected-sources.mjs",
     "test:connectors": "node --test test/connector-permissions.test.js test/connector-contracts.test.js test/connector-harness.test.js test/artifact-actions.test.js test/connectors.test.js test/connectors-multi.test.js test/connectors-slack-notion.test.js test/native-sources.test.js test/device-oauth.test.js test/code-oauth.test.js test/connector-http.test.js test/connections-api.test.js test/connector-search-api.test.js test/google-durable-workflow.test.js test/gmail-verification-safety.test.js test/sync.test.js test/monitoring.test.js",
     "test:mcp": "node test/browser/mcp-connections.mjs",
+    "test:model-controls": "node test/browser/model-controls.mjs",
+    "test:experience-trials": "node test/browser/experience-trials.mjs",
+    "test:autonomy": "node test/browser/autonomy.mjs",
     "test:workspace": "node test/browser/workspace-modes.mjs",
     "test:page-focus": "node test/browser/page-focus.mjs",
     "test:detail-focus": "node test/browser/detail-focus.mjs",
@@ -43,7 +46,9 @@
     "test:memory-ui": "node test/browser/memory-space.mjs && node test/browser/memory-harness.mjs",
     "test:durable-ui": "node test/browser/durable-workspace.mjs",
     "test:integration": "node --test test/full-chain-recovery.test.js",
-    "test:safety": "node --test test/reliability-safety.test.js test/gmail-verification-safety.test.js test/durable-execution.test.js test/mcp.test.js test/pi-runtime.test.js test/task-services.test.js"
+    "test:safety": "node --test test/reliability-safety.test.js test/gmail-verification-safety.test.js test/durable-execution.test.js test/mcp.test.js test/pi-runtime.test.js test/task-services.test.js",
+    "eval:soak": "node eval/soak.js",
+    "eval:activation-quality": "node eval/activation-quality.js"
   },
   "engines": {
     "node": ">=20"

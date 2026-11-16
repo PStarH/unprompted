@@ -75,6 +75,29 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_claimable ON jobs(queue_name,state,priority DESC,available_at);
 CREATE INDEX IF NOT EXISTS ix_jobs_expired ON jobs(state,lease_until);
+-- Compact GitHub webhook receipt. Only the delivery identity, body digest and
+-- bounded bookkeeping are stored; the signed body, issue text and secret never
+-- enter this table. The two account-scoped uniques are separate dedupe facts:
+-- a valid body replayed under a new delivery header is still one receipt.
+CREATE TABLE IF NOT EXISTS github_webhook_receipts (
+ id TEXT PRIMARY KEY,
+ account_id TEXT NOT NULL,
+ delivery_guid TEXT NOT NULL,
+ body_digest TEXT NOT NULL,
+ repository TEXT NOT NULL,
+ event TEXT NOT NULL,
+ action TEXT,
+ state TEXT NOT NULL CHECK(state IN ('queued','pulling','paused','completed','expired','cancelled')),
+ job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+ error_code TEXT,
+ received_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ completed_at TEXT,
+ UNIQUE(account_id,delivery_guid),
+ UNIQUE(account_id,body_digest)
+);
+CREATE INDEX IF NOT EXISTS ix_webhook_receipts_state ON github_webhook_receipts(state,received_at);
+CREATE INDEX IF NOT EXISTS ix_webhook_receipts_job ON github_webhook_receipts(job_id,state);
 CREATE TABLE IF NOT EXISTS task_runs (
  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
  job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL, job_lease_token INTEGER NOT NULL,

@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { DurableDatabase } from '../src/durable/database.js';
 import { SqliteStore } from '../src/durable/store.js';
 import { DurableRuntime } from '../src/durable/runtime.js';
 import { WorkEngine } from '../src/engine.js';
@@ -16,6 +19,7 @@ import { piSupported } from '../src/pi-runtime.js';
 import { LocalSetupStore } from '../src/setup.js';
 import { reminderListId } from '../src/connectors/apple-reminders.js';
 import { parseMailbox } from '../src/connectors/google.js';
+import { DurableReasoningSessions, runWithOperation } from '../src/durable/reasoning-sessions.js';
 
 const parent = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const json = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
@@ -368,7 +372,7 @@ for (const harness of ['standard', 'pi']) {
       } } });
     }
     const task = context.runtime.tasks.get(context.taskId);
-    context.engine.reasoner = reasoner;
+    context.engine.reasoner = context.engine.bindReasonerUsage(reasoner);
     context.engine.externalTools = scope => context.runtime.wrapReadTools(context.runtime.artifacts.tools(scope), scope.taskId);
     context.runtime.scheduleTask(task.id, `artifact-${harness}`);
     context.runtime.kick();
@@ -376,7 +380,9 @@ for (const harness of ['standard', 'pi']) {
     const finished = context.runtime.tasks.get(task.id);
     assert.equal(modelCalls, 2, JSON.stringify({ reasoning: finished.reasoningWork, lastError: reasoner.lastError }));
     assert.equal(finished.artifactRequests[0].status, 'verified');
-    assert.ok(context.runtime.ledger.list().some(execution => execution.action_family === 'context.read' && execution.status === 'verified'));
+    assert.equal(context.runtime.ledger.byKey(finished.artifactRequests[0].key).status, 'verified');
+    assert.equal(context.runtime.ledger.list().some(execution => execution.action_family === 'context.read' && execution.tool === 'create_work_artifact'), false,
+      'a trusted write effect is not wrapped as a read');
     assert.equal(context.connection.writes.length, 1);
     const tools = context.runtime.artifacts.tools({ taskId: task.id, isCurrent: () => true });
     await assert.rejects(tools[0].execute('outside-run', { ...input, grantId: 'invalid' }), { code: 'ARTIFACT_NOT_AUTHORIZED' });
@@ -617,6 +623,34 @@ test('a changed review token blocks a non-mail retry', async t => {
   assert.equal(context.connection.writes.length, 0);
 });
 
+test('a queued artifact request is associated with its session operation and resumed without a duplicate', async t => {
+  const context = await fixture(t);
+  const sessions = new DurableReasoningSessions(context.runtime.database);
+  const owner = { kind: 'workspace', ownerId: 'artifact-harness', token: 'artifact-token' };
+  const session = sessions.begin({ logicalKey: 'artifact-operation-session', owner, isCurrent: () => true,
+    bindings: { authorityVersion: 1, privacyEpoch: 0, contextVersion: 0, inputVersion: 0, catalogVersion: 1 } });
+  const operation = { sessionId: session.id, operationId: 'artifact-operation-1', turn: 0, callIndex: 0,
+    tool: 'create_work_artifact', effect: 'write', argsDigest: 'digest' };
+  sessions.toolIntent({ id: session.id, owner, claimId: session.claimId, turn: 0, callIndex: 0, tool: 'create_work_artifact', effect: 'write',
+    args: { grantId: context.grant.id }, operationId: operation.operationId, isCurrent: () => true, sourceRefs: [{ kind: 'connector', id: 'notion' }] });
+
+  const pending = runWithOperation(operation, () => request(context));
+  const stored = context.runtime.tasks.get(context.taskId).artifactRequests[0];
+  assert.equal(stored.id, pending.id);
+  assert.equal(stored.operationId, operation.operationId);
+  assert.equal(stored.key, 'artifact:artifact-operation-1');
+  assert.equal(stored.status, 'queued');
+  const mapped = context.store.db.prepare('SELECT status,local_ref FROM reasoning_session_operations WHERE operation_id=?').get(operation.operationId);
+  assert.equal(mapped.status, 'intent', 'a queued request is not an external completion');
+  assert.equal(mapped.local_ref, `artifact_request:${pending.id}`);
+
+  const tool = context.runtime.artifacts.tools({ taskId: context.taskId, isCurrent: () => true })[0];
+  assert.equal(tool.recoverOperation({ operationId: operation.operationId }).id, pending.id);
+  const replay = runWithOperation(operation, () => request(context));
+  assert.equal(replay.id, pending.id);
+  assert.equal(context.runtime.tasks.get(context.taskId).artifactRequests.length, 1, 'the persisted request is found by operation id');
+});
+
 test('a permission refresh retries a draft that was cancelled before dispatch', async t => {
   const context = await fixture(t, 'google');
   context.runtime.artifacts.schedulePrepared(context.runtime.tasks.get(context.taskId));
@@ -632,4 +666,84 @@ test('a permission refresh retries a draft that was cancelled before dispatch', 
   const requests = context.runtime.tasks.get(context.taskId).artifactRequests;
   assert.equal(requests.length, 2);
   assert.equal(requests[1].status, 'verified');
+});
+
+
+test('a failed private association rolls back the queued request, effects job and link together', async t => {
+  const context = await fixture(t);
+  // The real session table exists, but this operation names no durable row: the
+  // link hook fails and the whole store mutation must roll back.
+  new DurableReasoningSessions(context.runtime.database);
+  const operation = { sessionId: 'missing-session', operationId: 'rollback-operation', turn: 0, callIndex: 0,
+    tool: 'create_work_artifact', effect: 'write', argsDigest: 'digest' };
+  assert.throws(() => runWithOperation(operation, () => request(context)), error => error.code === 'SESSION_OPERATION_MISSING');
+  const task = context.runtime.tasks.get(context.taskId);
+  assert.equal((task.artifactRequests || []).length, 0, 'the queue entry was rolled back');
+  assert.equal(context.runtime.jobs.list().filter(job => job.job_type === 'artifact_publish' && job.idempotency_key === 'artifact:rollback-operation').length, 0, 'the effects job was rolled back');
+  assert.equal(context.store.db.prepare('SELECT COUNT(*) n FROM reasoning_session_operations').get().n, 0, 'no operation link or intent leaked');
+  assert.equal(context.runtime.ledger.list().length, 0, 'no external execution was created');
+});
+
+const crashChild = fileURLToPath(new URL('./fixtures/artifact-session-crash.mjs', import.meta.url));
+function runCrashChild(mode, directory) {
+  const child = spawn(process.execPath, [crashChild], {
+    env: { ...process.env, CRASH_DIR: directory, CRASH_MODE: mode }, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  return new Promise(resolve => child.on('exit', (code, signal) => resolve({ code, signal, stderr })));
+}
+function readCrashState(directory) {
+  const database = new DurableDatabase(path.join(directory, 'state.sqlite'));
+  try {
+    const row = database.db.prepare("SELECT data_json FROM tasks WHERE id='request:m1'").get();
+    const task = row ? JSON.parse(row.data_json) : {};
+    return {
+      requests: task.artifactRequests || [],
+      jobs: database.db.prepare("SELECT id,state,idempotency_key FROM jobs WHERE job_type='artifact_publish'").all(),
+      operations: database.db.prepare('SELECT operation_id,status,local_ref FROM reasoning_session_operations').all(),
+      sessions: database.db.prepare('SELECT id,status,claim_id FROM reasoning_sessions').all(),
+      executions: database.db.prepare('SELECT COUNT(*) n FROM tool_executions').get().n
+    };
+  } finally { database.close(); }
+}
+
+test('a real child killed before or after the association leaves no half-committed request', async t => {
+  for (const mode of ['before-link', 'after-link']) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `unprompted-artifact-${mode}-`));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const exited = await runCrashChild(mode, directory);
+    assert.equal(exited.signal, 'SIGKILL', `${mode} was terminated inside the store transaction`);
+    const state = readCrashState(directory);
+    assert.equal(state.requests.length, 0, `${mode}: no queued request survived`);
+    assert.equal(state.jobs.length, 0, `${mode}: no effects job survived`);
+    assert.equal(state.executions, 0, `${mode}: no external effect was created`);
+    assert.equal(state.sessions.length, 1, `${mode}: the prior private session row is retained`);
+    assert.equal(state.operations.length, 1);
+    assert.equal(state.operations[0].status, 'intent');
+    assert.equal(state.operations[0].local_ref, null, `${mode}: the local link is all-or-none`);
+  }
+});
+
+test('a real child killed after the queued commit leaves exactly one recoverable request and no repeat', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-artifact-after-commit-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const exited = await runCrashChild('after-commit', directory);
+  assert.equal(exited.signal, 'SIGKILL');
+  const state = readCrashState(directory);
+  assert.equal(state.requests.length, 1);
+  assert.equal(state.requests[0].status, 'queued', 'a queued request is never marked externally complete');
+  assert.equal(state.jobs.length, 1);
+  assert.equal(state.jobs[0].state, 'queued');
+  assert.equal(state.operations.length, 1);
+  assert.equal(state.operations[0].local_ref, `artifact_request:${state.requests[0].id}`);
+  assert.equal(state.executions, 0);
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  const recovered = await runCrashChild('recover', directory);
+  assert.equal(recovered.code, 0, recovered.stderr);
+  const after = readCrashState(directory);
+  assert.equal(after.requests.length, 1, 'the same pending operation returns the original request');
+  assert.equal(after.jobs.length, 1, 'no second effects job is queued');
+  const marker = JSON.parse(fs.readFileSync(path.join(directory, 'recover.json'), 'utf8'));
+  assert.equal(marker.id, state.requests[0].id);
 });

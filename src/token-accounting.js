@@ -126,6 +126,7 @@ const FOREIGN_CAP_FIELDS = {
 
 const invalid = message => durableError('INVALID_TOKEN_ACCOUNTING', message, 400);
 const conflict = message => durableError('TOKEN_ACCOUNTING_CONFLICT', message, 409);
+const stale = (message, now, code = 'TOKEN_ACCOUNTING_STALE') => Object.assign(durableError(code, message, 503), { definitiveNoEffect: true, retryAt: new Date(Number(now) + 1).toISOString() });
 
 function plainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -287,14 +288,19 @@ const reservedSnapshot = row => ({
 export class TokenRequestAccounting {
   #budget;
   #attempts = new WeakMap();
+  #money;
 
-  constructor(budget) {
+  constructor(budget, { money = null } = {}) {
     const required = ['reserve', 'markDispatched', 'settle', 'markUnknown', 'cancelBeforeDispatch', 'describe'];
     if (!budget || required.some(method => typeof budget[method] !== 'function')
       || typeof budget.database?.atomic !== 'function') {
       throw new TypeError('TokenRequestAccounting requires a TokenBudgetService.');
     }
+    if (money && (money.database !== budget.database || typeof money.snapshot !== 'function')) {
+      throw invalid('Model money accounting must share the exact token database.');
+    }
     this.#budget = budget;
+    this.#money = money;
   }
 
   /**
@@ -319,12 +325,14 @@ export class TokenRequestAccounting {
     if (scope === 'task' && task === null) {
       throw invalid('task scope requires a trusted taskId from the caller context.');
     }
+    if (this.#money && this.#budget.database.db.inTransaction) throw conflict('Money accounting must own its transaction.');
     const wire = wirePayload(payload, protocol);
     return this.#budget.database.atomic(() => {
       const view = this.#budget.describe({ taskId: task });
       const workspaceLimit = view.workspace.limit;
       const taskLimit = scope === 'task' ? view.task.limit : null;
-      const limited = workspaceLimit != null || taskLimit != null;
+      const moneySnapshot = this.#money?.snapshot({ model: wire.model, protocol, taskId: task });
+      const limited = workspaceLimit != null || taskLimit != null || moneySnapshot?.enabled;
       let outputTokens;
       let outputBound;
       if (limited) {
@@ -343,6 +351,7 @@ export class TokenRequestAccounting {
       const inputTokens = estimateInput(wire);
       const attemptId = randomUUID();
       const reservation = this.#budget.reserve({ attemptId, taskId: task, inputTokens, outputTokens });
+      const moneyHold = this.#money?.reserve(moneySnapshot, { attemptId, scope, taskId: task, inputTokens, outputTokens }) || null;
       const attempt = Object.freeze({
         attemptId,
         protocol,
@@ -362,6 +371,9 @@ export class TokenRequestAccounting {
         outputBound,
         workspaceLimit,
         taskLimit,
+        model: wire.model,
+        moneySnapshot,
+        moneyHold,
         createdAt: reservation.createdAt,
         state: 'prepared',
         usage: null,
@@ -385,7 +397,8 @@ export class TokenRequestAccounting {
    * marker is idempotent, but an adapter attempt is not: a second call is
    * rejected even if the ledger row is already dispatched.
    */
-  markDispatched(attempt) {
+  markDispatched(attempt) { return this.#moneyAtomic(attempt, () => this.#markDispatched(attempt)); }
+  #markDispatched(attempt) {
     const record = this.#record(attempt);
     if (record.state !== 'prepared') {
       throw conflict(`Attempt "${record.attemptId}" is ${record.state} and cannot produce a new dispatch permit.`);
@@ -395,7 +408,7 @@ export class TokenRequestAccounting {
       const workspaceChanged = view.workspace.limit !== record.workspaceLimit;
       const taskChanged = record.scope === 'task' && view.task?.limit !== record.taskLimit;
       if (workspaceChanged || taskChanged) {
-        throw conflict(`Token limits changed after attempt "${record.attemptId}" was prepared; cancel it with fail() and prepare a new attempt.`);
+        throw stale(`Token limits changed after attempt "${record.attemptId}" was prepared; cancel it with fail() and prepare a new attempt.`, this.#budget.database.now());
       }
       const current = this.#budget.reserve({
         attemptId: record.attemptId,
@@ -408,6 +421,11 @@ export class TokenRequestAccounting {
       }
       if (current.state !== 'reserved') {
         throw conflict(`Attempt "${record.attemptId}" is ${current.state} in the ledger and cannot produce a new dispatch permit.`);
+      }
+      if (this.#money) {
+        const currentMoney = this.#money.snapshot({ model: record.model, protocol: record.protocol, taskId: record.taskId });
+        if (currentMoney.digest !== record.moneySnapshot.digest) throw stale('Money limits or prices changed after prepare; cancel and prepare again.', this.#budget.database.now(), 'MONEY_ACCOUNTING_STALE');
+        this.#money.markDispatched(record.moneyHold);
       }
       const row = this.#budget.markDispatched(record.attemptId);
       record.state = 'dispatched';
@@ -431,7 +449,8 @@ export class TokenRequestAccounting {
    * returns an `unknown` result; overflow marks it unknown and rethrows the
    * original core error. Repeating the identical outcome is idempotent.
    */
-  settleResponse(attempt, { protocol, body } = {}) {
+  settleResponse(attempt, response = {}) { return this.#moneyAtomic(attempt, () => this.#settleResponse(attempt, response)); }
+  #settleResponse(attempt, { protocol, body } = {}) {
     const record = this.#record(attempt);
     if (!isModelProtocol(protocol)) {
       throw invalid(`protocol must be one of ${MODEL_PROTOCOLS.join(', ')}.`);
@@ -462,6 +481,7 @@ export class TokenRequestAccounting {
 
     const usage = normalizeUsage(protocol, body);
     if (usage === null) {
+      this.#money?.settle(record.moneyHold, null);
       const row = this.#budget.markUnknown(record.attemptId);
       record.state = 'unknown';
       record.result = deepFreeze({
@@ -478,7 +498,11 @@ export class TokenRequestAccounting {
     }
 
     try {
-      const row = this.#budget.settle(record.attemptId, usage);
+      const settle = () => {
+        this.#money?.settle(record.moneyHold, usage);
+        return this.#budget.settle(record.attemptId, usage);
+      };
+      const row = this.#money ? this.#budget.database.db.transaction(settle)() : settle();
       record.state = 'settled';
       record.usage = usage;
       record.result = deepFreeze({
@@ -489,10 +513,11 @@ export class TokenRequestAccounting {
       });
       return record.result;
     } catch (error) {
-      if (error?.code !== 'TOKEN_BUDGET_OVERFLOW') throw error;
+      if (!['TOKEN_BUDGET_OVERFLOW', 'MONEY_BUDGET_OVERFLOW', 'PRICE_OVERFLOW'].includes(error?.code)) throw error;
       record.overflowError = error;
       record.overflowUsage = usage;
       try {
+        this.#money?.fail(record.moneyHold, true);
         const row = this.#budget.markUnknown(record.attemptId);
         record.state = 'unknown';
         record.result = deepFreeze({
@@ -517,7 +542,8 @@ export class TokenRequestAccounting {
    * Cancel an undispatched attempt; keep a dispatched attempt's entire hold by
    * marking it unknown. Settled attempts cannot be failed retroactively.
    */
-  fail(attempt) {
+  fail(attempt) { return this.#moneyAtomic(attempt, () => this.#fail(attempt)); }
+  #fail(attempt) {
     const record = this.#record(attempt);
     if (record.state === 'settled') {
       throw conflict(`Attempt "${record.attemptId}" is settled and cannot be marked failed.`);
@@ -525,7 +551,11 @@ export class TokenRequestAccounting {
     if (record.state === 'cancelled' || record.state === 'unknown') return record.result;
     if (record.state === 'prepared') {
       try {
-        const row = this.#budget.cancelBeforeDispatch(record.attemptId);
+        const cancel = () => {
+          this.#money?.fail(record.moneyHold, false);
+          return this.#budget.cancelBeforeDispatch(record.attemptId);
+        };
+        const row = this.#money ? this.#budget.database.db.transaction(cancel)() : cancel();
         record.state = 'cancelled';
         record.result = deepFreeze({
           attemptId: record.attemptId,
@@ -539,9 +569,10 @@ export class TokenRequestAccounting {
         });
         return record.result;
       } catch (error) {
-        if (error?.code !== 'TOKEN_BUDGET_ALREADY_DISPATCHED') throw error;
+        if (!['TOKEN_BUDGET_ALREADY_DISPATCHED', 'MONEY_BUDGET_ALREADY_DISPATCHED'].includes(error?.code)) throw error;
       }
     }
+    this.#money?.fail(record.moneyHold, true);
     const row = this.#budget.markUnknown(record.attemptId);
     record.state = 'unknown';
     record.result = deepFreeze({
@@ -555,6 +586,25 @@ export class TokenRequestAccounting {
       reserved: reservedSnapshot(row)
     });
     return record.result;
+  }
+
+  #moneyAtomic(attempt, operation) {
+    if (!this.#money) return operation();
+    if (this.#budget.database.db.inTransaction) throw conflict('Money accounting must own its transaction.');
+    const record = this.#record(attempt), before = { ...record };
+    let outcome;
+    try {
+      outcome = this.#budget.database.atomic(() => {
+        try { return { value: operation() }; }
+        catch (error) {
+          // Overflow deliberately commits unknown holds, then reports the error.
+          if (record.state === 'unknown' && record.overflowError === error && !error.markUnknownError) return { error };
+          throw error;
+        }
+      });
+    } catch (error) { Object.assign(record, before); throw error; }
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
   }
 
   #record(attempt) {

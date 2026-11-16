@@ -24,6 +24,46 @@ function deleteMemoryRows(db, table, ids) {
   const placeholders = ids.map(() => '?').join(',');
   return db.prepare(`DELETE FROM ${table} WHERE ${columns.map(name => `"${name}" IN (${placeholders})`).join(' OR ')}`).run(...columns.flatMap(() => ids)).changes;
 }
+/** Clear private reasoning-session bodies for forgotten sources/tasks. The
+ * opaque row and correlation ids remain for audit and reconciliation. */
+function clearReasoningSessions(db, { taskIds = [], sources = [], at, status = 'invalidated' }) {
+  if (!hasTable(db, 'reasoning_sessions')) return 0;
+  const ids = new Set();
+  const tasks = [...new Set(taskIds.filter(id => typeof id === 'string' && id))];
+  if (tasks.length) {
+    const placeholders = tasks.map(() => '?').join(',');
+    for (const row of db.prepare(`SELECT id FROM reasoning_sessions WHERE task_id IN (${placeholders}) AND status<>'completed'`).all(...tasks)) ids.add(row.id);
+    for (const taskId of tasks) {
+      for (const row of db.prepare(`SELECT id FROM reasoning_sessions s WHERE s.status<>'completed'
+        AND EXISTS (SELECT 1 FROM json_each(s.source_refs_json) WHERE json_extract(value,'$.kind')='task' AND json_extract(value,'$.id')=?)`).all(taskId)) ids.add(row.id);
+    }
+  }
+  for (const source of sources) {
+    if (!source || typeof source.kind !== 'string' || typeof source.id !== 'string') continue;
+    for (const row of db.prepare(`SELECT id FROM reasoning_sessions s WHERE s.status<>'completed'
+      AND EXISTS (SELECT 1 FROM json_each(s.source_refs_json) WHERE json_extract(value,'$.kind')=? AND json_extract(value,'$.id')=?)`).all(source.kind, source.id)) ids.add(row.id);
+  }
+  for (const id of ids) {
+    db.prepare(`UPDATE reasoning_sessions SET status=?,conversation_json=NULL,pending_json=NULL,final_json=NULL,final_digest=NULL,deferred_json=NULL,
+      claim_id=NULL,claim_until=NULL,version=version+1,updated_at=? WHERE id=?`).run(status, at, id);
+    if (hasTable(db, 'reasoning_session_operations')) {
+      db.prepare('UPDATE reasoning_session_operations SET args_json=NULL,result_json=NULL,receipt_json=NULL,updated_at=? WHERE session_id=?').run(at, id);
+    }
+  }
+  return ids.size;
+}
+
+
+// Trial results, saved user scenarios and immutable content versions are
+// derived from the Experience's sources too. Delete them explicitly so a
+// revoke or Forget does not leave private instruction, scenario or difference
+// history behind even if foreign key enforcement is unavailable in an older
+// local database file.
+function deleteExperienceDerivatives(db, experienceId) {
+  if (hasTable(db, 'experience_trials')) db.prepare('DELETE FROM experience_trials WHERE experience_id=?').run(experienceId);
+  if (hasTable(db, 'experience_trial_case_sets')) db.prepare('DELETE FROM experience_trial_case_sets WHERE experience_id=?').run(experienceId);
+  if (hasTable(db, 'experience_content_versions')) db.prepare('DELETE FROM experience_content_versions WHERE experience_id=?').run(experienceId);
+}
 const minimalTask = row => ({ id: row.id, status: 'cancelled', userDismissed: true, privacyInvalidated: true,
   inputVersion: row.input_version, processedInputVersion: row.processed_input_version, runGeneration: row.run_generation + 1, privacyEpoch: row.privacy_epoch + 1,
   stateVersion: row.version + 1, control: { paused: true } });
@@ -32,8 +72,9 @@ const minimalTask = row => ({ id: row.id, status: 'cancelled', userDismissed: tr
  * necessary reconciliation metadata are the only retained invalidation data.
  * A separate explicit Activation Policy owns "don't do this again". */
 export class ForgetService {
-  constructor(database, { jobs, memory = null, store = null, fileRoot = path.dirname(database.filename), onInvalidate = () => {} } = {}) {
+  constructor(database, { jobs, memory = null, store = null, experiences = null, fileRoot = path.dirname(database.filename), onInvalidate = () => {} } = {}) {
     this.database = database; this.db = database.db; this.jobs = jobs; this.memory = memory; this.store = store;
+    this.experiences = experiences;
     this.fileRoot = path.resolve(fileRoot); this.onInvalidate = onInvalidate;
   }
   digest(kind, id) { return createHmac('sha256', this.database.get('privacy_salt')).update(keyFor(kind, id)).digest('hex'); }
@@ -60,21 +101,33 @@ export class ForgetService {
     this.database.atomic(() => this.database.set('revoked_connectors', json(next)));
     return { connectorId, revoked: false, suppressedProviderEventsRemain: true };
   }
+  clearStateDeltaResults({ eventIds = [], situationIds = [], taskIds = [], memoryIds = [], connectorId = null } = {}) {
+    if (!hasTable(this.db, 'situation_delta_results')) return;
+    for (const id of eventIds) this.db.prepare('DELETE FROM situation_delta_results WHERE event_id=?').run(id);
+    for (const id of situationIds) this.db.prepare('DELETE FROM situation_delta_results WHERE situation_id=?').run(id);
+    for (const id of taskIds) this.db.prepare("DELETE FROM situation_delta_results WHERE EXISTS (SELECT 1 FROM json_each(target_fences_json) WHERE json_extract(value,'$.id')=?)").run(id);
+    for (const id of memoryIds) this.db.prepare("DELETE FROM situation_delta_results WHERE EXISTS (SELECT 1 FROM json_each(json_extract(context_json,'$.memories')) WHERE json_extract(value,'$.id')=?)").run(id);
+    if (connectorId) this.db.prepare(`DELETE FROM situation_delta_results WHERE event_id IN (SELECT id FROM durable_inbox WHERE provider=?)
+      OR situation_id IN (SELECT l.situation_id FROM event_situation_links l JOIN durable_inbox e ON e.id=l.event_id WHERE e.provider=?)`).run(connectorId, connectorId);
+  }
   async revokePermission({ connectorId, purgeLocal = false } = {}) {
     if (typeof connectorId !== 'string' || !connectorId || connectorId.length > 80 || typeof purgeLocal !== 'boolean') throw durableError('INVALID_REVOCATION', 'Permission revocation needs a connector id.', 400);
+    const derivedExperiences = new Set(), touchedTasks = new Set();
     await this.database.write(() => {
       const list = new Set(parse(this.database.get('revoked_connectors', '[]')) || []);
       list.add(connectorId);
       this.database.set('revoked_connectors', json([...list]));
+      this.clearStateDeltaResults({ connectorId });
       this.database.bump('privacy_epoch');
       this.database.bump('context_version');
       const at = iso(this.database.now());
       const touchedEvents = new Set();
-      const touchedTasks = new Set();
+      const connectorTasks = new Set();
       for (const row of this.db.prepare('SELECT id,status,data_json FROM tasks').all()) {
         const data = parse(row.data_json);
         const source = data.sourceConnectorId || data.connectorId || data.request?.source?.connectorId;
         if (source !== connectorId) continue;
+        connectorTasks.add(row.id);
         const closed = ['completed', 'cancelled'].includes(row.status) || data.privacyInvalidated;
         if (!purgeLocal && closed) continue;
         touchedTasks.add(row.id);
@@ -166,23 +219,46 @@ export class ForgetService {
           this.db.prepare('UPDATE workspace_state SET state_json=?,version=version+1 WHERE id=1 AND version=?').run(json(state), snapshot.version);
         }
       }
-      // Experiences are derived from events, tasks and feedback. Revocation
-      // must not leave a learned instruction retrievable from a source the
-      // user has just withdrawn.
-      const derivedExperiences = new Set();
+      const revokedTaskIds = new Set(touchedTasks);
+      for (const row of this.db.prepare('SELECT id,data_json FROM tasks').all()) {
+        const data = parse(row.data_json);
+        if ((data.sourceConnectorId || data.connectorId || data.request?.source?.connectorId) === connectorId) revokedTaskIds.add(row.id);
+      }
+      const connectorEvents = this.db.prepare('SELECT id FROM durable_inbox WHERE provider=?').all(connectorId);
+      clearReasoningSessions(this.db, { taskIds: [...revokedTaskIds], sources: [{ kind: 'connector', id: connectorId }, ...connectorEvents.map(event => ({ kind: 'event', id: event.id }))], at });
+      // Experiences are derived from events, tasks, feedback, plan steps and
+      // memories. Revocation must not leave a learned instruction retrievable
+      // from a source the user has just withdrawn. Resolve the same bounded
+      // provenance path retrieval uses: direct event/task lineage alone misses
+      // feedback- and memory-derived records.
+      const derivedExperiencesFound = new Set();
+      if (this.experiences) {
+        for (const experience of this.experiences.list()) {
+          if (this.experiences.provenanceConnectors(experience.id).includes(connectorId)) derivedExperiencesFound.add(experience.id);
+        }
+      }
+      for (const taskId of connectorTasks) {
+        for (const row of this.db.prepare("SELECT derived_id FROM lineage WHERE derived_kind='experience' AND source_kind='task' AND source_id=?").all(taskId)) derivedExperiencesFound.add(row.derived_id);
+      }
       for (const eventId of touchedEvents) {
-        for (const row of this.db.prepare("SELECT derived_id FROM lineage WHERE derived_kind='experience' AND source_kind='event' AND source_id=?").all(eventId)) derivedExperiences.add(row.derived_id);
+        for (const row of this.db.prepare("SELECT derived_id FROM lineage WHERE derived_kind='experience' AND source_kind='event' AND source_id=?").all(eventId)) derivedExperiencesFound.add(row.derived_id);
       }
-      for (const taskId of touchedTasks) {
-        for (const row of this.db.prepare("SELECT derived_id FROM lineage WHERE derived_kind='experience' AND source_kind='task' AND source_id=?").all(taskId)) derivedExperiences.add(row.derived_id);
-      }
+      for (const experienceId of derivedExperiencesFound) derivedExperiences.add(experienceId);
       for (const experienceId of derivedExperiences) {
-        if (purgeLocal) this.db.prepare('DELETE FROM experiences WHERE id=?').run(experienceId);
-        else this.db.prepare("UPDATE experiences SET status='needs_revalidation',revision=revision+1,updated_at=? WHERE id=? AND status='active'").run(at, experienceId);
+        if (purgeLocal) {
+          deleteExperienceDerivatives(this.db, experienceId);
+          this.db.prepare('DELETE FROM experiences WHERE id=?').run(experienceId);
+        } else {
+          // A soft revoke stops automatic application immediately. Passing
+          // trials become expired in storage as well, so no later consumer can
+          // read a pass that was granted while the connector was authorized.
+          this.db.prepare("UPDATE experience_trials SET state='expired' WHERE experience_id=? AND state='passed'").run(experienceId);
+          this.db.prepare("UPDATE experiences SET status='needs_revalidation',revision=revision+1,updated_at=? WHERE id=? AND status IN ('active','candidate','cooldown')").run(at, experienceId);
+        }
       }
     });
     this.store?.refresh();
-    this.onInvalidate();
+    this.onInvalidate({ taskIds: [...touchedTasks], experienceIds: [...derivedExperiences] });
     return { connectorId, revoked: true, purgeLocal };
   }
   preview(kind, id) {
@@ -236,6 +312,8 @@ export class ForgetService {
     const pendingExecutions = [], fileIds = [], forgottenScopes = [], removedClarifications = new Set(), survivingSituations = new Set();
     await this.database.write(() => {
       const epoch = this.database.bump('privacy_epoch'); this.database.bump('context_version');
+      clearReasoningSessions(this.db, { taskIds: [...taskIds], sources: preview.records.map(record => ({ kind: record.kind, id: record.id })), at });
+      this.clearStateDeltaResults({ eventIds: [...eventIds], situationIds: ids('situation'), taskIds: [...taskIds], memoryIds: [...memoryIds] });
       this.db.prepare('INSERT INTO privacy_requests VALUES(?,?,?,?,?,?,?)').run(requestId, kind, this.digest(kind, id), 'purging', json({ counts: preview.counts, localDeletion: 'in_progress', privacyEpoch: epoch }), at, at);
       for (const root of preview.roots) this.db.prepare('INSERT OR IGNORE INTO forgotten_sources VALUES(?,?,?)').run(root.kind, this.digest(root.kind, root.id), at);
       for (const eventId of eventIds) {
@@ -282,7 +360,10 @@ export class ForgetService {
         this.db.prepare('DELETE FROM hot_context_items WHERE origin_kind=\'memory\' AND origin_id=?').run(memoryId);
         this.db.prepare('DELETE FROM user_memories WHERE id=?').run(memoryId);
       }
-      for (const experienceId of ids('experience')) this.db.prepare('DELETE FROM experiences WHERE id=?').run(experienceId);
+      for (const experienceId of ids('experience')) {
+        deleteExperienceDerivatives(this.db, experienceId);
+        this.db.prepare('DELETE FROM experiences WHERE id=?').run(experienceId);
+      }
       for (const stepId of ids('plan_step')) this.db.prepare('DELETE FROM plan_steps WHERE id=?').run(stepId);
       for (const artifactId of ids('artifact')) this.db.prepare('DELETE FROM artifacts WHERE id=?').run(artifactId);
       for (const replayId of ids('replay')) this.db.prepare('DELETE FROM replay_results WHERE id=?').run(replayId);
@@ -388,7 +469,7 @@ export class ForgetService {
       for (const file of this.db.prepare('SELECT * FROM retained_files WHERE delete_on_forget=1').all()) if (file.purpose === 'legacy_migration_backup' || affected.has(keyFor(file.source_kind, file.source_id))) fileIds.push(file.id);
       for (const execution of pendingExecutions) this.jobs.enqueue({ queue: 'reconcile', type: 'privacy_reconcile', key: `privacy:${requestId}:${execution.id}`, payload: { requestId, executionId: execution.id } });
     });
-    this.memory?.invalidate(); this.store?.refresh(); this.onInvalidate({ taskIds: [...taskIds], requestId });
+    this.memory?.invalidate(); this.store?.refresh(); this.onInvalidate({ taskIds: [...taskIds], experienceIds: ids('experience'), requestId });
     const status = { counts: preview.counts, localDeletion: 'complete', backupsRemoved: 0, remainingFiles: [], pendingExternal: pendingExecutions,
       externalRetention: pendingExecutions.length ? 'Dispatched operations are being reconciled. External copies are not erased by local deletion.' : 'Existing connector copies and independent provider backups are outside local deletion.',
       forensicErasure: 'Database secure deletion does not guarantee erasure from filesystem snapshots, storage firmware or independent backups.' };

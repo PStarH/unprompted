@@ -1,5 +1,6 @@
 import { taskDocumentTools, PI_LIMITS } from './pi-runtime.js';
 import { jsonTextChunk } from './bounded.js';
+import { addOperationSources } from './durable/reasoning-sessions.js';
 
 const deny = () => Object.assign(new Error('The task source is unavailable or this task run is no longer current.'), { code: 'TASK_CONTEXT_UNAVAILABLE', status: 403 });
 
@@ -37,6 +38,7 @@ export function taskSourceTools(runtime, { taskId, isCurrent = () => false } = {
       if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => key !== 'offset')
         || args.offset != null && (!Number.isSafeInteger(args.offset) || args.offset < 0 || args.offset > 1000000)) throw new Error('Invalid source read arguments.');
       const task = current(), { content, ...source } = runtime.sourceForTask(task);
+      addOperationSources([{ kind: 'task', id: task.id }, ...(source.eventId ? [{ kind: 'event', id: source.eventId }] : [])]);
       const result = jsonTextChunk({ ...source, title: source.title.slice(0, 300), taskId: task.id, sourceVersion: task.inputVersion }, content, args.offset || 0, { readChars: PI_LIMITS.readChars });
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: {} };
     } }, contextTool, {
@@ -61,6 +63,7 @@ export function taskSourceTools(runtime, { taskId, isCurrent = () => false } = {
           || args.offset != null && (!Number.isInteger(args.offset) || args.offset < 0 || args.offset > 1000000)) throw new Error('Invalid workspace read arguments.');
         const record = runtime.readWorkspaceRecord(task, args);
         if (!record) throw deny();
+        addOperationSources([{ kind: args.kind, id: String(record.id) }, { kind: 'task', id: task.id }]);
         const chunk = jsonTextChunk({ kind: record.kind, id: record.id, title: String(record.title || '').slice(0, 300), ...(record.version != null ? { version: record.version } : {}) }, String(record.content || ''), args.offset || 0, { readChars: PI_LIMITS.readChars });
         return { content: [{ type: 'text', text: JSON.stringify(chunk) }], details: {} };
       }
@@ -74,5 +77,5 @@ export function taskSourceTools(runtime, { taskId, isCurrent = () => false } = {
         if (args != null && (typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length)) throw new Error('Invalid failure observation arguments.');
         return { content: [{ type: 'text', text: JSON.stringify(runtime.failureSignals()) }], details: {} };
       }
-    }, ...documents].map(tool => ({ ...tool, contextProvider: 'workspace' }));
+    }, ...documents].map(tool => ({ ...tool, contextProvider: 'workspace', effect: tool.effect === 'write' ? 'write' : 'read', source: { kind: 'task', id: taskId } }));
 }

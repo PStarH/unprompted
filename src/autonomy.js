@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 const active = task => task && typeof task.id === 'string' && !task.privacyInvalidated && !task.userDismissed
   && !['completed', 'cancelled'].includes(task.status);
@@ -32,7 +32,7 @@ export class Autonomy {
     return Boolean(taskId && approval.taskId === taskId && active(this.engine.store.state.tasks[taskId]) && this.valid(grant, taskId));
   }
   describe() {
-    return { enabled: !this.engine.policy.shadow, grants: this.grants().filter(grant => this.valid(grant)) };
+    return { enabled: !this.engine.policy.shadow, grants: this.grants().filter(grant => this.valid(grant)).map(grant => ({...grant, moneyBudget:grant.moneyBudget?.grantId && this.engine.durableRuntime?.transactionMoney ? {...grant.moneyBudget, ...this.engine.durableRuntime.transactionMoney.autonomyBudgetInfo(grant.moneyBudget.grantId)} : grant.moneyBudget || {capMicros:0,available:false}})) };
   }
   expire() {
     const expired = this.grants().filter(grant => grant.status === 'active' && !this.valid(grant));
@@ -42,17 +42,33 @@ export class Autonomy {
   }
   create(input = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input)
-      || Object.keys(input).some(key => !['mode', 'taskId', 'durationMinutes'].includes(key))) throw invalid('Invalid YOLO authorization.');
+      || Object.keys(input).some(key => !['mode', 'taskId', 'durationMinutes', 'money'].includes(key))) throw invalid('Invalid YOLO authorization.');
     const { mode, taskId = null, durationMinutes = null } = input;
     if (this.engine.policy.shadow) throw invalid('YOLO requires write mode.');
     if (!['time', 'task'].includes(mode)) throw invalid('Choose time or task YOLO.');
     if (mode === 'task' && (typeof taskId !== 'string' || !active(this.engine.store.state.tasks[taskId]) || durationMinutes !== null)) throw invalid('Task YOLO requires an active task and no duration.');
     if (mode === 'time' && (taskId !== null || typeof durationMinutes !== 'number' || !Number.isFinite(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440)) throw invalid('Time YOLO requires 1–1440 minutes and covers this workspace.');
+    const money = input.money ?? {}, capMicros = money.capMicros ?? 0, currency = money.currency ?? 'USD';
+    if (!money || typeof money !== 'object' || Array.isArray(money) || Object.keys(money).some(key => !['currency','capMicros','durationMinutes','confirmed'].includes(key))
+      || !['USD','CNY','EUR'].includes(currency) || !Number.isSafeInteger(capMicros) || capMicros < 0
+      || capMicros > 0 && money.confirmed !== true) throw invalid('Confirm an explicit nonnegative cumulative amount and supported currency.');
+    const moneyMinutes = money.durationMinutes ?? (mode === 'time' ? durationMinutes : 60);
+    if (typeof moneyMinutes !== 'number' || !Number.isFinite(moneyMinutes) || moneyMinutes < 1 || moneyMinutes > 1440
+      || mode === 'time' && moneyMinutes > durationMinutes) throw invalid('Money permission requires a finite duration within the YOLO lease.');
+    const ledger = this.engine.durableRuntime?.transactionMoney;
+    if (capMicros > 0 && (!ledger || this.engine.store.database !== ledger.database)) throw invalid('A positive money limit requires the persistent native workspace.');
+    const spendingId = ledger ? `autonomy:${createHash('sha256').update(JSON.stringify([mode,taskId,currency])).digest('hex')}` : null;
     this.expire();
     const grant = { id: randomUUID(), mode, taskId, source: 'user', status: 'active',
       createdAt: new Date(this.now()).toISOString(),
-      expiresAt: mode === 'time' ? new Date(this.now() + durationMinutes * 60000).toISOString() : null };
+      expiresAt: mode === 'time' ? new Date(this.now() + durationMinutes * 60000).toISOString() : null,
+      moneyBudget:{grantId:spendingId,currency,capMicros,expiresAt:new Date(this.now()+moneyMinutes*60000).toISOString(),available:Boolean(ledger)} };
     this.engine.store.mutate(state => {
+      if (ledger) {
+        const configured = ledger.configureAutonomyBudget({grantId:spendingId,autonomyGrantId:grant.id,scope:mode === 'task' ? 'task':'workspace',taskId,currency,capMicros,expiresAt:grant.moneyBudget.expiresAt});
+        grant.moneyBudget.version = configured.version;
+        this.engine.durableRuntime.jobs.startBudgetWake({key:`autonomy-money:${spendingId}:v${configured.version}`,kind:'model',...(mode==='task'?{taskId}:{})});
+      }
       // Replacing a lease revokes it, including operations queued under its ID.
       state.autonomyGrants = (state.autonomyGrants || []).filter(item => item.status === 'active');
       for (const item of state.autonomyGrants) if (item.mode === mode && item.taskId === taskId) item.status = 'revoked';

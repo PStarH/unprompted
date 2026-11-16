@@ -1,4 +1,5 @@
 import { setupConstants } from './setup.js';
+import { publicFailureText, rateLimitDelay } from './connectors/source-health.js';
 
 const { DEFAULT_INTERVAL_MS, MIN_INTERVAL_MS, MAX_INTERVAL_MS } = setupConstants;
 const iso = now => new Date(now()).toISOString();
@@ -7,7 +8,7 @@ function summarizeErrors(outcome) {
   const failures = (outcome?.results || []).filter(result => result.failed || result.partial);
   return failures.map(result => {
     const error = result.error || (result.errors || []).map(item => `${item.scope}: ${item.message}`).join(' | ');
-    return `${result.connector}: ${error || 'partial sync'}`;
+    return publicFailureText(`${result.connector}: ${error || 'partial sync'}`) || `${result.connector}: sync failed`;
   }).join(' · ');
 }
 
@@ -91,10 +92,14 @@ export class MonitoringService {
     const more = results.some(result => result.hasMore) && results.every(result => !result.failed && !result.partial);
     const fast = more && this.continuationRuns < 4;
     this.continuationRuns = fast ? this.continuationRuns + 1 : 0;
+    // A provider that asked us to slow down gets at least its requested delay;
+    // a normal interval still applies below that ceiling.
+    const backoff = Math.min(MAX_INTERVAL_MS, rateLimitDelay(outcome));
+    const delay = fast ? 1000 : Math.max(this.settings.intervalMs, backoff);
     this.timer = this.setTimer(() => {
       this.timer = null;
       void this.#runAndSchedule();
-    }, fast ? 1000 : this.settings.intervalMs);
+    }, delay);
     this.timer?.unref?.();
   }
 
@@ -104,6 +109,15 @@ export class MonitoringService {
     const outcome = await this.currentRun;
     if (this.settings.enabled && !this.stopped) this.#schedule(outcome);
     return outcome;
+  }
+
+  #recordFailure(message) {
+    const current = this.setup.get().monitoring;
+    // One actionable notice per distinct failure. A later poll that repeats
+    // the same error must not advance lastFailureAt or create a new notice.
+    if (current.lastOutcome === 'failure' && current.lastError === message && current.lastFailureAt) return;
+    this.setup.setMonitoring({ lastFailureAt: iso(this.now), lastOutcome: 'failure', lastError: message });
+    this.settings = this.setup.get().monitoring;
   }
 
   async #run() {
@@ -117,24 +131,21 @@ export class MonitoringService {
       const outcome = await this.sync.run();
       if (outcome?.skipped) return outcome;
       if (!outcome.results?.length) {
-        this.setup.setMonitoring({ lastFailureAt: iso(this.now), lastOutcome: 'failure', lastError: 'No live connector returned a sync result.' });
-        this.settings = this.setup.get().monitoring;
+        this.#recordFailure('No live connector returned a sync result.');
         return outcome;
       }
       const error = summarizeErrors(outcome);
       if (error) {
-        this.setup.setMonitoring({ lastFailureAt: iso(this.now), lastOutcome: 'failure', lastError: error });
-        this.settings = this.setup.get().monitoring;
+        this.#recordFailure(error);
       } else {
         this.setup.setMonitoring({ lastSuccessAt: iso(this.now), lastOutcome: 'success', lastError: null, expiredFor: null });
         this.settings = this.setup.get().monitoring;
       }
       return outcome;
     } catch (error) {
-      // Keep provider detail for the local status screen, but never print it to
-      // the terminal or include any OAuth request body in logs.
-      this.setup.setMonitoring({ lastFailureAt: iso(this.now), lastOutcome: 'failure', lastError: String(error?.message || 'Sync failed').slice(0, 1000) });
-      this.settings = this.setup.get().monitoring;
+      // The status screen gets a redacted message; provider bodies and
+      // credentials are never persisted or printed to the terminal.
+      this.#recordFailure(publicFailureText(error) || 'Sync failed');
       return { results: [], failed: true, error: this.settings.lastError };
     } finally {
       this.running = false;

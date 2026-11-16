@@ -9,7 +9,13 @@ Connectors let Unprompted read selected work and, when you allow it, use actions
 
 A **work source** checks your selected content on connection and continues observing while the app runs, normally every five minutes. You can pause it or choose **Check now**. **MCP** supplies tools used during a task; it does not automatically poll for changes or create tasks. A provider's native source and its MCP connection are separate and require separate authorization.
 
-A publisher can provision public OAuth clients for Google, GitHub, Outlook and Slack, so users do not register their own developer apps. Native Notion observation uses a public integration whose OAuth client must be configured by the publisher; when it is absent, the app shows the one-time setup fields and does not claim automatic observation. Notion, Linear, Jira/Confluence and Todoist MCP presets use the vendor's sign-in page; MCP sign-in does not start native observation.
+A publisher can provision public OAuth clients for Google, GitHub, Outlook and Slack, so users do not register their own developer apps. Native Notion observation uses a public integration. A public build points the app at a publisher broker that keeps the Notion client secret on the server; an owner-private self-host can still configure its own client ID and secret locally. When no Notion client is configured, the app shows the one-time setup fields and does not claim automatic observation. Notion, Linear, Jira/Confluence and Todoist MCP presets use the vendor's sign-in page; MCP sign-in does not start native observation.
+
+## Observation and the optional GitHub webhook
+
+Native sources poll on their own. Connecting checks once, then observation continues on the saved interval while the local service runs, and resumes on restart. Connection health reflects failures and recovery as well as the last sync; it is not an uptime guarantee. An empty read is a valid result.
+
+For a GitHub repository you administer, an optional signed webhook receiver can prompt the existing GitHub connector to perform a scoped incremental pull. It is disabled by default and needs explicit local configuration before startup: `UNPROMPTED_GITHUB_WEBHOOK_ENABLED=true`, `UNPROMPTED_GITHUB_WEBHOOK_SECRET` (16–1024 characters), `UNPROMPTED_GITHUB_WEBHOOK_REPOS` (comma-separated `owner/repo`, at most 100 entries) and `UNPROMPTED_GITHUB_WEBHOOK_ACCOUNT_ID`. Use the repository webhook payload URL `https://<your-receiver>/api/webhooks/github`, content type `application/json`, the same secret and SSL verification. The receiver verifies `X-Hub-Signature-256` with HMAC-SHA256 over the exact body bytes, checks the connected account and repository allowlist, and stores a bounded receipt before scheduling a pull. It carries no issue text or code, grants no access, and does not register the webhook, open a tunnel or write to GitHub. Polling continues because delivery is not guaranteed; this is not push for other sources and not a realtime feed. See [GitHub webhooks](https://github.com/PStarH/unprompted/blob/main/docs/GITHUB_WEBHOOKS.md).
 
 ## Google: mail, documents and calendar
 
@@ -50,7 +56,7 @@ If Microsoft requires admin approval, contact your organization. Mail management
 
 ## Notion: pages or MCP
 
-**For ongoing page observation:** choose **Connections → Notion**, sign in and select the pages to share. To create or update, the publisher's integration must have the required capabilities and you must allow the account and path under platform action access. Native distribution depends on the publisher's OAuth configuration.
+**For ongoing page observation:** choose **Connections → Notion**, sign in and select the pages to share. In a public build, Notion sign-in goes through the publisher's broker; an owner-private copy can use its own Notion app credentials. To create or update, the publisher's integration must have the required capabilities and you must allow the account and path under platform action access. Native distribution requires the publisher's registration and broker deployment.
 
 **For tools during a task:** choose **Connections → MCP → Notion → Sign in and connect**, complete Notion sign-in, then select the tools you want under **Tools and access**. MCP sign-in does not start native page observation.
 
@@ -93,6 +99,8 @@ Expand **Tools and access** to select tools. Writable, destructive and unannotat
 ## Allow actions and check results
 
 Connecting an account does not automatically authorize all actions. First consent to the provider scopes, then grant the account and API path under **Platform action access**. `/` covers the platform's API paths, including any sending, editing or deletion permitted by your token. A narrower path limits API routes, but does not necessarily constrain recipients or channel IDs in a request body.
+
+An operation that may move money needs more than a UI confirmation: a separate finite transaction allowance in automatic follow-up, a confirmed financial contract for the exact platform path or MCP tool, and the provider's own permissions. The allowance defaults to zero, names one currency, has its own finite expiry and never grants tool or account access by itself. A provider accepting the response is not a verified payment; an unknown outcome keeps the amount held and is not retried blindly. See [Automatic follow-up](follow-up.md).
 
 For drafts, Notion child pages or Apple Notes, you can also authorize a specific destination under **Create work artifacts**. Enable MCP write tools separately for each server. An explicit `UNPROMPTED_SHADOW_MODE=true` blocks external writes.
 

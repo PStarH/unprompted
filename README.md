@@ -30,7 +30,7 @@ to a source, and freshness is checked when the request requires it.
 | Evidence is missing or out of date | A visible waiting state, followed by another check when the source changes |
 | An action needs your decision | The proposed result and its evidence, together for review |
 
-> **Under development: realtime connector.** Provider push notifications are upcoming. Today, connected sources are checked by polling; the local UI stream updates the workspace as observations arrive. [See what’s next ↓](#in-development)
+> **Observation:** incremental polling is the default. GitHub repositories can additionally use an [opt-in signed webhook](docs/GITHUB_WEBHOOKS.md) to trigger durable scoped pulls. Broader provider push support remains [in development](#in-development); the local UI stream is not a provider push connection.
 
 ## How it works
 
@@ -179,12 +179,12 @@ process. Real-world usefulness and error rates still need user feedback.
 | --- | --- |
 | Context | Email requests, GitHub issues, pull requests, commits, Actions runs, document updates and run records |
 | Local sources | Selected Markdown/text folders (explicit to-dos) and macOS Notes; note creation requires a separate folder grant, and real-account acceptance is pending |
-| GitHub | Device OAuth; assigned issues, review requests, repository commits and Actions runs; read-only |
+| GitHub | Device OAuth; issues, reviews, commits and Actions runs; observation is read-only by default, with separately granted platform actions |
 | Microsoft Outlook | Browser OAuth with PKCE, inbox delta sync and model-backed request discovery; draft creation requires separate authorization |
-| Slack | Browser OAuth with PKCE, direct and group direct messages; read-only |
+| Slack | Browser OAuth with PKCE, direct and group direct messages; platform actions require the corresponding scopes and a separate local grant |
 | Notion | Browser OAuth, pages selected during consent; child-page creation requires a separate parent-page grant |
 | Google Workspace | Optional Gmail / Drive / Docs connector; draft creation, sending and document edits require separate authorization |
-| MCP tools | External HTTP/stdio/SSE services, per-tool read grants, task investigation and call history |
+| MCP tools | External HTTP/stdio/SSE services, explicit per-tool access, bounded on-demand discovery, task investigation and call history; actions require separate authorization |
 | Live sending | Implemented, explicitly gated, and covered by scripted tests; not claimed as validated in production |
 | Task management | Trusted commitment revisions/withdrawals, persisted waits, reversible corrections and shared dependencies |
 | Document changes | Source-backed, version-checked patches with separate authorization and readback |
@@ -218,16 +218,13 @@ open, with a private backup retained until Forget or explicit removal.
 [Storage and recovery details](docs/ARCHITECTURE.md#storage-and-process-model)
 </details>
 
+In model settings, advanced controls provide workspace/task Token limits, separately confirmed model prices and fee limits, and stage routing. Daily model limits reset at midnight UTC; missing usage or prices are not free. Remote transaction allowances are separate, default to zero and require finite expiry and explicit tool authorization. See [temporary authorization](docs/AUTONOMY.md) and the [API reference](docs/API.md).
+
 ## In development
 
-**Realtime connector — under development.** The goal is to react to provider
-changes through push notifications, reducing the delay between a source change
-and a fresh check. It is not available as a finished connector yet.
+**Broader realtime connector support remains in development.** Incremental polling is the default. An optional [GitHub repository webhook](docs/GITHUB_WEBHOOKS.md) verifies signatures, persists delivery metadata and schedules scoped provider pulls; webhook bodies are not task evidence or authorization. It requires explicit configuration and a reachable HTTPS endpoint. Other sources continue to use polling.
 
-Today, automatic observation uses **polling**. The local `/api/stream` updates
-the interface after observations are processed; it is not a provider push
-connection. Recovery from missed notifications and reconnects is part of the
-work still ahead. [Current connector behavior](docs/CONNECTORS.md)
+The local `/api/stream` updates the interface after observations are processed; it is not a provider push connection. [Current connector behavior](docs/CONNECTORS.md)
 
 Have a source or workflow you want to see supported?
 [Share your scenario](https://github.com/PStarH/unprompted/issues/new/choose).

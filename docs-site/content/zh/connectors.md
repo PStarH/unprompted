@@ -9,7 +9,13 @@ description: 连接每种工作来源和 MCP 工具，选择读取范围并按�
 
 **工作来源**会在连接后检查内容，并在应用运行时按设置继续观察。默认间隔是五分钟，可在连接页暂停或手动检查。**MCP** 是任务中调用的工具；连接它不会自动轮询或创建任务。同一服务的原生来源和 MCP 分别连接、分别授权。
 
-发行方可以为 Google、GitHub、Outlook 和 Slack 预置公开 OAuth 应用身份，用户无需自行创建开发者应用。原生 Notion 观察依赖发行方配置的 public integration OAuth 客户端；未配置时，应用会显示一次性设置项，不会声称已自动观察。Notion、Linear、Jira/Confluence 和 Todoist 的托管 MCP 使用各自服务商的登录页；MCP 登录不会开始原生观察。
+发行方可以为 Google、GitHub、Outlook 和 Slack 预置公开 OAuth 应用身份，用户无需自行创建开发者应用。原生 Notion 观察使用 public integration；公开发行时，应用通过发行方的 broker 授权，Notion Client Secret 留在服务器，owner-private 自托管仍可在本机配置自己的 Client ID 和 Client Secret。未配置 Notion 客户端时，应用会显示一次性设置项，不会声称已自动观察。Notion、Linear、Jira/Confluence 和 Todoist 的托管 MCP 使用各自服务商的登录页；MCP 登录不会开始原生观察。
+
+## 观察与可选的 GitHub webhook
+
+原生来源自行轮询。连接时检查一次，之后在本机服务运行期间按保存的间隔继续观察，重启后恢复。连接健康状态反映失败与恢复以及最近一次同步，不保证持续在线。读到零条也可以是真实结果。
+
+对于你管理的 GitHub 仓库，可选的签名 webhook 接收器可以提示现有的 GitHub 连接器执行限定范围的增量拉取。它默认关闭，需要在启动前显式配置：`UNPROMPTED_GITHUB_WEBHOOK_ENABLED=true`、`UNPROMPTED_GITHUB_WEBHOOK_SECRET`（16–1024 个字符）、`UNPROMPTED_GITHUB_WEBHOOK_REPOS`（逗号分隔的 `owner/repo`，最多 100 项）和 `UNPROMPTED_GITHUB_WEBHOOK_ACCOUNT_ID`。在仓库设置中使用 payload URL `https://<your-receiver>/api/webhooks/github`、内容类型 `application/json`、同一个密钥并启用 SSL 验证。接收器会按原始请求体字节用 HMAC-SHA256 核对 `X-Hub-Signature-256`，检查已连接账号和仓库允许列表，并在安排拉取前保存有上限的接收记录。它不携带 issue 文本或代码，不授予访问权限，也不会注册 webhook、打开隧道或写入 GitHub。投递不保证到达，所以轮询继续运行；这不是其他来源的推送，也不是实时事件流。见 [GitHub webhooks](https://github.com/PStarH/unprompted/blob/main/docs/GITHUB_WEBHOOKS.md)。
 
 ## Google：邮件、文档与日历
 
@@ -51,7 +57,7 @@ description: 连接每种工作来源和 MCP 工具，选择读取范围并按�
 
 ## Notion：选择页面或连接 MCP
 
-**需要观察页面变化：**在**连接 → Notion**选择连接，在 Notion 页面登录、选择工作区和想共享的页面，再返回应用。没有选中的页面不会自动可见。要让应用创建或更新页面，还需发行方的 Notion 集成具备相应能力，再在本机允许平台行动。原生公开发行的可用性取决于发行方的 OAuth 配置。
+**需要观察页面变化：**在**连接 → Notion**选择连接，在 Notion 页面登录、选择工作区和想共享的页面，再返回应用。公开发行时，Notion 登录通过发行方的 broker 完成；owner-private 副本可使用自己的 Notion 应用凭据。没有选中的页面不会自动可见。要让应用创建或更新页面，还需发行方的 Notion 集成具备相应能力，再在本机允许平台行动。原生公开发行需要发行方完成注册和 broker 部署。
 
 **只需任务中查找或编辑：**在**连接 → MCP → Notion**点击**登录并连接**，完成 Notion 登录，然后在**工具与权限**选择需要的工具。MCP 登录不会自动开始原生页面观察。
 
@@ -94,6 +100,8 @@ description: 连接每种工作来源和 MCP 工具，选择读取范围并按�
 ## 允许行动和检查结果
 
 连接账号不会自动授权所有行动。先在服务商授权页同意所需权限，再打开该账号的**平台行动权限**，选择 API 路径并确认。`/` 覆盖该平台的全部 API 路径，包括账号已获权的发送、修改和删除；也可以填写更窄的路径。路径不一定限制请求正文中的收件人或频道。
+
+可能涉及资金的行动需要的不仅是界面确认：还要在自动跟进里另外创建有限的交易额度、为具体的平台路径或 MCP 工具确认资金契约，并取得服务商本身的权限。额度默认是零，只对应一种币种，有独立的有限到期时间，本身不会授予工具或账号访问。服务商接受响应不等于已核验的付款；结果未知时金额保持占用，不会盲目重试。见[自动跟进](follow-up.md)。
 
 需要草稿、Notion 子页面或备忘录时，还可以在**创建工作成果**中授权明确目标。MCP 写工具在对应服务的**工具与权限**中单独选择。显式设置 `UNPROMPTED_SHADOW_MODE=true` 时仍会禁止对外写入。
 

@@ -72,7 +72,16 @@ export class ToolSafetyGateway {
     if (approval.permission !== 'user_approved' && task.contextReadRequired) throw deny('Read or review the deferred task context before an automatic action.');
     const activation = this.engine.durableRuntime?.activationFor(task);
     if (approval.permission !== 'user_approved' && activation && (!activation.activate || activation.requiresReview)) throw deny('A current user policy requires individual review.');
-    return this.engine.policy.authorize({ actionClass: 'execute_external', approval, taskId });
+    const decision = this.engine.policy.authorize({ actionClass: 'execute_external', approval, taskId });
+    if (approval.transfer != null) {
+      // Only the exact native quote object issued by this workspace money
+      // service can travel with an authorization decision. Model JSON, a
+      // spread copy or a lookalike plain object grants nothing.
+      const money = this.engine.durableRuntime?.transactionMoney;
+      if (!money || typeof money.isNativeQuote !== 'function' || !money.isNativeQuote(approval.transfer)) throw deny('The transaction quote is not a native workspace authorization.');
+      return { ...decision, transfer: approval.transfer, transferBinding: approval.transferBinding ?? null };
+    }
+    return decision;
   }
 }
 

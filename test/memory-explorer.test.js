@@ -16,6 +16,8 @@ import { buildExplorerGraph } from '../public/memory-space-model.js';
 function fixture(t, count) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-explorer-'));
   const store = new SqliteStore(path.join(directory, 'state.json'));
+  // Temporal fixture: October31 is recent and September18 is several weeks ago.
+  store.database.now = () => Date.parse('2026-11-02T12:00:00.000Z');
   seedMemoryExplorerStore(store, count);
   const engine = new WorkEngine(store, { provider: new SimulatedMailProvider(store) });
   const runtime = new DurableRuntime(engine, { tickMs: 100000 });

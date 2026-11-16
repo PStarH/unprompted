@@ -172,9 +172,10 @@ for (const harness of ['standard', 'pi']) for (const sourceId of sources) {
     assert.notEqual(finished.status, 'completed');
     assert.equal(finished.action, null);
     const reads = context.runtime.ledger.list({ taskId: task.id }).filter(execution => execution.action_family === 'context.read');
-    assert.equal(reads.length, document ? 3 : 2);
+    assert.equal(reads.length, document ? 2 : 1, 'only read tools use the context.read ledger family');
     assert.ok(reads.every(execution => execution.status === 'verified'));
     assert.ok(reads.some(execution => execution.provider === 'workspace' && execution.tool === 'read_task_source'));
+    assert.equal(context.runtime.ledger.list({ taskId: task.id }).some(execution => execution.tool === 'create_work_artifact' && execution.action_family === 'context.read'), false);
     assert.equal(context.store.state.outbox.length, 0);
   });
 }

@@ -42,3 +42,19 @@ export function confirmsCancellation(refs, event) {
     return /^(?:(?:please\s+)?(?:cancel|withdraw)\s+(?:the|this|our|my)\s+[\p{L}\p{N}][\p{L}\p{N} '\-]{0,80}|(?:we|i)\s+(?:will not|won't|decided not to)\s+(?:proceed|go ahead)(?:\s+with\s+(?:the|this|our)\s+[\p{L}\p{N}][\p{L}\p{N} '\-]{0,80})?)[.!]?$/u.test(text);
   }));
 }
+
+/** Source-bound semantic receipt. It survives private final scrubbing so a
+ * crash after ACK cannot lose the exact scoped control interpretation. */
+export function ensureStateDeltaSchema(database) {
+  database.atomic(() => {
+    database.db.exec(`CREATE TABLE IF NOT EXISTS situation_delta_results (
+    event_id TEXT NOT NULL REFERENCES durable_inbox(id) ON DELETE CASCADE,
+    situation_id TEXT NOT NULL REFERENCES situations(id) ON DELETE CASCADE,
+    delta_json TEXT NOT NULL, target_fences_json TEXT NOT NULL, scoped_task_ids_json TEXT NOT NULL,
+    situation_version INTEGER NOT NULL, privacy_epoch INTEGER NOT NULL, context_json TEXT NOT NULL DEFAULT '{}',
+    scoped_applied INTEGER NOT NULL DEFAULT 0 CHECK(scoped_applied IN (0,1)),
+    PRIMARY KEY(event_id,situation_id))`);
+    const columns = new Set(database.db.pragma('table_info(situation_delta_results)').map(row => row.name));
+    if (!columns.has('context_json')) database.db.exec("ALTER TABLE situation_delta_results ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'");
+  });
+}

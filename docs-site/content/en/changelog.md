@@ -8,16 +8,18 @@ This is a pre-1.0 preview. The notes below summarize version 0.4.0 (unreleased o
 ## 0.4.0 — Unreleased
 
 - A self-hosted browser workspace for macOS and Windows; no desktop installer is required. Windows runtime acceptance remains pending.
-- Source permissions, scoped platform actions, incremental synchronization and recovery improvements.
+- Source permissions, scoped platform actions, incremental synchronization and recovery improvements, including an opt-in signed GitHub webhook receiver.
 - Memory exploration, MCP connection controls and task detail navigation.
 - Automatic task grouping follows work when its previous section becomes empty, while preserving explicit user choices.
 - Startup revalidation stays bounded to eight risk-ordered tasks by default, and now reports when open work was left outside that sweep instead of leaving it silent.
+- Automatic follow-up can include an optional finite transaction allowance with an explicit currency, cumulative amount, independent expiry and confirmation. Its default is zero.
+- Model settings add separate daily UTC token and fee allowances and saved routing groups.
 
 ### Limits stated with this version
 
-- Connectors poll; provider push is deferred. Connection health reflects the most recent sync.
-- Autonomy leases are time- and task-scoped. There is no monetary amount limit or per-action amount check.
-- Model token usage is recorded locally but does not gate requests.
+- Native sources poll by default. The GitHub webhook is an optional prompt for a scoped incremental pull, not provider push for other sources and not guaranteed realtime. Connection health reflects failures and recovery as well as the last sync; it is not an uptime guarantee.
+- An optional transaction allowance adds a finite, confirmed currency cap with its own expiry; the default is zero. Unknown outcomes hold the amount and are not retried blindly, and renewal or restart does not reset spending.
+- Model token and fee usage is governed by separate daily UTC allowances. Fees are estimates from prices you confirm; missing prices remain unknown, not free, and no savings or quality is guaranteed.
 
 ## 0.3.0
 

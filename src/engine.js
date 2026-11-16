@@ -36,7 +36,9 @@ import { traceEntry, appendTrace, explainDecision, summariseDecision } from './t
 import { TaskServices } from './task-services.js';
 import { projectWorkspaceTaskManagement } from './task-management.js';
 import { draftReviewToken, preparedWorkReviewToken } from './draft-review.js';
-import { REASONING_RECOVERY, reasoningFailure, reasoningMayResume } from './reasoning-recovery.js';
+import { REASONING_RECOVERY, reasoningFailure, reasoningMayResume, effectiveReasoningAttempts } from './reasoning-recovery.js';
+import { isModelBudgetExhausted, modelFailureDetail } from './model-control.js';
+import { rememberReasonerUsage } from './reasoner-scope.js';
 import { ingestAssignedIssue, ingestGitHubWork, ingestObservedTask, isSourceFollowTask } from './external-work.js';
 import { publicSourceCursors } from './connectors/connector.js';
 import { effectiveTaskRequest, matchingTaskMemories, pauseTask, directTask, undoTaskDirection, updateTaskMemory } from './task-guidance.js';
@@ -54,6 +56,19 @@ import { effectiveTaskRequest, matchingTaskMemories, pauseTask, directTask, undo
  * requests before readiness; the model can never assert verified completion.
  */
 
+function sourceDocumentCompatible(task, document) {
+  const source = task.request?.source || {};
+  const connectorId = source.connectorId || task.sourceConnectorId;
+  const accountId = source.accountId || task.externalSource?.accountId;
+  // Different provider types may be intentionally correlated; connection-local
+  // names and titles cannot bridge distinct accounts of the same provider.
+  return !(connectorId && connectorId === document.connectorId &&
+    (accountId || document.accountId) && accountId !== document.accountId);
+}
+function documentRevisionTime(document) {
+  const values = [document?.modifiedAt, document?.unavailableRevisionAt || document?.unavailableAt].map(Date.parse).filter(Number.isFinite);
+  return values.length ? Math.max(...values) : Date.parse(document?.observedAt || '');
+}
 const stamp = () => new Date().toISOString();
 // A reasoner may be reused across replaceReasoner calls; bind its usage sink once.
 const usageBoundReasoners = new WeakSet();
@@ -221,7 +236,8 @@ export class WorkEngine {
    */
   #track(value) {
     const promise = Promise.resolve(value);
-    const observed = promise.catch(() => {}).finally(() => this.pending.delete(observed));
+    const observed = promise.catch(error => { this.durableRuntime?.captureReasoningFailure(error); })
+      .finally(() => this.pending.delete(observed));
     this.pending.add(observed);
     return promise;
   }
@@ -823,14 +839,16 @@ export class WorkEngine {
     const threadKey = message.threadId ? String(message.threadId) : `message:${message.id}`;
     const currentGeneration = generation ?? this.threadGenerations.get(threadKey) ?? 0;
     const storedEvent = this.store.state.events.find(item => item.id === event.id);
-    if (!storedEvent || !['not_started', 'pending', 'running', 'failed'].includes(storedEvent.reasoning?.status)) return false;
+    if (!storedEvent || !['not_started', 'pending', 'running', 'failed', 'budget_deferred'].includes(storedEvent.reasoning?.status)) return false;
     const work = storedEvent.reasoning;
-    if (work.status === 'failed' && !reasoningMayResume(work, now, { automatic: dueOnly })) return false;
+    if (['failed', 'budget_deferred'].includes(work.status) && !reasoningMayResume(work, now, { automatic: dueOnly, budgetWake: this.durableRuntime?.budgetRetryAllowed({ eventId: event.id }) === true })) return false;
     const maxAttempts = Math.max(1, Math.min(2, Number(work.maxAttempts) || 2));
     const attempts = Math.max(0, Number(work.attempts) || 0);
-    if (attempts >= maxAttempts) return false;
+    if (effectiveReasoningAttempts(work) >= maxAttempts) return false;
     if (this.durableRuntime && !this.durableRuntime.canDiscover(event.id)) { this.durableRuntime.scheduleDiscovery(event.id); return true; }
     const attempt = attempts + 1;
+    const durableOwner = this.durableRuntime?.current()?.job;
+    const ownerFence = durableOwner ? { jobId: durableOwner.id, leaseToken: durableOwner.lease_token } : null;
     const requestId = `${event.id}:discover-attempt:${attempt}`;
     this.store.mutate(state => {
       const target = state.events.find(item => item.id === event.id);
@@ -840,7 +858,11 @@ export class WorkEngine {
     this.changed();
 
     let failure = null;
+    const privateContext = this.durableRuntime?.discoveryModelContext(event.id, () =>
+      (this.threadGenerations.get(threadKey) ?? currentGeneration) === currentGeneration && this.#isLatestThreadMessage(message));
     const pending = recoverRequestCandidateWithReasoner(message, this.reasoner, {
+      accountingContext: privateContext || this.durableRuntime?.modelAccountingContext(),
+      reasoningRequestId: requestId,
       dateLocale: this.#dateLocale(),
       onError: error => { failure = error; }
     }).then(request => {
@@ -859,7 +881,9 @@ export class WorkEngine {
         this.changed();
         return;
       }
+      if (failure && privateContext) throw failure;
       if (!request) {
+        if (!failure && privateContext && this.durableRuntime.modelCommits.hasInvocation(privateContext)) this.durableRuntime.modelCommits.reject(privateContext, 'ungrounded_discovery_final');
         this.store.mutate(state => {
           const target = state.events.find(item => item.id === event.id);
           if (!target) return;
@@ -868,7 +892,7 @@ export class WorkEngine {
             status: failure ? 'failed' : 'no_candidate',
             finishedAt: stamp(),
             lastError: failure?.message || null,
-            ...(failure ? reasoningFailure(failure, { attempts: attempt, maxAttempts }) : {}),
+            ...(failure ? reasoningFailure(failure, { attempts: attempt, maxAttempts, budgetDeferrals: work.budgetDeferrals || 0 }) : {}),
             detail: failure
               ? `Grounded discovery did not complete (${failure.message}); no task was created.`
               : 'No candidate could be fully anchored in the original message; no task was created.'
@@ -882,7 +906,9 @@ export class WorkEngine {
       let taskId = null;
       let assess = false;
       let allowAutomation = false;
-      this.store.mutate(state => {
+      const commit = privateContext && this.durableRuntime.modelCommits.hasInvocation(privateContext)
+        ? mutation => this.durableRuntime.modelCommits.commit(privateContext, mutation) : mutation => this.store.mutate(mutation);
+      commit(state => {
         const targetEvent = state.events.find(item => item.id === event.id);
         if (!targetEvent) return;
         const existing = Object.values(state.tasks).filter(task => sameCommitment(task.request, request));
@@ -919,16 +945,21 @@ export class WorkEngine {
       }
       this.changed();
     }).catch(error => {
+      const current = this.store.state.events.find(item => item.id === event.id);
+      if (!current || current.reasoning?.attempts !== attempt || current.reasoning.status !== 'running') return;
       this.store.mutate(state => {
         const target = state.events.find(item => item.id === event.id);
         if (!target) return;
-        target.reasoning = { ...target.reasoning, status: 'failed', finishedAt: stamp(), lastError: error.message, detail: `Grounded discovery failed (${error.message}); no task was created.` };
-        record(state, 'reasoning_failure', target.reasoning.detail, null, event.id);
-      });
+        target.reasoning = { ...target.reasoning, status: 'failed', finishedAt: stamp(), lastError: modelFailureDetail(error),
+          detail: isModelBudgetExhausted(error) ? modelFailureDetail(error) : `Grounded discovery failed (${error.message}); no task was created.`,
+          ...reasoningFailure(error, { attempts: attempt, maxAttempts, budgetDeferrals: work.budgetDeferrals || 0 }) };
+        record(state, isModelBudgetExhausted(error) ? 'reasoning_deferred' : 'reasoning_failure', target.reasoning.detail, null, event.id);
+      }, this.durableRuntime?.reasoningFailureCommitOptions(error, ownerFence, { nativeModelFailure: Boolean(privateContext) }));
       this.changed();
     });
     this.pendingDiscovery.set(event.id, pending);
-    pending.then(() => { if (this.pendingDiscovery.get(event.id) === pending) this.pendingDiscovery.delete(event.id); this.pruneReasoningBudget(); });
+    const cleanup = () => { if (this.pendingDiscovery.get(event.id) === pending) this.pendingDiscovery.delete(event.id); this.pruneReasoningBudget(); };
+    pending.then(cleanup, cleanup);
     this.#track(pending);
     return true;
   }
@@ -939,9 +970,9 @@ export class WorkEngine {
     const stored = this.store.state.documents[docId];
     event.operation = stored ? 'update' : 'create';
     const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
-    const storedAt = Date.parse(stored?.modifiedAt || stored?.observedAt || '');
+    const storedAt = documentRevisionTime(stored);
     if (stored && (nativeObservation(event, doc) ? stored.sourceObservationRevision >= doc.sourceObservationRevision
-      : Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt)) {
+      : Number.isFinite(incomingAt) && Number.isFinite(storedAt) && (incomingAt < storedAt || stored.available === false && incomingAt === storedAt))) {
       // Out-of-order arrival: an older revision must never overwrite newer
       // state, or evidence a task was already verified against would appear to
       // regress. The event is recorded and nothing is reassessed.
@@ -970,15 +1001,15 @@ export class WorkEngine {
         observedAt: event.at || stamp(),
         version: (previous?.version || 0) + 1,
         providerRevision: event.providerRevision, providerEtag: event.providerEtag,
-        source: event.source,
+        source: event.source, connectorId: event.connectorId || null, accountId: doc.accountId || null,
         available: true,
         unavailableReason: null,
-        unavailableAt: null
+        unavailableAt: null, unavailableRevisionAt: null
       });
       state.events.push(event);
       event.summary = `Document changed · ${doc.title}`;
       const related = Object.values(state.tasks).filter(task =>
-        !isSettled(task) && !this.#documentExcludedByFeedback(task, docId) &&
+        !isSettled(task) && sourceDocumentCompatible(task, state.documents[docId]) && !this.#documentExcludedByFeedback(task, docId) &&
         rankCandidates(task.request, Object.fromEntries([[docId, state.documents[docId]]])).best);
       event.relations = related.map(task => task.id);
       event.disposition = related.length ? 'related_change'
@@ -1005,7 +1036,7 @@ export class WorkEngine {
     const docId = String(doc.id);
     const previous = this.store.state.documents[docId];
     const incomingAt = Date.parse(doc.modifiedAt || event.at || '');
-    const storedAt = Date.parse(previous?.modifiedAt || previous?.observedAt || '');
+    const storedAt = documentRevisionTime(previous);
     if (previous && (nativeObservation(event, doc) ? previous.sourceObservationRevision >= doc.sourceObservationRevision
       : Number.isFinite(incomingAt) && Number.isFinite(storedAt) && incomingAt < storedAt)) {
       this.store.mutate(state => {
@@ -1038,13 +1069,14 @@ export class WorkEngine {
         available: false,
         ...(nativeObservation(event, doc) ? { sourceObservationRevision: doc.sourceObservationRevision } : {}),
         unavailableReason: doc.reason || 'unavailable',
-        unavailableAt,
+        unavailableAt, unavailableRevisionAt: doc.modifiedAt || event.at || unavailableAt,
+        connectorId: event.connectorId || currentPrevious?.connectorId || null, accountId: doc.accountId || currentPrevious?.accountId || null,
         observedAt: event.at || stamp()
       });
       state.events.push(event);
       event.summary = `Document unavailable · ${title}`;
       relations = Object.values(state.tasks).filter(task =>
-        !isSettled(task) && !this.#documentExcludedByFeedback(task, docId) && (
+        !isSettled(task) && sourceDocumentCompatible(task, state.documents[docId]) && !this.#documentExcludedByFeedback(task, docId) && (
           task.documentId === docId ||
           rankCandidates(task.request, Object.fromEntries([[docId, state.documents[docId]]])).best
         )).map(task => task.id);
@@ -1123,7 +1155,7 @@ export class WorkEngine {
    * baseline is already persisted, so a model failure changes nothing.
    */
   #supersedeReasoning(task, reason) {
-    if (!task.reasoningWork || !['pending', 'running', 'failed'].includes(task.reasoningWork.status)) return;
+    if (!task.reasoningWork || !['pending', 'running', 'failed', 'budget_deferred'].includes(task.reasoningWork.status)) return;
     task.reasoningWork = { ...task.reasoningWork, status: 'superseded', retryAt: null, terminalReason: reason, updatedAt: stamp() };
     if (task.reasoning) task.reasoning = { ...task.reasoning, status: 'superseded' };
   }
@@ -1132,19 +1164,20 @@ export class WorkEngine {
     const task = this.store.state.tasks[taskId];
     if (!task || isSettled(task)) return { started: false, work: null };
     const requestVersion = Number(task.commitment?.revision || 1);
-    const key = `${taskId}:${requestVersion}:${kind}:${signature}${contextKey ? `:tools:${contextKey}` : ''}${this.durableRuntime ? `:input:${task.inputVersion}` : ''}`;
+    const key = `${taskId}:${requestVersion}:${kind}:${signature}${contextKey ? `:tools:${contextKey}` : ''}${this.durableRuntime ? `:input:${task.inputVersion}` : ''}${task.planningContextRevision ? `:planning:${task.planningContextRevision}` : ''}`;
     const existing = task.reasoningWork;
     if (existing?.key === key && !resume) return { started: false, work: existing };
     const maxAttempts = Math.max(1, Math.min(3, Number(existing?.maxAttempts) || 2));
     const attempts = existing?.key === key ? Number(existing.attempts) || 0 : 0;
-    if (existing?.key === key && !['pending', 'running', 'failed'].includes(existing.status)) return { started: false, work: existing };
-    if (attempts >= maxAttempts) return { started: false, work: existing };
+    if (existing?.key === key && !['pending', 'running', 'failed', 'budget_deferred'].includes(existing.status)) return { started: false, work: existing };
+    if (effectiveReasoningAttempts(existing?.key === key ? existing : {}) >= maxAttempts) return { started: false, work: existing };
     if (this.durableRuntime && !this.durableRuntime.canRun(taskId)) {
       this.durableRuntime.scheduleTask(taskId, key);
       return { started: false, work: existing, deferred: true };
     }
     const work = {
       key, kind, signature, requestVersion, status: 'running', attempts: attempts + 1,
+      budgetDeferrals: existing?.key === key ? Number(existing.budgetDeferrals || 0) : 0,
       maxAttempts, updatedAt: stamp(), lastError: null
     };
     if (this.durableRuntime) { work.durableFence = this.durableRuntime.capture(taskId); work.inputVersion = task.inputVersion; }
@@ -1199,7 +1232,8 @@ export class WorkEngine {
     // whether the work is done.
     const noteFailure = error => {
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
-      const failure = { status: 'failed', at: stamp(), detail: error.message };
+      const deferred = isModelBudgetExhausted(error);
+      const failure = { status: deferred ? 'budget_deferred' : 'failed', at: stamp(), detail: modelFailureDetail(error) };
       this.store.mutate(state => {
         const current = state.tasks[taskId];
         if (!current) return;
@@ -1207,19 +1241,26 @@ export class WorkEngine {
         if (this.reasoner.preferModelInterpretation) {
           current.status = 'waiting_for_information';
           if (!current.draft?.userEdited) current.draft = null;
-          current.reason = 'Model reasoning failed. Reconnect or retry before continuing.';
+          current.reason = deferred ? modelFailureDetail(error) : 'Model reasoning failed. Reconnect or retry before continuing.';
         }
-        current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: String(error.message).slice(0, 500), updatedAt: failure.at, ...reasoningFailure(error, work) };
+        current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: modelFailureDetail(error), updatedAt: failure.at, ...reasoningFailure(error, work) };
         // The evidence projection is refreshed on every assessment; without
         // this line the recorded failure would stay invisible until the next
         // one, and the eval harness reads the projection.
         if (current.evidence) current.evidence.reasoning = failure;
-        record(state, 'reasoning_failure',
-          `Request interpretation by a model did not complete (${error.message}). The deterministic reading stands.`, taskId);
-      });
+        record(state, deferred ? 'reasoning_deferred' : 'reasoning_failure', deferred ? modelFailureDetail(error)
+          : `Request interpretation by a model did not complete (${error.message}). The deterministic reading stands.`, taskId);
+      }, this.durableRuntime?.reasoningFailureCommitOptions(error, work.durableFence, { nativeModelFailure: Boolean(privateContext) }));
       this.changed();
     };
+    const privateContext = this.durableRuntime?.interpretModelContext(taskId, work);
+    const rejectPrivate = () => {
+      if (privateContext && this.durableRuntime.modelCommits.hasInvocation(privateContext)) {
+        this.durableRuntime.modelCommits.reject(privateContext, 'grounding_failed');
+      }
+    };
     const pending = interpretRequestWithReasoner(message, this.reasoner, {
+      accountingContext: privateContext || this.durableRuntime?.modelAccountingContext({ taskId }),
       dateLocale: this.#dateLocale(),
       reasoningRequestId: `${work.key}:attempt:${work.attempts}`,
       preferModel: this.reasoner.preferModelInterpretation === true,
@@ -1230,19 +1271,25 @@ export class WorkEngine {
       const current = this.store.state.tasks[taskId];
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
       if (!refined || !current || isSettled(current)) {
+        rejectPrivate();
         this.#finishReasoningWork(taskId, work, 'complete', { detail: 'No grounded request refinement was returned.' });
         return;
       }
       if (refined.interpretedBy === current.request.interpretedBy && !(this.reasoner.preferModelInterpretation && refined.modelInterpretation?.verified)) {
         if (this.reasoner.preferModelInterpretation) {
+          rejectPrivate();
           noteFailure(new Error('The model did not return a source-grounded interpretation.'));
           return;
         }
+        rejectPrivate();
         this.#finishReasoningWork(taskId, work, 'complete', { detail: 'The deterministic request stayed in place.' });
         if (this.externalTools?.({ isCurrent: () => false })?.length) this.#maybeProposeProbes(taskId);
         return;
       }
-      this.store.mutate(state => {
+      const commit = privateContext && this.durableRuntime.modelCommits.hasInvocation(privateContext)
+        ? mutation => this.durableRuntime.modelCommits.commit(privateContext, mutation)
+        : mutation => this.store.mutate(mutation);
+      commit(state => {
         const target = state.tasks[taskId];
         const currentDeadline = target.request.deadline;
         target.request = { ...target.request, ...refined, id: target.id };
@@ -1269,7 +1316,8 @@ export class WorkEngine {
       noteFailure(error);
     });
     this.pendingReasoning.set(work.key, pending);
-    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); });
+    const cleanup = () => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); };
+    pending.then(cleanup, cleanup);
     this.#track(pending);
     return true;
   }
@@ -1334,8 +1382,12 @@ export class WorkEngine {
     const correlated = rankCandidates(task.request, Object.fromEntries(Object.entries(this.store.state.documents)
       .filter(([, document]) => documentAvailable(document)))).ranked.slice(0, 8).map(entry => entry.document);
     const reasoningKey = `${work.key}:attempt:${work.attempts}`;
+    let privateContext = null;
+    const commit = mutation => privateContext && this.durableRuntime.modelCommits.hasInvocation(privateContext)
+      ? this.durableRuntime.modelCommits.commit(privateContext, mutation) : this.store.mutate(mutation);
     const pending = Promise.resolve().then(() => {
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return null;
+      privateContext = this.durableRuntime?.probeModelContext(taskId, work, toolContextKey);
       return this.reasoner.proposeProbes({
       request: effectiveTaskRequest(task, this.store.state),
       uncovered,
@@ -1363,12 +1415,16 @@ export class WorkEngine {
         return rankCandidates(current.request, Object.fromEntries(Object.entries(this.store.state.documents)
           .filter(([id, document]) => documentAvailable(document) && !this.#documentExcludedByFeedback(current, id)))).ranked.slice(0, 8).map(entry => entry.document);
       } } : {})
-    }, reasoningKey);
+    }, reasoningKey, privateContext || this.durableRuntime?.modelAccountingContext({ taskId }));
     }).then(proposals => {
       const current = this.store.state.tasks[taskId];
       if (!this.#reasoningWorkIsCurrent(taskId, work) || !current || isSettled(current) || planSignature(effectiveTaskRequest(current, this.store.state)) !== plan.signature) return;
+      if (privateContext && !Array.isArray(proposals)) {
+        if (this.durableRuntime.modelCommits.hasInvocation(privateContext)) this.durableRuntime.modelCommits.reject(privateContext, 'invalid_probe_final');
+        throw new Error('The model did not return a valid probe array.');
+      }
       if (!proposals?.length) {
-        this.store.mutate(state => {
+        commit(state => {
           state.tasks[taskId].reasoningAttemptedFor = plan.signature;
           state.tasks[taskId].mcpInvestigatedFor = toolContextKey;
           state.tasks[taskId].reasoningWork = { ...work, status: 'complete', updatedAt: stamp(), detail: 'The model proposed no usable probes.' };
@@ -1381,7 +1437,7 @@ export class WorkEngine {
         return;
       }
       const merged = applyModelProposals(plan, proposals, effectiveTaskRequest(task, this.store.state));
-      this.store.mutate(state => {
+      commit(state => {
         state.tasks[taskId].reasoningAttemptedFor = plan.signature;
         state.tasks[taskId].mcpInvestigatedFor = toolContextKey;
         state.tasks[taskId].reasoningPlan = checkpointPlan(merged);
@@ -1410,23 +1466,24 @@ export class WorkEngine {
         const current = state.tasks[taskId];
         if (!current) return;
         if (current.reasoningWork?.key === work.key && current.reasoningWork?.attempts === work.attempts) {
-          current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: String(error.message).slice(0, 500), updatedAt: stamp(), ...reasoningFailure(error, work) };
+          current.reasoningWork = { ...current.reasoningWork, status: 'failed', lastError: modelFailureDetail(error), updatedAt: stamp(), ...reasoningFailure(error, work) };
         }
         current.reasoning = {
-          status: 'failed',
+          status: isModelBudgetExhausted(error) ? 'budget_deferred' : 'failed',
           ...(this.reasoner.runSummary ? { runtime: this.reasoner.runSummary(reasoningKey) } : {}),
           at: stamp(),
-          detail: error.message,
+          detail: modelFailureDetail(error),
           budgetExhausted
         };
-        record(state, 'reasoning_failure',
-          `Model reasoning did not complete (${error.message}). The deterministic plan was used; this says nothing about whether the work is done.`,
+        record(state, isModelBudgetExhausted(error) ? 'reasoning_deferred' : 'reasoning_failure',
+          isModelBudgetExhausted(error) ? modelFailureDetail(error) : `Model reasoning did not complete (${error.message}). The deterministic plan was used; this says nothing about whether the work is done.`,
           taskId);
-      });
+      }, this.durableRuntime?.reasoningFailureCommitOptions(error, work.durableFence, { nativeModelFailure: Boolean(privateContext) }));
       this.changed();
     });
     this.pendingReasoning.set(work.key, pending);
-    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); });
+    const cleanup = () => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); };
+    pending.then(cleanup, cleanup);
     this.#track(pending);
     return true;
   }
@@ -1470,12 +1527,21 @@ export class WorkEngine {
         record(state, 'mcp_tool', `MCP ${call.serverId} · ${call.tool}: ${call.status}.`, taskId);
       }); this.changed();
     } });
+    let privateContext = null;
     const pending = Promise.resolve().then(() => {
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return '';
-      return this.reasoner.investigateTask({ task, directions, externalTools, planningContext: this.durableRuntime?.planningContext(taskId) || null }, `${work.key}:attempt:${work.attempts}`);
+      privateContext = this.durableRuntime?.taskModelContext(taskId, work, { stage: 'planning',
+        catalogVersion: createHash('sha256').update(JSON.stringify({ kind: 'investigation', names })).digest('hex') });
+      return this.reasoner.investigateTask({ task, directions, externalTools, planningContext: this.durableRuntime?.planningContext(taskId) || null }, `${work.key}:attempt:${work.attempts}`, privateContext || this.durableRuntime?.modelAccountingContext({ taskId }));
     }).then(nextStep => {
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
-      this.store.mutate(state => {
+      if (privateContext && (typeof nextStep !== 'string' || !nextStep.trim())) {
+        if (this.durableRuntime.modelCommits.hasInvocation(privateContext)) this.durableRuntime.modelCommits.reject(privateContext, 'invalid_investigation_final');
+        throw new Error('The model did not return a valid investigation suggestion.');
+      }
+      const commit = privateContext && this.durableRuntime.modelCommits.hasInvocation(privateContext)
+        ? mutation => this.durableRuntime.modelCommits.commit(privateContext, mutation) : mutation => this.store.mutate(mutation);
+      commit(state => {
         const current = state.tasks[taskId];
         current.mcpInvestigation = { signature, nextStep: String(nextStep || '').slice(0, 600), at: stamp() };
         current.reasoningWork = { ...work, status: 'complete', updatedAt: stamp() };
@@ -1486,13 +1552,15 @@ export class WorkEngine {
       if (!this.#reasoningWorkIsCurrent(taskId, work)) return;
       this.store.mutate(state => {
         const current = state.tasks[taskId];
-        current.reasoningWork = { ...work, status: 'failed', updatedAt: stamp(), lastError: String(error.message).slice(0, 500), ...reasoningFailure(error, work) };
-        current.reasoning = { status: 'failed', at: stamp(), detail: String(error.message).slice(0, 500) };
-        record(state, 'reasoning_failure', 'MCP investigation failed. No outcome or completion was inferred.', taskId);
-      }); this.changed();
+        current.reasoningWork = { ...work, status: 'failed', updatedAt: stamp(), lastError: modelFailureDetail(error), ...reasoningFailure(error, work) };
+        current.reasoning = { status: isModelBudgetExhausted(error) ? 'budget_deferred' : 'failed', at: stamp(), detail: modelFailureDetail(error) };
+        record(state, isModelBudgetExhausted(error) ? 'reasoning_deferred' : 'reasoning_failure',
+          isModelBudgetExhausted(error) ? modelFailureDetail(error) : 'MCP investigation failed. No outcome or completion was inferred.', taskId);
+      }, this.durableRuntime?.reasoningFailureCommitOptions(error, work.durableFence, { nativeModelFailure: Boolean(privateContext) })); this.changed();
     });
     this.pendingReasoning.set(work.key, pending);
-    pending.then(() => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); });
+    const cleanup = () => { if (this.pendingReasoning.get(work.key) === pending) this.pendingReasoning.delete(work.key); this.pruneReasoningBudget(); };
+    pending.then(cleanup, cleanup);
     this.#track(pending); return true;
   }
 
@@ -3321,7 +3389,10 @@ export class WorkEngine {
   /** Record-only token accounting for whichever reasoner is current.
    * The ledger never influences routing, budgets or task outcomes. */
   bindReasonerUsage(reasoner) {
-    if (!reasoner || typeof reasoner !== 'object' || usageBoundReasoners.has(reasoner)) return reasoner;
+    if (!reasoner || typeof reasoner !== 'object') return reasoner;
+    this.durableRuntime?.bindModelBudget?.(reasoner);
+    rememberReasonerUsage(reasoner);
+    if (usageBoundReasoners.has(reasoner)) return reasoner;
     usageBoundReasoners.add(reasoner);
     const existing = typeof reasoner.onUsage === 'function' ? reasoner.onUsage.bind(reasoner) : null;
     reasoner.onUsage = usage => {
@@ -3355,6 +3426,7 @@ export class WorkEngine {
   }
 
   #primaryReviewMissing(task) {
+    if (task.reasoningWork?.status === 'budget_deferred') return true;
     if (isSourceFollowTask(task)) return false;
     return this.reasoner.preferModelInterpretation === true &&
       !(task.modelReview?.status === 'verified' && task.modelReview.requestVersion === Number(task.commitment?.revision || 1));
@@ -3402,9 +3474,9 @@ export class WorkEngine {
     }
     for (const event of this.store.state.events || []) {
       if (this.pendingReasoning.size + this.pendingDiscovery.size >= REASONING_RECOVERY.maxStartsPerSweep) break;
-      if (event.type !== 'email.received' || !['not_started', 'pending', 'running', 'failed'].includes(event.reasoning?.status)) continue;
+      if (event.type !== 'email.received' || !['not_started', 'pending', 'running', 'failed', 'budget_deferred'].includes(event.reasoning?.status)) continue;
       const message = this.store.state.inbox.find(item => item.id === event.payload?.id) || event.payload;
-      if (!this.reasoner?.available?.() || Number(event.reasoning.attempts || 0) >= Math.min(2, Number(event.reasoning.maxAttempts) || 2)) continue;
+      if (!this.reasoner?.available?.() || effectiveReasoningAttempts(event.reasoning) >= Math.min(2, Number(event.reasoning.maxAttempts) || 2)) continue;
       const key = message.threadId ? String(message.threadId) : `message:${message.id}`;
       if (this.#maybeRecoverUnrecognizedMessage(event, this.threadGenerations.get(key) || 0)) summary.discoveryResumed += 1;
     }
@@ -3419,9 +3491,9 @@ export class WorkEngine {
     if (!task || isSettled(task) || !this.reasoner?.available?.()) return false;
     if (isSourceFollowTask(task)) {
       const work = task.reasoningWork;
-      if (work && !['pending', 'running', 'failed'].includes(work.status)) return false;
-      if (dueOnly && !reasoningMayResume(work, now, { automatic: true })) return false;
-      if (work?.status === 'failed' && !reasoningMayResume(work, now)) return false;
+      if (work && !['pending', 'running', 'failed', 'budget_deferred'].includes(work.status)) return false;
+      if (dueOnly && !reasoningMayResume(work, now, { automatic: true, budgetWake: this.durableRuntime?.budgetRetryAllowed({ taskId }) === true })) return false;
+      if (['failed', 'budget_deferred'].includes(work?.status) && !reasoningMayResume(work, now, { budgetWake: this.durableRuntime?.budgetRetryAllowed({ taskId }) === true })) return false;
       if (this.pendingReasoning.has(work?.key) || this.pendingReasoning.size >= REASONING_RECOVERY.maxStartsPerSweep) return false;
       return this.#maybeInvestigateNativeTask(taskId, { resume: Boolean(work) });
     }
@@ -3429,10 +3501,10 @@ export class WorkEngine {
       this.store.state.inbox.find(item => item.id === task.request?.source?.id);
     if (!source) return false;
     const work = task.reasoningWork;
-    if (dueOnly && !reasoningMayResume(work, now, { automatic: true })) return false;
-    if (work?.status === 'failed' && !reasoningMayResume(work, now)) return false;
+    if (dueOnly && !reasoningMayResume(work, now, { automatic: true, budgetWake: this.durableRuntime?.budgetRetryAllowed({ taskId }) === true })) return false;
+    if (['failed', 'budget_deferred'].includes(work?.status) && !reasoningMayResume(work, now, { budgetWake: this.durableRuntime?.budgetRetryAllowed({ taskId }) === true })) return false;
     if (this.pendingReasoning.size + this.pendingDiscovery.size >= REASONING_RECOVERY.maxStartsPerSweep) return false;
-    if (work && ['pending', 'running', 'failed'].includes(work.status) && Number(work.attempts || 0) < Number(work.maxAttempts || 2)) {
+    if (work && ['pending', 'running', 'failed', 'budget_deferred'].includes(work.status) && effectiveReasoningAttempts(work) < Number(work.maxAttempts || 2)) {
       if (this.pendingReasoning.has(work.key)) return false;
       if (work.status === 'running') {
         this.store.mutate(state => {
@@ -3467,10 +3539,10 @@ export class WorkEngine {
     }
     for (const event of this.store.state.events || []) {
       if (!hasCapacity()) break;
-      if (taskId || event.type !== 'email.received' || !['not_started', 'pending', 'running', 'failed'].includes(event.reasoning?.status)) continue;
+      if (taskId || event.type !== 'email.received' || !['not_started', 'pending', 'running', 'failed', 'budget_deferred'].includes(event.reasoning?.status)) continue;
       const message = this.store.state.inbox.find(item => item.id === event.payload?.id) || event.payload;
-      if (Number(event.reasoning.attempts || 0) >= Math.min(2, Number(event.reasoning.maxAttempts) || 2)) continue;
-      if (dueOnly && !reasoningMayResume(event.reasoning, at, { automatic: true })) continue;
+      if (effectiveReasoningAttempts(event.reasoning) >= Math.min(2, Number(event.reasoning.maxAttempts) || 2)) continue;
+      if (dueOnly && !reasoningMayResume(event.reasoning, at, { automatic: true, budgetWake: this.durableRuntime?.budgetRetryAllowed({ eventId: event.id }) === true })) continue;
       const key = message.threadId ? String(message.threadId) : `message:${message.id}`;
       if (this.#maybeRecoverUnrecognizedMessage(event, this.threadGenerations.get(key) || 0, { now: at, dueOnly })) discoveries += 1;
     }

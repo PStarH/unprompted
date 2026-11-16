@@ -619,8 +619,8 @@ test('a limit change between prepare and dispatch rejects the old permit and kee
 
   budget.setLimit({ scope: 'workspace', tokens: 90000 });
   const error = rejected(() => accounting.markDispatched(prepared.attempt), {
-    code: 'TOKEN_ACCOUNTING_CONFLICT',
-    status: 409
+    code: 'TOKEN_ACCOUNTING_STALE',
+    status: 503
   });
   assert.match(error.message, /fail\(\)/, 'the caller is told to cancel and reprepare');
   assert.match(error.message, /prepare a new attempt/);
@@ -642,13 +642,13 @@ test('enabling or disabling a limit invalidates a stale uncapped or capped permi
   assert.equal(Object.hasOwn(uncapped.payload, 'max_tokens'), false);
 
   budget.setLimit({ scope: 'workspace', tokens: 100000 });
-  assert.throws(() => accounting.markDispatched(uncapped.attempt), { code: 'TOKEN_ACCOUNTING_CONFLICT' });
+  assert.throws(() => accounting.markDispatched(uncapped.attempt), { code: 'TOKEN_ACCOUNTING_STALE' });
   accounting.fail(uncapped.attempt);
 
   const capped = accounting.prepare({ protocol: 'chat-completions', payload: chatPayload(), scope: 'workspace' });
   assert.equal(capped.payload.max_tokens, 2048);
   budget.setLimit({ scope: 'workspace', tokens: null });
-  assert.throws(() => accounting.markDispatched(capped.attempt), { code: 'TOKEN_ACCOUNTING_CONFLICT' });
+  assert.throws(() => accounting.markDispatched(capped.attempt), { code: 'TOKEN_ACCOUNTING_STALE' });
   accounting.fail(capped.attempt);
 
   const fresh = accounting.prepare({ protocol: 'chat-completions', payload: chatPayload(), scope: 'workspace' });
@@ -681,7 +681,7 @@ test('a task limit change does not invalidate a workspace or another task attemp
     taskId: 'task-b'
   });
   budget.setLimit({ scope: 'task', taskId: 'task-b', tokens: 50000 });
-  assert.throws(() => accounting.markDispatched(taskBSecond.attempt), { code: 'TOKEN_ACCOUNTING_CONFLICT' });
+  assert.throws(() => accounting.markDispatched(taskBSecond.attempt), { code: 'TOKEN_ACCOUNTING_STALE' });
 });
 
 test('a limit change after dispatch cannot retract or alter the dispatched request', t => {

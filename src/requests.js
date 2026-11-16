@@ -1,6 +1,7 @@
 import { resolveRequiredContent } from './criteria.js';
 import { isVerbatimQuote } from './probes/lexicon.js';
 import { unquotedMessageFields } from './commitments.js';
+import { isModelControlFailure } from './model-control.js';
 
 /**
  * Request interpretation.
@@ -1070,6 +1071,7 @@ export function explainRequest(message, options = {}) {
     text: combined,
     source: {
       kind: 'email',
+      connectorId: message.connectorId || null, accountId: message.accountId || null,
       id: message.id,
       threadId: message.threadId || null,
       from: message.from,
@@ -1125,9 +1127,9 @@ export function interpretRequest(message, options = {}) {
   return explainRequest(message, options).request;
 }
 
-function modelQuoteIsInMessage(message, quote) {
+function modelQuoteIsInMessage(message, quote, includeForwarded = false) {
   const value = String(quote || '').replace(/\s+/g, ' ').trim();
-  const active = unquotedMessageFields(message);
+  const active = includeForwarded ? message : unquotedMessageFields(message);
   return value.length >= 2 && value.length <= 180 &&
     (isVerbatimQuote(active.subject, value) || isVerbatimQuote(active.body, value));
 }
@@ -1165,28 +1167,32 @@ export async function recoverRequestCandidateWithReasoner(message, reasoner, opt
   const active = unquotedMessageFields(message);
   const text = `${active.subject}\n${active.body}`;
   if (!hasRequestForm(text)) return null;
+  if (/\b(?:do not|don't|never|no need to)\s+(?:handle|process|follow up|take care of)\b/i.test(active.body)) return null;
+  const delegation = /\b(?:please\s+)?(?:handle|take care of|process|follow up)(?:\s+(?:this|that|it))?\b/i.test(active.body);
   const deterministic = findDeliverable(text);
   if (!deterministic && !REQUEST_FORM.test(text) && !/(?:请|請|麻烦|麻煩|帮我|幫我|需要|能否|可以)/u.test(text)) return null;
   if (CHINESE_NEGATION.test(text)) return null;
   if (typeof reasoner.discoverRequestCandidate !== 'function') return null;
 
   try {
-    const suggestion = await reasoner.discoverRequestCandidate({ subject: active.subject, body: active.body }, `discover:${message.id || 'message'}`);
+    const suggestion = await reasoner.discoverRequestCandidate({ subject: active.subject, body: delegation ? String(message.body || '') : active.body },
+      options.reasoningRequestId || `discover:${message.id || 'message'}`, options.accountingContext);
     if (!suggestion || typeof suggestion !== 'object') return null;
     const deliverable = canonicalModelDeliverable(suggestion.deliverable, suggestion.deliverableQuote);
     const entityQuote = String(suggestion.entityQuote || '').replace(/\s+/g, ' ').trim();
     const entity = String(suggestion.subjectEntity || '').replace(/\s+/g, ' ').trim();
     const intentQuote = String(suggestion.intentQuote || '').replace(/\s+/g, ' ').trim();
-    if (!deliverable || !modelQuoteIsInMessage(message, suggestion.deliverableQuote) ||
-        !modelQuoteIsInMessage(message, entityQuote) || !modelQuoteIsInMessage(message, intentQuote) ||
+    if (!deliverable || !modelQuoteIsInMessage(message, suggestion.deliverableQuote, delegation) ||
+        !modelQuoteIsInMessage(message, entityQuote, delegation) || !modelQuoteIsInMessage(message, intentQuote) ||
         !modelEntityIsSpecific(entity) || !isVerbatimQuote(entityQuote, entity) || !hasRequestForm(text)) return null;
     const quoteCarriesAction = new RegExp(`(?:${verbForms([...UPDATE_VERBS, ...SEND_VERBS]).join('|')})`, 'i').test(intentQuote) ||
       CHINESE_UPDATE_VERB.test(intentQuote) || CHINESE_SEND_VERB.test(intentQuote);
-    if (!quoteCarriesAction) return null;
+    const groundedDelegation = delegation && /\b(?:handle|take care of|process|follow up)\b/i.test(intentQuote) && modelQuoteIsInMessage(message, intentQuote);
+    if (!quoteCarriesAction && !groundedDelegation) return null;
     if (isAutomatedSender(message.from)) return null;
 
-    const { accepted: requiredContent, dropped: droppedModelContent } = groundModelContentList(suggestion.requiredContent, message);
-    const combined = text;
+    const { accepted: requiredContent, dropped: droppedModelContent } = groundModelContentList(suggestion.requiredContent, message, { includeForwarded: groundedDelegation });
+    const combined = groundedDelegation ? `${active.subject}\n${message.body || ''}` : text;
     const anchor = message.receivedAt || options.now || new Date();
     const deadline = extractDeadline(combined, { now: anchor, dateLocale: options.dateLocale });
     const intent = detectIntent(combined);
@@ -1206,7 +1212,7 @@ export async function recoverRequestCandidateWithReasoner(message, reasoner, opt
       impliedClaims: claims,
       text: combined,
       source: {
-        kind: 'email', id: message.id, threadId: message.threadId || null,
+        kind: 'email', connectorId: message.connectorId || null, accountId: message.accountId || null, id: message.id, threadId: message.threadId || null,
         from: message.from, to: message.to || null, cc: message.cc || null, bcc: message.bcc || null,
         subject: message.subject || '', receivedAt: message.receivedAt || null
       },
@@ -1219,6 +1225,7 @@ export async function recoverRequestCandidateWithReasoner(message, reasoner, opt
     request.qualifiers = request.analysis.qualifiers;
     return request;
   } catch (error) {
+    if (isModelControlFailure(error)) throw error;
     options.onError?.(error);
     return null;
   }
@@ -1236,7 +1243,7 @@ export async function recoverRequestCandidateWithReasoner(message, reasoner, opt
  * The stored `text` is always the verbatim span, even when the model supplied
  * only a valid `sourceQuote` and a paraphrase.
  */
-export function groundModelContent(item, message) {
+export function groundModelContent(item, message, { includeForwarded = false } = {}) {
   const candidate = typeof item === 'string' ? { text: item } : (item || {});
   const proposedText = String(candidate.text || '').replace(/\s+/g, ' ').trim();
   if (proposedText.length < 3 || proposedText.length > 120) return null;
@@ -1245,7 +1252,7 @@ export function groundModelContent(item, message) {
     ? (candidate.sourceField || candidate.field)
     : null;
   const fields = claimedField ? [claimedField] : ['subject', 'body'];
-  const active = unquotedMessageFields(message);
+  const active = includeForwarded ? message : unquotedMessageFields(message);
   const groundedIn = textToCheck => {
     for (const field of fields) {
       if (active[field] && isVerbatimQuote(active[field], textToCheck)) {
@@ -1285,11 +1292,11 @@ function containsAsWords(text, phrase) {
 }
 
 /** Discard model content that has no verbatim source in the message. */
-function groundModelContentList(items, message) {
+function groundModelContentList(items, message, options = {}) {
   const accepted = [];
   const dropped = [];
   for (const item of Array.isArray(items) ? items : []) {
-    const grounded = groundModelContent(item, message);
+    const grounded = groundModelContent(item, message, options);
     if (grounded) {
       accepted.push(grounded);
     } else {
@@ -1306,7 +1313,8 @@ function groundModelContentList(items, message) {
  * Only consulted when the deterministic pass left the request under-specified:
  * either it found no required content, or it found content nothing can verify.
  * Never overrides a specific deterministic answer, never invents an entity, and
- * never throws — a model failure returns the deterministic result unchanged.
+ * preserves the deterministic result for ordinary provider failures. Local
+ * admission, accounting and ownership failures propagate to the caller.
  */
 export async function interpretRequestWithReasoner(message, reasoner, options = {}) {
   const deterministic = interpretRequest(message, options);
@@ -1323,7 +1331,8 @@ export async function interpretRequestWithReasoner(message, reasoner, options = 
     // budget for the whole process.
     const suggestion = await reasoner.interpretRequest(
       { subject: active.subject, body: active.body },
-      options.reasoningRequestId || `interpret:${message.id || 'message'}`
+      options.reasoningRequestId || `interpret:${message.id || 'message'}`,
+      options.accountingContext
     );
     if (!suggestion) return deterministic;
 
@@ -1380,7 +1389,7 @@ export async function interpretRequestWithReasoner(message, reasoner, options = 
       impliedClaims: claims,
       text: combined,
       source: {
-        kind: 'email', id: message.id, threadId: message.threadId || null,
+        kind: 'email', connectorId: message.connectorId || null, accountId: message.accountId || null, id: message.id, threadId: message.threadId || null,
         from: message.from, to: message.to || null, subject: message.subject,
         receivedAt: message.receivedAt || null
       },
@@ -1393,6 +1402,7 @@ export async function interpretRequestWithReasoner(message, reasoner, options = 
     request.qualifiers = request.analysis.qualifiers;
     return request;
   } catch (error) {
+    if (isModelControlFailure(error)) throw error;
     // A model failure is reported to the caller when it asked to hear about it,
     // so the engine can record it as a reasoning failure. It is never converted
     // into an assessment result.

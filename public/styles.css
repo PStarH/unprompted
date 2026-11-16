@@ -2809,3 +2809,9 @@ html[lang="en"] .top-actions { gap: 14px; }
 .task-action a.secondary-button { display: inline-flex; text-decoration: none; align-items: center; }
 @media (max-width: 1100px) { .source-connection-list { grid-template-columns: 1fr; } .source-connection-heading .state-badge { margin-left: auto; } }
 @media (max-width: 600px) { .source-connection-card { padding: 18px; } .source-connection-heading { align-items: flex-start; } }
+
+.model-budget-controls form + form{margin-top:18px;padding-top:18px;border-top:1px solid var(--line,#dfe5df)}
+.model-budget-controls .model-fields{margin:12px 0}.model-budget-controls form>label{display:block;margin:10px 0}
+.model-budget-controls input[type=checkbox]{width:auto;margin-right:6px}.model-budget-controls [role=status]{font-size:13px}
+
+.autonomy-money-summary { display: block; margin-top: 6px; font-size: 12px; line-height: 1.5; }

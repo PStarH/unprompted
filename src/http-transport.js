@@ -94,6 +94,94 @@ export async function readJsonBody(req, {
   });
 }
 
+/**
+ * Read one bounded raw request body with both idle and total time limits.
+ *
+ * The caller must verify any signature over the returned bytes before parsing
+ * them. Unlike readJsonBody this never decodes or parses, so a signed raw body
+ * can be authenticated exactly as it arrived.
+ */
+export async function readRawBody(req, {
+  maxBytes = 256 * 1024,
+  timeoutMs = 10_000,
+  idleTimeoutMs = 5_000
+} = {}) {
+  const declaredHeader = req.headers['content-length'];
+  if (declaredHeader != null) {
+    const declaredLength = Number(declaredHeader);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) {
+      throw new HttpRequestError('Invalid request length.', { closeConnection: true });
+    }
+    if (declaredLength > maxBytes) {
+      throw new HttpRequestError('Request too large', { status: 413, closeConnection: true });
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    let complete = false;
+    let bodyBytes = 0;
+    const chunks = [];
+    let totalTimer;
+    let idleTimer;
+
+    const cleanup = () => {
+      clearTimeout(totalTimer);
+      clearTimeout(idleTimer);
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('aborted', onAborted);
+      req.removeListener('error', onError);
+    };
+    const fail = error => {
+      if (complete) return;
+      complete = true;
+      cleanup();
+      reject(error);
+    };
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => fail(new HttpRequestError('Request body timed out while waiting for data.', {
+        status: 408,
+        closeConnection: true
+      })), idleTimeoutMs);
+    };
+    const onData = chunk => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (bodyBytes + buffer.length > maxBytes) {
+        fail(new HttpRequestError('Request too large', { status: 413, closeConnection: true }));
+        return;
+      }
+      bodyBytes += buffer.length;
+      chunks.push(buffer);
+      resetIdleTimer();
+    };
+    const onEnd = () => {
+      if (complete) return;
+      complete = true;
+      cleanup();
+      resolve(Buffer.concat(chunks, bodyBytes));
+    };
+    const onAborted = () => fail(new HttpRequestError('Request body was interrupted.', {
+      status: 400,
+      closeConnection: true
+    }));
+    const onError = () => fail(new HttpRequestError('Could not read the request body.', {
+      status: 400,
+      closeConnection: true
+    }));
+
+    req.on('data', onData);
+    req.once('end', onEnd);
+    req.once('aborted', onAborted);
+    req.once('error', onError);
+    totalTimer = setTimeout(() => fail(new HttpRequestError('Request body exceeded its time limit.', {
+      status: 408,
+      closeConnection: true
+    })), timeoutMs);
+    resetIdleTimer();
+  });
+}
+
 const safePositiveInt = (value, fallback, min, max) => {
   const number = Number(value);
   return Number.isFinite(number) && number >= min && number <= max

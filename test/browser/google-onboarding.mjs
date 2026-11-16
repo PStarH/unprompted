@@ -65,12 +65,16 @@ try {
   assert.ok(await page.locator('#taskContent [data-task-card]').count());
   assert.equal(await page.locator('#taskContent [data-action="approve"]').count(), 0, 'read-only does not offer a send button');
   await page.locator('#taskContent [data-select-task]').first().click();
-  await page.locator('#taskContent [data-copy-draft]').click();
+  // Operate the task detail that the product actually renders, whether it is
+  // the full-page container or a drawer, and keep every proof assertion below.
+  const taskDetail = page.locator('#taskContent [data-inspector-task]');
+  await taskDetail.waitFor({ state: 'visible' });
+  await taskDetail.locator('[data-copy-draft]').click();
   const draft = (await (await page.request.get(fixture.base + '/api/state')).json()).tasks[0].draft;
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), draft.body);
-  assert.ok(await page.locator('#taskContent [data-action="reject"]').count(), 'read-only users can decline a prepared reply');
+  assert.ok(await taskDetail.locator('[data-action="reject"]').count(), 'read-only users can decline a prepared reply');
   record('retry-reads-existing-documents-and-shows-source-backed-work');
-  await page.locator('#taskContent [data-close-inspector]').click();
+  await page.locator('#taskContent .ws-detail-drawer [data-close-inspector]').click();
   await initial.locator('[data-go="sources"]').click();
   const observationTab = page.locator('#viewSources .page-focus-nav [role="tab"]').filter({ hasText: 'Observation' });
   if (await observationTab.count() && await observationTab.getAttribute('aria-selected') !== 'true') await observationTab.click();

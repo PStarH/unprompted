@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { randomBytes, createHmac } from 'node:crypto';
 
-export const SQLITE_RUNTIME = Object.freeze({ package: 'better-sqlite3', packageVersion: '12.11.1', sqliteVersion: '3.53.2', schemaVersion: 9 });
+export const SQLITE_RUNTIME = Object.freeze({ package: 'better-sqlite3', packageVersion: '12.11.1', sqliteVersion: '3.53.2', schemaVersion: 10 });
 export const durableError = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
 export const iso = value => new Date(value ?? Date.now()).toISOString();
 export const parse = value => value == null ? null : JSON.parse(value);

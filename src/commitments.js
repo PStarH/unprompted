@@ -69,6 +69,8 @@ export function commitmentScope(request, message = null) {
   const source = request?.source || {};
   const threadId = String(message?.threadId || source.threadId || '').trim();
   const scope = {
+    connectorId: String(message?.connectorId || source.connectorId || '').trim(),
+    accountId: String(message?.accountId || source.accountId || '').trim(),
     threadId: threadId || null,
     sender: normalizedSender(request),
     conversationRecipients: normalizedConversationRecipients(request),
@@ -84,7 +86,8 @@ export function commitmentScope(request, message = null) {
       'delivery', scope.deliveryRecipients.join(','), 'document', scope.explicitDocument].join('|')
     : ['message', String(message?.id || source.id || request?.id || ''), 'sender', scope.sender,
       'entity', scope.entity, 'deliverable', scope.deliverable, 'document', scope.explicitDocument].join('|');
-  scope.key = `commitment:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 20)}`;
+  const qualifiedIdentity = JSON.stringify([scope.connectorId, scope.accountId, identity]);
+  scope.key = `commitment:${crypto.createHash('sha256').update(qualifiedIdentity).digest('hex').slice(0, 20)}`;
   return scope;
 }
 
@@ -92,6 +95,7 @@ export function commitmentScope(request, message = null) {
 export function sameCommitment(left, right, leftMessage = null, rightMessage = null) {
   const a = commitmentScope(left, leftMessage);
   const b = commitmentScope(right, rightMessage);
+  if (a.connectorId !== b.connectorId || a.accountId !== b.accountId) return false;
   if (!a.threadId || !b.threadId || compact(a.threadId) !== compact(b.threadId)) return false;
   if (a.sender !== b.sender || a.entity !== b.entity || a.deliverable !== b.deliverable) return false;
   if (JSON.stringify(a.participants) !== JSON.stringify(b.participants)) return false;

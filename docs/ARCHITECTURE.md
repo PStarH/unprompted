@@ -194,6 +194,22 @@ changed blocker does. Source versions still govern assessment and execution.
 Completed, cancelled and user-declined tasks do not contribute opportunity signals.
 See [product direction](PRODUCT_DIRECTION.md) for the distinction between engineering coverage and real user value.
 
+Interactive notifications are selected by effective priority, not only by the
+stored priority. A pending notification keeps its original queue time. Every
+full hour waited raises its internal selection level by one, from low through
+normal to high, and the level stops at high; ties use the older queue time and
+then the row id. A fresh offer cannot use a slot that currently belongs to an
+older deliverable notification at the same effective level, while high priority
+may still skip the minimum spacing when no such row is waiting. Rows that are
+not yet due, readiness-blocked, privacy-invalidated or revoked are not deliverable and
+cannot hold up an unrelated notification. Aging never rewrites the user's
+stored priority and never bypasses the hourly ceiling, quiet hours, issue
+cooldown, active critical attention or a zero interactive budget. Denied
+releases and dedupe refreshes preserve queue time, and the same rules are
+reapplied from SQLite after a restart or on another service instance. The
+durable job queue is separate: it serves work in availability and id order, and
+its legacy priority column is not part of that contract.
+
 ## Storage and process model
 
 Normal workspaces use a private SQLite database per account, with WAL,
@@ -277,6 +293,51 @@ rejection. Explicit rejection applies deterministic scoped stop-loss immediately
 Low-risk promotion needs three independent successes by default and starts off.
 Trigger/omission hints remain advisory; promotion never changes tool permissions.
 Offline replay retains aggregate retrieval/arbitration metrics and invokes no tools.
+
+Every content revision is snapshotted in `experience_content_versions` with a
+digest and parent chain; updates are rejected by an immutability trigger.
+`ExperienceTrialService` runs a fixed, versioned regression fixture through the
+real typed-predicate and arbitration code on isolated records, inside a bounded
+deadline. Guards and archive-authorization checks are reported in separate
+categories and never count as candidate behaviour. Expected behavior decisions
+come from an optional user-confirmed case set stored in
+`experience_trial_case_sets` with its own version and digest. Applicability is
+reported separately from positive candidate evidence: a pass requires at least
+one case that actually matched the real scope and predicate, expected the
+candidate with a literal structured effect, and observed that exact effect
+selected. User-precedence and negative cases remain supporting checks; without
+a passing positive candidate assertion the suite is `unknown` with
+`no_applicable_positive_candidate_case` (or `no_applicable_positive_case` when
+nothing matched), never `passed`. The suite executes no tools or providers and
+stores only bounded structured differences. Automatic planning requires an
+active Experience whose exact revision, content digest, scope, case set and
+authorization passed under the current fixture and policy versions; candidates
+stay available to explicit browsing and the existing supervised format trial.
+The archive check reuses the read-only `ArtifactActions` grant matcher and
+provider list, performs no provider I/O and cannot create a grant. The policy
+version was raised to `experience-trial-policy-2026-11-13.2`, so a stored pass
+or attestation from the weaker policy is superseded; a stored trial row also has
+to record a passing positive candidate count before it can satisfy a current
+pass. Stored trial rows retain their historical state while responses derive an
+effective `expired`/`superseded` state when the pass, fixture, policy, case set,
+positive evidence or revision no longer applies; a stored expiry with no
+retained cause reports `stored_expired`. An explicit user adopt may carry the
+pass to a content-identical revision, while rollback creates a new candidate
+revision with a cleared evidence slate. Promotion reuses the same
+`currentTrialPass` checks, so a stored provenance or authorization anomaly
+cannot be copied into a new attestation. A supervised draft preview records the
+selected revision, content digest, pass expiry, case set and authorization; the
+runtime rechecks them from the database clock before any external intent, so an
+in-flight send fails with `EXPERIENCE_TRIAL_STALE` instead of acting on an
+expired selection. Provenance resolution also follows stored
+parent-experience edges under the same bounded visited/depth guard; a cycle,
+missing parent, unavailable source or overflow fails closed, while a parent's
+own status is not treated as authority. Trial passes never add verified-success
+evidence or permissions. Revocation and Forget delete trial results, case sets
+and content history with the derived Experience, and the same SQLite transaction
+bumps the context version so queued tasks reload. The three new tables are
+created idempotently in the service's short initialization transaction,
+following the existing `TokenBudgetService` pattern in the same database file.
 
 Forget increments privacy/generation fences, cancels dependent tasks and compilation,
 removes FTS/vectors/checkpoints/caches/derived records, and deletes registered local

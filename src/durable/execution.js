@@ -1,9 +1,47 @@
+import { TransactionMoneyService } from './transaction-money.js';
 import { randomUUID } from 'node:crypto';
 import { durableError, iso, json, parse } from './database.js';
 import { validReceipt } from '../tool-gateway.js';
 import { effectDigest } from './experience.js';
+import { linkOperation, operationContext, updateOperationExecution } from './reasoning-sessions.js';
 
 const unresolved = ['intent', 'dispatched', 'accepted', 'unknown'];
+// Dispatch permits are opaque capabilities. Everything dispatch needs lives in
+// this module-private map, keyed by the frozen object returned from intent().
+// A clone, JSON round-trip, spread or foreign lookalike has no entry and can
+// never reach an external send. Only frozen snapshots are exposed; the mutable
+// persisted row is never handed out, so changing `execution.is_write` on a
+// permit cannot downgrade a write into an unverified read. Dispatch re-reads
+// the current row for every decision and rejects any drift.
+const permits = new WeakMap();
+const PERMIT_FIELDS = Object.freeze(['id', 'task_id', 'task_run_id', 'job_id', 'plan_step_id', 'provider', 'tool', 'action_family',
+  'resource_id', 'idempotency_key', 'status', 'is_write', 'conditional_version', 'provider_idempotent', 'input_version',
+  'run_generation', 'privacy_epoch', 'dispatched_at', 'created_at', 'updated_at']);
+const executionView = row => Object.freeze(Object.fromEntries(PERMIT_FIELDS.filter(field => Object.hasOwn(row, field)).map(field => [field, row[field]])));
+const claimView = claim => claim == null ? null : Object.freeze({ ...claim });
+function issuePermit(ledger, { execution, claim, duplicate, authorize, taskId, runId, jobId, key, digest, transfer = null, hold = null, moneyBinding = null, moneyAttemptId = null }) {
+  const snapshot = executionView(execution);
+  const frozenClaim = claimView(claim);
+  const state = {
+    ledger, snapshot, claim: frozenClaim, duplicate, duplicateResult: duplicate ? parse(execution.result_json) : null,
+    authorize, taskId, runId, jobId, key, digest,
+    executionId: snapshot.id, isWrite: snapshot.is_write === 1, transfer, hold, moneyBinding, moneyAttemptId,
+    consumed: false, dispatching: false, markerActive: false, markerCommitted: false
+  };
+  const permit = {};
+  for (const field of ['execution', 'claim', 'duplicate']) Object.defineProperty(permit, field, { enumerable: true, get: () => field === 'execution' ? state.snapshot : field === 'claim' ? state.claim : state.duplicate, set: () => {} });
+  permits.set(permit, state);
+  return Object.freeze(permit);
+}
+function permitState(permit, ledger) {
+  const state = permit !== null && typeof permit === 'object' ? permits.get(permit) : null;
+  if (!state || state.ledger !== ledger) throw durableError('PERMIT_INVALID', 'This dispatch permit was not issued by this execution ledger.', 403);
+  return state;
+}
+function synchronousDecision(decision) {
+  if (decision?.then) throw durableError('AUTHORIZATION_REQUIRED', 'Authorization must be a synchronous local decision.', 403);
+  return decision;
+}
 export class ResourceClaims {
   constructor(database, { leaseMs = 30000 } = {}) { this.database = database; this.db = database.db; this.leaseMs = leaseMs; }
   acquire({ provider, resourceId, runId, owner, executionId, userId = 'local' }) {
@@ -38,28 +76,68 @@ export class ResourceClaims {
 }
 
 export class ToolExecutionLedger {
-  constructor(database, { tasks, jobs, experiences = null, timeoutMs = 20000, leaseMs = 30000 } = {}) {
+  constructor(database, { tasks, jobs, experiences = null, transfers = null, timeoutMs = 20000, leaseMs = 30000 } = {}) {
+    if (transfers != null && (!(transfers instanceof TransactionMoneyService) || transfers.database !== database || transfers.db !== database.db)) {
+      throw durableError('TRANSACTION_PARTICIPANT_INVALID', 'Tool and transaction money ledgers must share the same native workspace database.', 409);
+    }
     this.database = database; this.db = database.db; this.tasks = tasks; this.jobs = jobs; this.experiences = experiences;
+    this.transfers = transfers;
     this.timeoutMs = timeoutMs; this.claims = new ResourceClaims(database, { leaseMs });
+    this.database.atomic(() => this.db.exec(`CREATE TABLE IF NOT EXISTS execution_money_bindings (
+      execution_id TEXT NOT NULL,
+      attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+      money_attempt_id TEXT NOT NULL UNIQUE,
+      quote_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(execution_id,attempt_number))`));
   }
   get(id) { return this.db.prepare('SELECT * FROM tool_executions WHERE id=?').get(id); }
   byKey(key) { return this.db.prepare('SELECT * FROM tool_executions WHERE idempotency_key=?').get(key); }
   list({ taskId = null, limit = 100 } = {}) { return this.db.prepare('SELECT id,task_id,provider,tool,action_family,status,is_write,provider_receipt_id,created_at,updated_at FROM tool_executions WHERE (? IS NULL OR task_id=?) ORDER BY created_at DESC LIMIT ?').all(taskId, taskId, Math.min(200, limit)); }
+  #moneyAttempt(executionId, attemptNumber = null) {
+    const row = attemptNumber == null
+      ? this.db.prepare('SELECT * FROM execution_money_bindings WHERE execution_id=? ORDER BY attempt_number DESC LIMIT 1').get(executionId)
+      : this.db.prepare('SELECT * FROM execution_money_bindings WHERE execution_id=? AND attempt_number=?').get(executionId, attemptNumber);
+    return row || null;
+  }
+  #moneyBinding({ provider, tool, actionFamily, taskId, inputVersion, privacyEpoch, resourceId, payload, effect, decision }) {
+    const extra = decision?.transferBinding;
+    return { provider, tool, actionFamily, taskId, inputVersion, privacyEpoch: String(privacyEpoch), resourceId, payload, effect,
+      mcpSchemaId: extra?.mcpSchemaId ?? null, mcpConnectionId: extra?.mcpConnectionId ?? null };
+  }
+  #reserveTransfer(decision, { execution, number, binding }) {
+    const quote = decision?.transfer ?? null;
+    if (quote == null) return { hold: null, moneyAttemptId: null };
+    if (!this.transfers || typeof this.transfers.isNativeQuote !== 'function' || !this.transfers.isNativeQuote(quote)) {
+      throw durableError('TRANSFER_QUOTE_UNTRUSTED', 'A transaction transfer requires the exact native quote issued by this workspace.', 403);
+    }
+    const moneyAttemptId = `${execution.id}:a${number}`;
+    const hold = this.transfers.reserve(quote, { attemptId: moneyAttemptId, binding });
+    this.db.prepare('INSERT INTO execution_money_bindings VALUES(?,?,?,?,?)').run(execution.id, number, moneyAttemptId, hold.quoteId, iso(this.database.now()));
+    return { hold, moneyAttemptId };
+  }
   intent({ taskId, run, job, provider, tool, actionFamily, resourceId, key, effect, payload, isWrite = true, providerIdempotent = false, conditionalVersion = null, planStepId = null, expectedInputVersion = run.input_version, authorize }) {
+    const operation = operationContext();
+    const correlate = executionId => { if (operation?.sessionId) linkOperation(this.database, { ...operation, executionId, status: 'executing' }); };
     if (!provider || !resourceId || !key || !tool || !actionFamily || json(payload).length > 256000) throw durableError('INVALID_EXECUTION', 'Invalid bounded tool execution.', 400);
+    const digest = effectDigest(effect);
     return this.database.atomic(() => {
       const task = this.tasks.assertRun(run, { job });
       if (task.id !== taskId || task.inputVersion !== expectedInputVersion || task.processedInputVersion !== task.inputVersion) throw durableError('TASK_DIRTY', 'Refresh the task checkpoint before dispatch.');
+      const existing = this.byKey(key);
+      if (existing && (existing.task_id !== taskId || existing.provider !== provider || existing.resource_id !== resourceId || effectDigest(parse(existing.effect_signature_json)) !== digest)) throw durableError('IDEMPOTENCY_CONFLICT', 'An idempotency key cannot be reused for a different task, resource or effect.');
+      if (existing?.status === 'verified') { correlate(existing.id); return issuePermit(this, { execution: existing, claim: null, duplicate: true, authorize, taskId, runId: run.id, jobId: job.id, key, digest }); }
       if (isWrite && typeof authorize !== 'function') throw durableError('AUTHORIZATION_REQUIRED', 'External writes require an independent authorization decision.', 403);
+      let decision = null;
       if (isWrite) {
-        const decision = authorize();
-        if (decision?.then || decision?.allowed !== true) throw durableError('AUTHORIZATION_REQUIRED', 'The policy engine did not authorize this write.', 403);
+        decision = synchronousDecision(authorize());
+        if (decision?.allowed !== true) throw durableError('AUTHORIZATION_REQUIRED', 'The policy engine did not authorize this write.', 403);
+        if (decision.transfer != null && (!this.transfers || typeof this.transfers.isNativeQuote !== 'function' || !this.transfers.isNativeQuote(decision.transfer))) {
+          throw durableError('TRANSFER_QUOTE_UNTRUSTED', 'A transaction transfer requires the exact native quote issued by this workspace.', 403);
+        }
         if (this.experiences?.blocked({ taskId, actionFamily, effect })) throw durableError('ACTION_SUPPRESSED', 'The user rejected an equivalent action in this context.');
       }
-      const existing = this.byKey(key);
       if (existing) {
-        if (existing.task_id !== taskId || existing.provider !== provider || existing.resource_id !== resourceId || effectDigest(parse(existing.effect_signature_json)) !== effectDigest(effect)) throw durableError('IDEMPOTENCY_CONFLICT', 'An idempotency key cannot be reused for a different task, resource or effect.');
-        if (existing.status === 'verified') return { execution: existing, claim: null, duplicate: true };
         const safe = !existing.privacy_redacted && (existing.status === 'cancelled' && (!existing.dispatched_at || existing.last_error_class === 'confirmed_no_effect') || existing.status === 'failed' && existing.last_error_class === 'confirmed_absent');
         if (!safe) throw durableError('RECONCILIATION_REQUIRED', 'The existing intent must be reconciled before another dispatch.');
         const at = iso(this.database.now());
@@ -70,7 +148,11 @@ export class ToolExecutionLedger {
         if (claim) this.db.prepare('UPDATE tool_executions SET lease_owner=?,lease_token=? WHERE id=?').run(claim.owner, claim.token, existing.id);
         const number = this.db.prepare('SELECT COALESCE(MAX(attempt_number),0)+1 n FROM execution_attempts WHERE execution_id=?').get(existing.id).n;
         this.db.prepare('INSERT INTO execution_attempts VALUES(?,?,?,?,\'intent\',?,?)').run(existing.id, number, job.id, job.lease_token, at, at);
-        return { execution: this.get(existing.id), claim, duplicate: false, authorize };
+        correlate(existing.id);
+        const money = this.#reserveTransfer(decision, { execution: this.get(existing.id), number, binding: this.#moneyBinding({ provider, tool, actionFamily, taskId, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch, resourceId, payload, effect, decision }) });
+        return issuePermit(this, { execution: this.get(existing.id), claim, duplicate: false, authorize, taskId, runId: run.id, jobId: job.id, key, digest,
+          transfer: decision?.transfer ?? null, hold: money.hold, moneyAttemptId: money.moneyAttemptId,
+          moneyBinding: this.#moneyBinding({ provider, tool, actionFamily, taskId, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch, resourceId, payload, effect, decision }) });
       }
       const id = randomUUID(), at = iso(this.database.now());
       this.db.prepare(`INSERT INTO tool_executions(id,task_id,task_run_id,job_id,plan_step_id,provider,tool,action_family,resource_id,idempotency_key,effect_signature_json,status,is_write,payload_json,
@@ -81,63 +163,155 @@ export class ToolExecutionLedger {
       this.db.prepare('INSERT INTO execution_attempts VALUES(?,1,?,?,\'intent\',?,?)').run(id, job.id, job.lease_token, at, at);
       this.database.lineage('task_run', run.id, 'execution', id);
       if (planStepId) this.database.lineage('plan_step', planStepId, 'execution', id);
-      return { execution: this.get(id), claim, duplicate: false, authorize };
+      correlate(id);
+      const moneyBinding = this.#moneyBinding({ provider, tool, actionFamily, taskId, inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch, resourceId, payload, effect, decision });
+      const money = this.#reserveTransfer(decision, { execution: this.get(id), number: 1, binding: moneyBinding });
+      return issuePermit(this, { execution: this.get(id), claim, duplicate: false, authorize, taskId, runId: run.id, jobId: job.id, key, digest,
+        transfer: decision?.transfer ?? null, hold: money.hold, moneyAttemptId: money.moneyAttemptId, moneyBinding });
     });
   }
-  async dispatch(intent, { run, job, send, verify = null, signal = null, deferDispatch = false }) {
-    if (intent.duplicate) return parse(intent.execution.result_json);
-    const { execution, claim } = intent;
-    let dispatched = false;
-    const beforeDispatch = () => this.database.atomic(() => {
-      controller.signal.throwIfAborted(); signal?.throwIfAborted();
-      this.tasks.preResume(run, job); this.tasks.assertRun(run, { job });
-      if (claim && !this.claims.owns(claim)) throw durableError('LEASE_LOST', 'The resource claim expired before dispatch.');
-      if (intent.authorize && intent.authorize().allowed !== true) throw durableError('AUTHORIZATION_REQUIRED', 'Authorization changed before dispatch.', 403);
-      if (execution.is_write && this.experiences?.blocked({ taskId: execution.task_id, actionFamily: execution.action_family, effect: parse(execution.effect_signature_json) })) throw durableError('ACTION_SUPPRESSED', 'This action was stopped by user feedback.');
-      if (dispatched) return;
-      const changed = this.db.prepare("UPDATE tool_executions SET status='dispatched',dispatched_at=?,updated_at=? WHERE id=? AND status='intent'").run(iso(this.database.now()), iso(this.database.now()), execution.id).changes;
-      if (!changed) throw durableError('EXECUTION_CHANGED', 'This intent was already dispatched.');
-      this.db.prepare("UPDATE execution_attempts SET state='dispatched',updated_at=? WHERE execution_id=? AND job_id=? AND lease_token=?").run(iso(this.database.now()), execution.id, job.id, job.lease_token);
-      dispatched = true;
-    });
+  #requireFresh(state) {
+    const row = this.get(state.executionId);
+    if (!row || row.idempotency_key !== state.key || effectDigest(parse(row.effect_signature_json)) !== state.digest
+      || row.task_id !== state.snapshot.task_id || row.provider !== state.snapshot.provider || row.resource_id !== state.snapshot.resource_id
+      || row.is_write !== state.snapshot.is_write) {
+      throw durableError('PERMIT_INVALID', 'This dispatch permit no longer matches its persisted execution record.', 403);
+    }
+    return row;
+  }
+  async dispatch(permit, { run, job, send, verify = null, signal = null, deferDispatch = false }) {
+    const state = permitState(permit, this);
+    if (state.duplicate) return state.duplicateResult;
+    // A permit is bound to the run and job that obtained it; it cannot be
+    // carried into another run's dispatch.
+    if (run?.id !== state.runId || job?.id !== state.jobId) throw durableError('PERMIT_INVALID', 'This dispatch permit belongs to another run.', 403);
+    if (state.dispatching || state.consumed) throw durableError('PERMIT_CONSUMED', 'This dispatch permit was already dispatched.', 409);
+    const persistedRun = this.db.prepare('SELECT * FROM task_runs WHERE id=?').get(state.runId);
+    if (!persistedRun || persistedRun.task_id !== state.taskId || persistedRun.job_id !== state.jobId
+      || ['task_id', 'job_id', 'job_lease_token', 'input_version', 'run_generation', 'privacy_epoch'].some(field => persistedRun[field] !== run[field])
+      || job.task_id !== state.taskId || job.lease_token !== persistedRun.job_lease_token) {
+      throw durableError('PERMIT_INVALID', 'This permit requires its persisted task run and job lease.', 403);
+    }
+    const snapshot = state.snapshot, claim = state.claim;
+    const opening = this.#requireFresh(state);
+    if (opening.status !== 'intent') {
+      if (opening.status === 'verified') return parse(opening.result_json);
+      throw durableError('RECONCILIATION_REQUIRED', 'This execution was already dispatched or must be reconciled before another dispatch.', 409);
+    }
+    // The dispatching flag is set synchronously, so a concurrent second call
+    // fails before the first one yields and can never reach the provider.
+    if (state.dispatching || state.consumed) throw durableError('PERMIT_CONSUMED', 'This dispatch permit was already dispatched.', 409);
+    state.dispatching = true;
+    let markerCommitted = false;
+    const beforeDispatch = () => {
+      // A provider may cross or repeat its guarded boundary more than once.
+      // After the first committed marker, later callback invocations must do
+      // nothing at all: no fresh authorization decision and no second effect.
+      if (markerCommitted) throw durableError('PERMIT_CONSUMED', 'This dispatch boundary was already crossed.', 409);
+      if (state.markerActive) throw durableError('EXECUTION_CHANGED', 'The dispatch boundary is already being crossed.');
+      state.markerActive = true;
+      try {
+        this.database.atomic(() => {
+          controller.signal.throwIfAborted(); signal?.throwIfAborted();
+          this.tasks.preResume(run, job); this.tasks.assertRun(run, { job });
+          const current = this.#requireFresh(state);
+          if (current.status !== 'intent') throw durableError('EXECUTION_CHANGED', 'This intent was already dispatched or changed.');
+          if (claim && !this.claims.owns(claim)) throw durableError('LEASE_LOST', 'The resource claim expired before dispatch.');
+          if (this.experiences?.blocked({ taskId: current.task_id, actionFamily: current.action_family, effect: parse(current.effect_signature_json) })) throw durableError('ACTION_SUPPRESSED', 'This action was stopped by user feedback.');
+          if (current.is_write === 1) {
+            if (typeof state.authorize !== 'function') throw durableError('AUTHORIZATION_REQUIRED', 'External writes require an independent authorization decision.', 403);
+            const decision = synchronousDecision(state.authorize());
+            if (decision?.allowed !== true) throw durableError('AUTHORIZATION_REQUIRED', 'Authorization changed before dispatch.', 403);
+            if (state.transfer != null) {
+              if (decision?.transfer !== state.transfer || !this.transfers?.isNativeQuote(decision.transfer)) throw durableError('AUTHORIZATION_REQUIRED', 'The monetary authority changed before dispatch.', 403);
+              if (!state.hold) throw durableError('TRANSFER_QUOTE_UNTRUSTED', 'The transaction reservation is missing.', 403);
+              // The money marker rechecks expiry, currency, grant version and
+              // balances and refuses a repeated dispatch. It shares this SQL
+              // transaction, so a failure here rolls back the tool marker too.
+              this.transfers.markDispatched(state.hold, state.moneyBinding);
+            }
+          }
+          const changed = this.db.prepare("UPDATE tool_executions SET status='dispatched',dispatched_at=?,updated_at=? WHERE id=? AND status='intent'").run(iso(this.database.now()), iso(this.database.now()), state.executionId).changes;
+          if (!changed) throw durableError('EXECUTION_CHANGED', 'This intent was already dispatched.');
+          this.db.prepare("UPDATE execution_attempts SET state='dispatched',updated_at=? WHERE execution_id=? AND job_id=? AND lease_token=?").run(iso(this.database.now()), state.executionId, job.id, job.lease_token);
+        });
+        // In-memory permit state changes only after the marker transaction has
+        // committed. A rollback leaves this permit retryable; a commit makes it
+        // single-use before send() can run.
+        markerCommitted = true; state.markerCommitted = true; state.consumed = true;
+      } finally { state.markerActive = false; }
+    };
     const controller = new AbortController();
     let timer;
     const heartbeat = claim ? setInterval(() => { try { if (!this.jobs.heartbeat(job) || !this.claims.renew(claim)) controller.abort(durableError('LEASE_LOST', 'Execution ownership was lost.')); } catch { controller.abort(durableError('LEASE_LOST', 'Execution renewal could not be persisted.')); } }, Math.max(10, Math.floor(this.claims.leaseMs / 3))) : null;
     try {
-      if (!deferDispatch) beforeDispatch();
-      const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(durableError(execution.is_write ? 'OUTCOME_UNKNOWN' : 'TOOL_READ_TIMEOUT', execution.is_write ? 'The external outcome is unknown after a timeout. Reconcile before retrying.' : 'The read tool timed out.', execution.is_write ? 409 : 504)); }, this.timeoutMs); });
-      const result = await Promise.race([Promise.resolve().then(() => { controller.signal.throwIfAborted(); signal?.throwIfAborted(); return send(AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]), beforeDispatch); }), deadline]);
-      if (!dispatched) throw durableError('DISPATCH_GUARD_REQUIRED', 'The provider did not enter its guarded dispatch boundary.');
+      const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(durableError(snapshot.is_write ? 'OUTCOME_UNKNOWN' : 'TOOL_READ_TIMEOUT', snapshot.is_write ? 'The external outcome is unknown after a timeout. Reconcile before retrying.' : 'The read tool timed out.', snapshot.is_write ? 409 : 504)); }, this.timeoutMs); });
+      const result = await Promise.race([Promise.resolve().then(() => { controller.signal.throwIfAborted(); signal?.throwIfAborted(); if (!deferDispatch) beforeDispatch(); return send(AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]), beforeDispatch); }), deadline]);
+      if (!markerCommitted) throw durableError('DISPATCH_GUARD_REQUIRED', 'The provider did not enter its guarded dispatch boundary.');
       this.tasks.assertRun(run, { job, allowDirty: true });
       if (claim && !this.claims.owns(claim)) throw durableError('LEASE_LOST', 'Execution ownership was lost before recording the result.');
+      const current = this.#requireFresh(state);
+      if (current.status !== 'dispatched') throw durableError('EXECUTION_CHANGED', 'The execution changed while the provider call was running.');
+      // The persisted is_write flag decides receipt verification and unknown
+      // classification. The permit's exposed snapshot is only an assertion,
+      // never authority to downgrade a write to a read.
+      const isWrite = current.is_write === 1;
       this.database.atomic(() => {
         this.tasks.assertRun(run, { job, allowDirty: true });
-        this.db.prepare('UPDATE tool_executions SET status=?,result_json=?,provider_receipt_id=?,updated_at=? WHERE id=? AND status=\'dispatched\'')
-          .run(execution.is_write ? 'accepted' : 'verified', json(result), result?.id || result?.receiptId || null, iso(this.database.now()), execution.id);
-        this.db.prepare('UPDATE execution_attempts SET state=?,updated_at=? WHERE execution_id=? AND job_id=? AND lease_token=?').run(execution.is_write ? 'accepted' : 'verified', iso(this.database.now()), execution.id, job.id, job.lease_token);
+        const changed = this.db.prepare('UPDATE tool_executions SET status=?,result_json=?,provider_receipt_id=?,updated_at=? WHERE id=? AND status=\'dispatched\'')
+          .run(isWrite ? 'accepted' : 'verified', json(result), result?.id || result?.receiptId || null, iso(this.database.now()), state.executionId).changes;
+        if (!changed) throw durableError('EXECUTION_CHANGED', 'The execution changed while recording its result.');
+        this.db.prepare('UPDATE execution_attempts SET state=?,updated_at=? WHERE execution_id=? AND job_id=? AND lease_token=?').run(isWrite ? 'accepted' : 'verified', iso(this.database.now()), state.executionId, job.id, job.lease_token);
+        updateOperationExecution(this.database, state.executionId, isWrite ? 'accepted' : 'verified');
       });
-      if (verify) {
+      if (isWrite && verify) {
         const verification = await Promise.race([Promise.resolve().then(() => verify(result)), deadline]);
-        if ((verification?.status !== 'found' && verification?.verified !== true) || !validReceipt(verification.receipt || result, { key: execution.idempotency_key })) throw durableError('OUTCOME_UNKNOWN', 'Provider acceptance could not be verified.');
-        this.verified(execution.id, verification.receipt || result, { run, job, claim });
+        if ((verification?.status !== 'found' && verification?.verified !== true) || !validReceipt(verification.receipt || result, { key: state.key })) throw durableError('OUTCOME_UNKNOWN', 'Provider acceptance could not be verified.');
+        this.verified(state.executionId, verification.receipt || result, { run, job, claim });
       }
       return result;
     } catch (error) {
       // Fenced-out workers cannot record a result, even if their remote call
       // completed. A new recovery owner must reconcile that execution.
       if (this.jobs.owns(job) && (!claim || this.claims.owns(claim))) {
-        const current = this.get(execution.id);
+        const current = this.get(state.executionId);
         if (current && unresolved.includes(current.status)) this.database.atomic(() => {
+          const isWrite = current.is_write === 1;
           const knownNotDispatched = current.status === 'intent';
           const knownNoEffect = knownNotDispatched || current.status === 'dispatched' && error.definitiveNoEffect === true;
-          const status = knownNoEffect ? 'cancelled' : execution.is_write ? 'unknown' : 'failed';
-          this.db.prepare('UPDATE tool_executions SET status=?,last_error_class=?,updated_at=? WHERE id=?').run(status, knownNoEffect ? 'confirmed_no_effect' : error.code || 'external_failure', iso(this.database.now()), execution.id);
-          this.db.prepare('UPDATE execution_attempts SET state=?,updated_at=? WHERE execution_id=? AND job_id=? AND lease_token=?').run(status, iso(this.database.now()), execution.id, job.id, job.lease_token);
+          const status = knownNoEffect ? 'cancelled' : isWrite ? 'unknown' : 'failed';
+          this.db.prepare('UPDATE tool_executions SET status=?,last_error_class=?,updated_at=? WHERE id=?').run(status, knownNoEffect ? 'confirmed_no_effect' : error.code || 'external_failure', iso(this.database.now()), state.executionId);
+          this.db.prepare('UPDATE execution_attempts SET state=?,updated_at=? WHERE execution_id=? AND job_id=? AND lease_token=?').run(status, iso(this.database.now()), state.executionId, job.id, job.lease_token);
+          updateOperationExecution(this.database, state.executionId, status, { errorClass: knownNoEffect ? 'confirmed_no_effect' : error.code || 'external_failure' });
           if (claim) knownNoEffect ? this.claims.release(claim) : this.claims.unresolved(claim);
         });
+        this.#settleFailedTransfer(state, error);
       }
-      error.ambiguous = execution.is_write === 1 && this.get(execution.id)?.status !== 'cancelled'; throw error;
-    } finally { clearTimeout(timer); if (heartbeat) clearInterval(heartbeat); }
+      const latest = this.get(state.executionId);
+      error.ambiguous = latest?.is_write === 1 && latest?.status !== 'cancelled'; throw error;
+    } finally { state.dispatching = false; clearTimeout(timer); if (heartbeat) clearInterval(heartbeat); }
+  }
+  #settleFailedTransfer(state, error) {
+    if (!state.hold || !this.transfers) return;
+    const binding = this.#moneyAttempt(state.executionId);
+    if (!binding) return;
+    try {
+      const info = this.transfers.attemptInfo(binding.money_attempt_id);
+      if (info?.state === 'reserved') {
+        // Nothing reached the provider, so the hold is released only through
+        // the core's proven predispatch cancellation.
+        this.transfers.cancelAttempt(binding.money_attempt_id);
+      } else if (error.definitiveNoEffect === true) {
+        // The marker was committed but the provider proved it applied nothing.
+        this.transfers.settleAttempt(binding.money_attempt_id, { actualMicros: 0, receiptRef: `no-effect:${state.executionId}` });
+      } else {
+        // A dispatched or accepted transfer with no settled value keeps the
+        // whole hold. Only trusted reconciliation may settle it later.
+        this.transfers.markUnknownAttempt(binding.money_attempt_id);
+      }
+    } catch (moneyError) {
+      try { error.moneyError = moneyError?.code || 'MONEY_RECONCILIATION_REQUIRED'; } catch { /* frozen error */ }
+    }
   }
   verified(id, result, { run = null, job = null, claim = null } = {}) {
     return this.database.atomic(() => {
@@ -149,6 +323,7 @@ export class ToolExecutionLedger {
       this.db.prepare("UPDATE tool_executions SET status='verified',result_json=?,provider_receipt_id=COALESCE(?,provider_receipt_id),verified_at=?,updated_at=? WHERE id=?")
         .run(json(result), result?.id || result?.receiptId || null, iso(this.database.now()), iso(this.database.now()), id);
       this.db.prepare("UPDATE execution_attempts SET state='verified',updated_at=? WHERE execution_id=? AND job_id=?").run(iso(this.database.now()), id, current.job_id);
+      updateOperationExecution(this.database, id, 'verified');
       const storedClaim = this.db.prepare('SELECT * FROM resource_claims WHERE current_execution_id=?').get(id);
       if (storedClaim) this.claims.release(claim || { userId: storedClaim.user_id, provider: storedClaim.provider, resourceId: storedClaim.resource_id, owner: storedClaim.lease_owner, token: storedClaim.lease_token, executionId: id });
       this.db.prepare('INSERT OR IGNORE INTO source_records(kind,id,created_at) VALUES(\'outcome\',?,?)').run(id, iso(this.database.now()));
@@ -167,14 +342,46 @@ export class ToolExecutionLedger {
     return this.database.atomic(() => {
       const current = this.get(id);
       if (!current || !unresolved.includes(current.status)) return { status: current?.status || 'unknown' };
-      if (result?.status === 'found' && validReceipt(result.receipt, { key: execution.idempotency_key, receiptId: execution.provider_receipt_id })) { this.verified(id, result.receipt); return result; }
+      const money = this.#moneyAttempt(id);
+      if (result?.status === 'found' && validReceipt(result.receipt, { key: execution.idempotency_key, receiptId: execution.provider_receipt_id })) {
+        this.verified(id, result.receipt);
+        if (money) {
+          const info = this.transfers?.attemptInfo(money.money_attempt_id);
+          if (info && info.state !== 'settled' && info.state !== 'cancelled') {
+            // Trusted readback may carry an explicit actual amount. A receipt
+            // alone never proves the settled value, so the hold stays unknown
+            // rather than being collapsed to the quote or to zero.
+            if (Number.isSafeInteger(result.actualMicros) && result.actualMicros >= 0) {
+              this.transfers.settleAttempt(money.money_attempt_id, { actualMicros: result.actualMicros, receiptRef: result.receiptRef || result.receipt?.id || `readback:${id}` });
+            } else {
+              this.transfers.markUnknownAttempt(money.money_attempt_id);
+            }
+          }
+        }
+        return result;
+      }
       if (result?.status === 'not_found' && (execution.provider_idempotent || provider.reliableAbsence === true)) {
         this.db.prepare("UPDATE tool_executions SET status='failed',last_error_class='confirmed_absent',updated_at=? WHERE id=?").run(iso(this.database.now()), id);
         const claim = this.db.prepare('SELECT * FROM resource_claims WHERE current_execution_id=?').get(id);
         if (claim) this.claims.release({ userId: claim.user_id, provider: claim.provider, resourceId: claim.resource_id, owner: claim.lease_owner, token: claim.lease_token, executionId: id });
+        updateOperationExecution(this.database, id, 'failed', { errorClass: 'confirmed_absent' });
+        if (money) {
+          const info = this.transfers?.attemptInfo(money.money_attempt_id);
+          if (info && info.state !== 'settled' && info.state !== 'cancelled') {
+            if (info.state === 'reserved') this.transfers.cancelAttempt(money.money_attempt_id);
+            // A confirmed absence after the dispatch boundary is a trusted
+            // zero settlement with a receipt; it is never a silent refund.
+            else this.transfers.settleAttempt(money.money_attempt_id, { actualMicros: 0, receiptRef: `absence:${id}` });
+          }
+        }
         return { status: 'not_found', safeToRetry: true };
       }
       this.db.prepare("UPDATE tool_executions SET status='unknown',last_error_class='reconciliation_inconclusive',updated_at=? WHERE id=?").run(iso(this.database.now()), id);
+      updateOperationExecution(this.database, id, 'unknown', { errorClass: 'reconciliation_inconclusive' });
+      if (money) {
+        const info = this.transfers?.attemptInfo(money.money_attempt_id);
+        if (info && (info.state === 'reserved' || info.state === 'dispatched')) this.transfers.markUnknownAttempt(money.money_attempt_id);
+      }
       return { status: 'unknown', manual: true, detail: 'The provider cannot establish safe absence. No retry was authorized.' };
     });
   }
@@ -183,6 +390,16 @@ export class ToolExecutionLedger {
       const at = iso(this.database.now());
       const rows = this.db.prepare("SELECT id,task_id FROM tool_executions WHERE is_write=1 AND status IN ('dispatched','accepted')").all();
       const changed = this.db.prepare("UPDATE tool_executions SET status='unknown',last_error_class='process_interrupted',updated_at=? WHERE is_write=1 AND status IN ('dispatched','accepted')").run(at).changes;
+      for (const row of rows) {
+        updateOperationExecution(this.database, row.id, 'unknown', { errorClass: 'process_interrupted' });
+        // A restart cannot prove a dispatched transfer stopped or settled.
+        // Keep the whole hold unknown across the process boundary.
+        const money = this.#moneyAttempt(row.id);
+        if (money) {
+          const info = this.transfers?.attemptInfo(money.money_attempt_id);
+          if (info && (info.state === 'reserved' || info.state === 'dispatched')) this.transfers.markUnknownAttempt(money.money_attempt_id);
+        }
+      }
       // Restart recovery must leave every accepted write with a way to
       // converge. Importing a legacy action creates this job, but an execution
       // that already had a ledger row is intentionally skipped by that import.

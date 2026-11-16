@@ -1,3 +1,4 @@
+import { formatMajor } from './model-controls.js';
 import { getLocale } from './i18n.js?v=ix2';
 
 const t = (zh, en) => getLocale() === 'en' ? en : zh;
@@ -72,6 +73,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     panel.hidden = setup.demo === true;
     const servers = setup.mcp?.servers || [];
     const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
+    const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
     const status = value => ({ connected: t('已连接', 'Connected'), connecting: t('连接中', 'Connecting'), failed: t('连接失败', 'Connection failed'), disconnected: t('已断开', 'Disconnected') })[value] || value;
 
     const card = preset => {
@@ -159,6 +162,24 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
                     <small>${tool.writeTool ? t('操作权限 · 允许该工具执行修改或其他操作', 'Action access · allows this tool to make changes or perform other operations') : tool.declaredReadOnly ? t('服务声明：只读', 'Server declares: read only') : t('未声明只读 · 勾选即授权为读取工具', 'Read only not declared · checking grants read access')}</small>
                   </span>
                 </label>
+                <details class="mcp-financial-access" data-preserve="mcp-money-${esc(server.id)}-${esc(tool.name)}">
+                  <summary>${t('资金操作限制','Funds operation limits')}</summary>
+                  <p class="muted mcp-note">${t('只读标记不能放行资金操作。需选择你已确认的累计上限，并指定参数里的微单位金额和币种；缺失或不匹配时不派发。','A read-only annotation does not authorize funds movement. Choose a confirmed cumulative allowance and the argument fields for integer micros and currency; missing or mismatched values block dispatch.')}</p>
+                  ${funds.length ? `<form data-mcp-financial="${esc(tool.name)}" data-mcp-id="${esc(server.id)}" data-preserve="mcp-money-form-${esc(server.id)}-${esc(tool.name)}">
+                    <label>${t('资金授权','Funds allowance')}<select name="mcpMoneyGrant" required><option value="">${t('选择资金授权','Choose an allowance')}</option>${fundsOptions(tool.financial?.monetaryGrantId)}</select></label>
+                    <label>${t('微单位金额参数路径','Amount-in-micros argument pointer')}<input name="mcpAmountPointer" value="${esc(tool.financial?.amountMicrosPointer || '')}" placeholder="/amountMicros" required></label>
+                    <label>${t('币种参数路径','Currency argument pointer')}<input name="mcpCurrencyPointer" value="${esc(tool.financial?.currencyPointer || '')}" placeholder="/currency" required></label>
+                    <label class="mcp-tool"><input type="checkbox" name="mcpFinancialConfirmed" required><span>${t('确认此工具为资金操作，金额单位及币种参数与上述授权一致；允许在上限内执行。','Confirm this financial tool and its amount units and currency fields match the allowance; permit execution within that cap.')}</span></label>
+                    <button type="submit" class="secondary-button" ${busy?'disabled':''}>${t('保存资金限制','Save funds limits')}</button>
+                  </form>` : `<p class="muted">${t('请先在自动跟进设置中确认资金上限；默认上限为 0。','First confirm a funds cap in automatic follow-up settings. The default cap is zero.')}</p>`}
+                  ${tool.financial ? `<p class="muted">${tool.financial.current?t('已绑定当前工具与连接身份','Bound to the current tool and connection identity'):t('工具或连接身份已变更，需要重新确认','Tool or connection identity changed; confirm again')}</p><button type="button" class="text-button" data-mcp-financial-clear="${esc(tool.name)}" data-mcp-id="${esc(server.id)}">${t('撤销资金许可','Revoke funds access')}</button>`:''}
+                </details>
+                ${tool.writeTool && tool.allowed ? `
+                  <label class="mcp-tool mcp-nonfinancial">
+                    <input type="checkbox" data-mcp-nonfinancial="${esc(tool.name)}" data-mcp-id="${esc(server.id)}" ${tool.nonfinancial ? 'checked' : ''} ${busy || !server.enabled ? 'disabled' : ''}>
+                    <small>${t('不会产生资金流动', 'Never moves money')}</small>
+                  </label>
+                ` : ''}
               `).join('')}
             </details>
           ` : ''}
@@ -192,6 +213,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     const setup = context();
     const servers = setup.mcp?.servers || [];
     const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
+    const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
 
     const tabsHtml = `
       <div class="mcp-tabs" role="group" aria-label="${t('配置方式', 'Setup method')}">
@@ -413,6 +436,22 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     void mutate(id, action === 'remove' ? { remove: true } : action === 'reconnect' ? { reconnect: true } : { enabled: action === 'enable' });
   });
 
+  document.addEventListener('submit',event=>{
+    const form=event.target.closest('[data-mcp-financial]');if(!form)return;event.preventDefault();if(busy)return;
+    const server=context().mcp?.servers.find(item=>item.id===form.dataset.mcpId);if(!server)return;
+    const data=new FormData(form),name=form.dataset.mcpFinancial;
+    if(data.get('mcpFinancialConfirmed')!=='on')return;
+    const writes=new Set(server.tools.filter(item=>item.allowed && item.writeTool).map(item=>item.name));writes.add(name);
+    const nonfinancialTools=server.tools.filter(item=>item.nonfinancial && item.name!==name).map(item=>item.name);
+    void mutate(server.id,{writeTools:[...writes],nonfinancialTools,financialConfirmed:true,financialTools:{[name]:{monetaryGrantId:String(data.get('mcpMoneyGrant')),amountMicrosPointer:String(data.get('mcpAmountPointer')),currencyPointer:String(data.get('mcpCurrencyPointer'))}}});
+  });
+  document.addEventListener('input',event=>{
+    const form=event.target.closest('[data-mcp-financial]');if(form && event.target.name!=='mcpFinancialConfirmed'){const checkbox=form.querySelector('[name="mcpFinancialConfirmed"]');if(checkbox)checkbox.checked=false;}
+  });
+  document.addEventListener('click',event=>{
+    const button=event.target.closest('[data-mcp-financial-clear]');if(!button || busy)return;
+    void mutate(button.dataset.mcpId,{financialTools:{[button.dataset.mcpFinancialClear]:null}});
+  });
   document.addEventListener('change', event => {
     const toggle = event.target.closest('[data-preset-toggle]');
     if (toggle) {
@@ -428,6 +467,16 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       const allowed = new Set(server.resources.filter(resource => resource.allowed).map(resource => resource.id));
       if (resourceInput.checked) allowed.add(resourceInput.dataset.mcpResource); else allowed.delete(resourceInput.dataset.mcpResource);
       void mutate(server.id, { readResources: [...allowed] });
+      return;
+    }
+    const declaration = event.target.closest('[data-mcp-nonfinancial]');
+    if (declaration) {
+      if (busy) return;
+      const server = context().mcp?.servers.find(item => item.id === declaration.dataset.mcpId);
+      if (!server) return;
+      const names = new Set(server.tools.filter(tool => tool.nonfinancial).map(tool => tool.name));
+      if (declaration.checked) names.add(declaration.dataset.mcpNonfinancial); else names.delete(declaration.dataset.mcpNonfinancial);
+      void mutate(server.id, { nonfinancialTools: [...names],...(declaration.checked?{financialTools:{[declaration.dataset.mcpNonfinancial]:null}}:{}) });
       return;
     }
     const input = event.target.closest('[data-mcp-tool]');
@@ -454,6 +503,8 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     const form = new FormData(event.target);
     const setup = context();
     const presets = setup.mcp?.presets || DEFAULT_PRESETS;
+    const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
+    const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
     const servers = setup.mcp?.servers || [];
     let config;
 

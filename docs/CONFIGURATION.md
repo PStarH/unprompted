@@ -73,15 +73,17 @@ operator's responsibility on a later boot.
 ## GitHub, Outlook, Slack and Notion client provisioning
 
 Set `UNPROMPTED_GITHUB_CLIENT_ID` or `UNPROMPTED_MICROSOFT_CLIENT_ID` to the
-registered public application ID. Slack PKCE needs `UNPROMPTED_SLACK_CLIENT_ID`; its legacy secret setting is optional. Native Notion needs `UNPROMPTED_NOTION_CLIENT_ID` with `UNPROMPTED_NOTION_CLIENT_SECRET`.
+registered public application ID. Slack PKCE needs `UNPROMPTED_SLACK_CLIENT_ID`; its legacy secret setting is optional. Native Notion in a public build needs `UNPROMPTED_NOTION_CLIENT_ID` with `UNPROMPTED_NOTION_BROKER_URL`, the publisher broker's exact HTTPS origin. An owner-private self-host can instead set `UNPROMPTED_NOTION_CLIENT_ID` with `UNPROMPTED_NOTION_CLIENT_SECRET`; that secret stays in local setup.
 Alternatively set `UNPROMPTED_CONNECTOR_CLIENTS_FILE` to a JSON file with
-`github.clientId`, `microsoft.clientId`, `slack.clientId`, and native Notion `clientId` plus `clientSecret`. The local app builder accepts `--connector-clients PATH`.
+`github.clientId`, `microsoft.clientId`, `slack.clientId`, and Notion `clientId` with either `brokerUrl` for a public build or `clientSecret` for owner-private local use. The public macOS app builder accepts `--connector-clients PATH`; it keeps the secretless Notion broker descriptor and rejects a Notion client secret.
 
-GitHub uses device OAuth. Outlook uses browser authorization with PKCE and a dynamically selected local port; register `http://localhost/oauth/microsoft` as a mobile and desktop redirect. Slack and Notion use a browser authorization
-code and the fixed redirects `http://localhost:53682/oauth/slack` and
-`http://localhost:53682/oauth/notion`. End users authorize their own accounts.
+GitHub uses device OAuth. Outlook uses browser authorization with PKCE and a dynamically selected local port; register `http://localhost/oauth/microsoft` as a mobile and desktop redirect. Slack uses a browser authorization
+code and the fixed redirect `http://localhost:53682/oauth/slack`. A public
+Notion broker registers its provider callback `<broker origin>/v1/notion/callback`;
+`http://localhost:53682/oauth/notion` is only the desktop handoff, and an
+owner-private self-host can still register that loopback redirect directly. End users authorize their own accounts.
 Access tokens are not pasted into the app. Refresh tokens stay in private local
-setup. Observation is the default; platform actions require provider-granted scopes and explicit local authorization. Native Notion exchanges its secret locally, so bundling it does not create a confidential client. See [Connectors](CONNECTORS.md) and the [complete setup tutorial (Chinese)](CONNECTOR_SETUP.zh-CN.md) for registration, scopes, distribution boundaries and supported behavior.
+setup. Observation is the default; platform actions require provider-granted scopes and explicit local authorization. With a broker descriptor, the Notion publisher secret stays on the broker server; an owner-private installation can still exchange its own locally supplied secret. The official Notion MCP is separate from native observation. See [Connectors](CONNECTORS.md), the [Notion broker operator guide](NOTION_BROKER.md) and the [complete setup tutorial (Chinese)](CONNECTOR_SETUP.zh-CN.md) for registration, scopes, distribution boundaries and supported behavior.
 
 ## Google client provisioning
 
@@ -254,6 +256,27 @@ workspace. **Ctrl+C** stops either mode.
 For a normal workspace, stop its process before backing up or moving the state
 file. Don't delete its lock while a process is using it. One process may write a
 state file at a time; use a separate port and state file for another instance.
+
+## Backing up and restoring a workspace
+
+Stop every process using the workspace and wait for it to exit before copying.
+Back up the complete private state and configuration set, including custom
+`UNPROMPTED_STATE_FILE` and `UNPROMPTED_CONFIG_DIR` locations when they differ.
+A logical JSON state path normally maps to a SQLite file; include its WAL/SHM
+companions if present and retained migration backups. Never copy only the live
+SQLite main file or remove a lock held by a running process.
+
+Keep backup permissions restrictive: these files can contain source text,
+connector credentials and model keys. With the app stopped, restore into a
+separate empty private location, preserve permissions and point the state/config
+settings there before starting. Reconnect expired provider credentials as needed.
+Existing unknown external operations and budget holds remain for reconciliation;
+restoring a backup does not refund them or authorize another write.
+
+Manually retained copies have their own retention. Forget cannot erase backups
+it does not manage, and restoring a snapshot taken before Forget can bring that
+snapshot's data back. This procedure is a stopped-file backup, not a hot backup
+or a provider-side restore.
 
 ## Durable workspace (v0.3)
 
