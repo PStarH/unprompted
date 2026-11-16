@@ -31,7 +31,7 @@ Normal startup does not insert sample tasks. `npm run demo` is a separate dispos
 
 - [Install and first run](quickstart.md) — `npm ci --include=optional`, then `npm start`.
 - [Models](models.md) — endpoint, model ID, and an optional API key.
-- [Connectors](connectors.md) — local folders, Apple Notes, Google, GitHub, Outlook, Slack, Notion, and MCP.
+- [Connectors](connectors.md) — local folders, Apple Calendar, Mail, Contacts and Notes, Google, GitHub, Outlook, Slack, Notion, and MCP.
 - [Workspace](workspace.md) — Overview, Memory, Connections, and Settings.
 - [Automatic follow-up](follow-up.md) — a lease you start, which still cannot skip a check.
 - [Local API](api.md) — the localhost HTTP surface.

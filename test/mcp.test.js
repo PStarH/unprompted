@@ -397,3 +397,9 @@ test('saved Fetch configs that point at another machine are rewritten to this pr
   assert.equal(legacy.configs.fetch.command, process.execPath);
   assert.ok(!legacy.configs.fetch.args.includes('mcp-server-fetch'));
 });
+
+test('the browser carries no duplicate MCP preset catalog', () => {
+  const source = fs.readFileSync(new URL('../public/mcp.js', import.meta.url), 'utf8');
+  assert.equal(source.includes('DEFAULT_PRESETS'), false);
+  assert.equal(source.includes('command: \'uvx\', args: [\'mcp-server-fetch\']'), false);
+});

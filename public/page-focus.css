@@ -26,8 +26,6 @@
 #viewMemory .memory-search-result{border:1px solid var(--line);border-radius:10px;overflow:hidden}
 #viewMemory .memory-result-open{padding:18px;height:100%;align-content:start}
 #viewMemory .has-inspector .memory-results{grid-template-columns:minmax(0,1fr)}
-#viewAttention .decision-deck{max-width:980px;margin-inline:auto}
-#viewAttention .decision-deck-header{padding-bottom:24px;border-bottom:1px solid var(--line);margin-bottom:24px}
 #viewActivity .activity-layout{grid-template-columns:minmax(0,1.3fr) minmax(240px,.7fr);gap:32px}
 @media(max-width:760px){#viewMemory .memory-results{grid-template-columns:minmax(0,1fr)}#viewActivity .activity-layout{grid-template-columns:minmax(0,1fr)}.page-focus-nav button{padding:12px 14px;min-height:44px}.page-focus-nav{max-width:100%}}
 #viewPreferences .settings-page.page-focus-host{max-width:1000px;border:0;background:transparent;overflow:visible}
@@ -96,7 +94,6 @@
 #viewPreferences .settings-page > .page-focus-panel { box-shadow:none; }
 #viewPreferences #settingsModelHost:empty { display:none; }
 #viewPreferences .settings-page > .page-focus-navigation { grid-column:1; grid-row:1 / span 12; }
-#viewAttention .decision-upcoming { border-top:1px solid var(--line); padding-top:20px; margin-top:24px; }
 @media(min-width:1100px) {
   #viewPreferences .settings-page > .page-focus-navigation { flex-direction:column; position:sticky; top:24px; border:0; gap:16px; }
   #viewPreferences .page-focus-navigation > .page-focus-nav { display:flex; flex-direction:column; width:100%; border-right:1px solid var(--line); padding:0 16px 0 0; }

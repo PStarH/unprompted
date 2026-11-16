@@ -2418,7 +2418,7 @@ export class DurableRuntime {
     // Remember the wakeup and run one more pass when this one finishes.
     if (this.pending) { this.kickAgain = true; return; }
     this.pending = Promise.resolve().then(() => this.scope.run(undefined, async () => {
-      this.database.atomic(() => { this.tasks.situations.expireDue(); this.coordination.releaseExpired(); });
+      this.database.atomic(() => { this.tasks.situations.expireDue(); this.coordination.releaseExpired(); this.reasoningSessions?.sweep(); });
       // Capacity facts survive crashes and drain in bounded, indexed batches.
       // The ordinary interval continues any backlog without a retry spin.
       for (const event of this.jobs.pendingBudgetWakes({ limit: 4 })) {

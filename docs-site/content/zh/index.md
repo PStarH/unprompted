@@ -31,7 +31,7 @@ Unprompted 是一个本地优先的原型。它留意你授权的来源，发现
 
 - [安装与首次运行](quickstart.md) — 先 `npm ci --include=optional`，再 `npm start`。
 - [模型](models.md) — 接口地址、模型 ID，以及可选的 API 密钥。
-- [连接器](connectors.md) — 本地文件夹、Apple 备忘录、Google、GitHub、Outlook、Slack、Notion 和 MCP。
+- [连接器](connectors.md) — 本地文件夹、Apple 日历、邮件、通讯录和备忘录、Google、GitHub、Outlook、Slack、Notion 和 MCP。
 - [工作区](workspace.md) — 工作台、记忆、连接和设置。
 - [自动跟进](follow-up.md) — 你自己开启的一段授权，检查仍然不能跳过。
 - [本地 API](api.md) — 本机 HTTP 接口。

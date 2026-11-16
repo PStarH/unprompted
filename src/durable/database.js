@@ -104,6 +104,11 @@ export class DurableDatabase {
         if (this.db.prepare("SELECT v FROM memory_fts_config WHERE k='secure-delete'").get()?.v !== 1) throw durableError('FTS_CONFIGURATION', 'FTS secure deletion is not enabled.', 503);
         for (const [key, value] of [['state_revision', '0'], ['context_version', '0'], ['privacy_epoch', '0'], ['privacy_salt', randomBytes(32).toString('hex')], ['learning_auto_promote', 'false'], ['promotion_policy_version', '1']]) this.db.prepare('INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)').run(key, value);
       });
+      else {
+        const schema = Number(this.db.pragma('user_version', { simple: true }));
+        if (schema !== SQLITE_RUNTIME.schemaVersion) throw durableError('SQLITE_SCHEMA', 'A read-only workspace must already match the current schema; open it writable once to migrate.');
+        if (this.db.prepare("SELECT v FROM memory_fts_config WHERE k='secure-delete'").get()?.v !== 1) throw durableError('FTS_CONFIGURATION', 'FTS secure deletion is not enabled.', 503);
+      }
       if (!readonly && this.filename !== ':memory:') for (const suffix of ['', '-wal', '-shm']) {
         try { fs.chmodSync(this.filename + suffix, 0o600); } catch (error) { if (error.code !== 'ENOENT' && process.platform !== 'win32') throw error; }
       }

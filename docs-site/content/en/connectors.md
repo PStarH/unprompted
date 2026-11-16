@@ -83,6 +83,14 @@ Explicit to-dos such as `- [ ]`, `TODO:` and `☐` can be tracked. The existing 
 
 Notes reads available text in selected folders and skips locked notes and attachments. The native Reminders connector observes selected lists and can create reminders in a separately authorized list. To edit, complete or delete existing reminders, separately allow **Platform action access**. Actions are limited to selected lists and check the last modification time. A source checkbox alone is not proof that the agent completed work.
 
+## Apple Calendar, Mail and Contacts
+
+1. On macOS, select Apple Calendar, Apple Mail or Apple Contacts under **Connections**.
+2. Allow the macOS Automation prompt and choose the calendars, mailboxes or contact groups to observe.
+3. If access was denied, open macOS **System Settings → Privacy & Security → Automation**, allow access for the application that actually launched Unprompted, and retry.
+
+Calendar reads a bounded window of 14 days back and 60 days forward, up to 200 events per calendar and 500 total across selected calendars; modify is off. Mail reads a bounded window of 7 days back, up to 40 messages per mailbox and 200 total; messages removed from a selected mailbox are withdrawn, while a message that merely ages out stays in local history. Sending, deleting and editing stay off. Contacts reads selected groups for evidence and entity lookup, up to 400 people, with lookups limited to 20 matches; the address book is not modified.
+
 ## MCP presets and custom services
 
 Open **Connections → MCP**:

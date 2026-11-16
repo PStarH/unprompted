@@ -86,3 +86,21 @@ test('two deferred native interpretations retain separate task sessions through 
   }
   assert.equal(f.interpretations(), 2);
 });
+
+test('the maintenance tick expires a deferred private reasoning session after its TTL', async t => {
+  const f = fixture(t); f.runtime.tokenBudget.setLimit({ scope: 'workspace', tokens: 0 });
+  f.engine.ingest(input('expire')); await f.idle();
+  const row = f.rows()[0];
+  assert.ok(row); assert.equal(row.status, 'deferred');
+  // Cancel rather than park: a budget wake ignores available_at, and a retry
+  // that reached begin() would sweep the row before the assertion (false green).
+  const parked = f.store.db.prepare("UPDATE jobs SET state='cancelled',available_at='9999-12-31T23:59:59.999Z' WHERE task_id=? AND state NOT IN ('completed','cancelled')").run(row.task_id);
+  assert.ok(parked.changes > 0);
+  f.advanceTo(Date.parse(row.expires_at) + 1);
+  f.runtime.kick(); await f.idle();
+  const expired = f.rows()[0];
+  assert.equal(expired.status, 'expired');
+  for (const column of ['conversation_json', 'pending_json', 'final_json', 'final_digest', 'deferred_json', 'claim_id', 'claim_until']) {
+    assert.equal(expired[column], null, column);
+  }
+});

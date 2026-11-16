@@ -4,60 +4,6 @@ import { getLocale } from './i18n.js?v=ix2';
 const t = (zh, en) => getLocale() === 'en' ? en : zh;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
-const DEFAULT_PRESETS = [
-  {
-    id: 'fetch', name: 'Fetch', auth: 'none', tagZh: '无需账号', tagEn: 'No account',
-    titleZh: '网页内容提取', titleEn: 'Web content reader',
-    descriptionZh: '抓取任意网页并自动转为大模型易读的 Markdown，开箱即用。',
-    descriptionEn: 'Fetches web pages and converts them to clean Markdown for LLMs.',
-    defaultEnabled: true, connection: { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'] }, fields: []
-  },
-  {
-    id: 'notion', name: 'Notion', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Notion 页面', titleEn: 'Notion pages',
-    descriptionZh: '在 Notion 官方页面登录，查阅你有权访问的页面。不需要集成密钥，也不会自动创建任务。',
-    descriptionEn: 'Sign in on Notion to look up pages you can access. No integration secret, and this does not create tasks.',
-    connection: { type: 'http', url: 'https://mcp.notion.com/mcp' }, fields: []
-  },
-  {
-    id: 'linear', name: 'Linear', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Linear 议题', titleEn: 'Linear issues',
-    descriptionZh: '在 Linear 官方页面登录，查阅议题、项目和阻碍。不需要 API Key，也不会自动创建任务。',
-    descriptionEn: 'Sign in on Linear to look up issues, projects, and blockers. No API key, and this does not create tasks.',
-    connection: { type: 'http', url: 'https://mcp.linear.app/mcp' }, fields: []
-  },
-  {
-    id: 'atlassian', name: 'Jira and Confluence', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Jira 与 Confluence', titleEn: 'Jira and Confluence',
-    descriptionZh: '在 Atlassian 官方页面登录，查询 Jira 和 Confluence。不需要 API Token。组织管理员可能仍要允许此应用。',
-    descriptionEn: 'Sign in on Atlassian to look up Jira and Confluence. No API token. An organization admin may still need to allow the app.',
-    connection: { type: 'http', url: 'https://mcp.atlassian.com/v1/mcp/authv2' }, fields: []
-  },
-  {
-    id: 'todoist', name: 'Todoist', auth: 'oauth', tagZh: '登录即可', tagEn: 'Sign in',
-    titleZh: 'Todoist 任务', titleEn: 'Todoist tasks',
-    descriptionZh: '在 Todoist 官方页面登录，查阅任务和项目。不需要 API Token，也不会自动创建任务。',
-    descriptionEn: 'Sign in on Todoist to look up tasks and projects. No API token, and this does not create tasks.',
-    connection: { type: 'http', url: 'https://ai.todoist.net/mcp' }, fields: []
-  },
-  {
-    id: 'brave-search', name: 'Brave Search', auth: 'key', tagZh: '需要密钥', tagEn: 'API key',
-    titleZh: 'Brave 网页搜索', titleEn: 'Brave Search',
-    descriptionZh: '实时网络与新闻搜索，为调查提供最新外部证据。此服务只提供 API Key。',
-    descriptionEn: 'Real-time web and news search for current external evidence. This service only offers an API key.',
-    connection: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-brave-search'] },
-    fields: [{ key: 'BRAVE_API_KEY', labelZh: 'Brave Search API Key', labelEn: 'Brave Search API Key', placeholder: 'BSA...', type: 'password', required: true }]
-  },
-  {
-    id: 'firecrawl', name: 'Firecrawl', auth: 'key', tagZh: '需要密钥', tagEn: 'API key',
-    titleZh: 'Firecrawl 深度爬虫', titleEn: 'Firecrawl Web Scraper',
-    descriptionZh: '深度网页抓取与站点抽取。此服务只提供 API Key。',
-    descriptionEn: 'Deep web scraping and crawling. This service only offers an API key.',
-    connection: { type: 'stdio', command: 'npx', args: ['-y', 'firecrawl-mcp'] },
-    fields: [{ key: 'FIRECRAWL_API_KEY', labelZh: 'Firecrawl API Key', labelEn: 'Firecrawl API Key', placeholder: 'fc-...', type: 'password', required: true }]
-  }
-];
-
 const presetAuth = preset => preset.auth || (preset.fields?.length ? 'key' : 'none');
 const presetRecipe = preset => preset.connection || (preset.command ? { type: 'stdio', command: preset.command, args: preset.args || [] } : null);
 const serverPresets = setup => Array.isArray(setup?.mcp?.presets) ? setup.mcp.presets : [];
@@ -73,7 +19,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     const setup = context();
     panel.hidden = setup.demo === true;
     const servers = setup.mcp?.servers || [];
-    const presets = serverPresets(setup).length ? serverPresets(setup) : DEFAULT_PRESETS;
+    const presets = serverPresets(setup);
     const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
     const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
     const status = value => ({ connected: t('已连接', 'Connected'), connecting: t('连接中', 'Connecting'), failed: t('连接失败', 'Connection failed'), disconnected: t('已断开', 'Disconnected') })[value] || value;
@@ -123,7 +69,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
           const items = presets.filter(preset => presetAuth(preset) === auth);
           if (!items.length) return '';
           return `<h3 class="mcp-preset-group-title">${title}</h3>${note ? `<p class="muted mcp-preset-group-note">${note}</p>` : ''}${items.map(card).join('')}`;
-        }).join('')}${presets.length ? '' : `<p class="muted">${t('内置推荐由本应用提供。刷新连接页后再选择。', 'Built-in presets come from this app. Refresh Connections, then choose one.')}</p>`}
+        }).join('')}${presets.length ? '' : `<p class="muted">${setup.mcp === undefined ? t('正在加载内置推荐…', 'Loading built-in presets…') : t('内置推荐暂不可用。刷新连接页后再选择。', 'Built-in presets are unavailable. Refresh Connections, then choose one.')}</p>`}
       </div>
     `;
 
@@ -216,7 +162,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
   function renderForm() {
     const setup = context();
     const servers = setup.mcp?.servers || [];
-    const presets = serverPresets(setup).length ? serverPresets(setup) : DEFAULT_PRESETS;
+    const presets = serverPresets(setup);
     const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
     const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
 
@@ -245,7 +191,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       const formPresets = presets.filter(preset => presetAuth(preset) !== 'oauth');
       const oauthNames = presets.filter(preset => presetAuth(preset) === 'oauth').map(preset => preset.name).join('、');
       formBody = `
-        <p class="muted mcp-note">${t(`${oauthNames} 请在卡片上选择「登录并连接」，这里不填写密钥。`, `${oauthNames.replaceAll('、', ', ')} use Sign in and connect on the card. This form does not ask for a token.`)}</p>
+        ${presets.length ? `<p class="muted mcp-note">${t(`${oauthNames} 请在卡片上选择「登录并连接」，这里不填写密钥。`, `${oauthNames.replaceAll('、', ', ')} use Sign in and connect on the card. This form does not ask for a token.`)}</p>` : `<p class="muted">${setup.mcp === undefined ? t('正在加载内置推荐…', 'Loading built-in presets…') : t('内置推荐暂不可用。刷新连接页后再选择。', 'Built-in presets are unavailable. Refresh Connections, then choose one.')}</p>`}
         <div class="mcp-preset-form-list">
           ${formPresets.map(preset => {
             const configured = servers.find(s => s.id === preset.id);
@@ -420,9 +366,12 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
       if (busy) return;
       busy = true;
       try {
-        const availablePresets = serverPresets(context());
-        const preset = (availablePresets.length ? availablePresets : DEFAULT_PRESETS).find(item => item.id === 'fetch');
-        const recipe = presetRecipe(preset) || { type: 'stdio', command: 'uvx', args: ['mcp-server-fetch'] };
+        const preset = serverPresets(context()).find(item => item.id === 'fetch');
+        if (!preset) {
+          notify(t('Fetch 由本应用的运行时提供。请刷新连接页后再试。', 'Fetch is provided by this app. Refresh Connections and try again.'), true);
+          busy = false; render(); return;
+        }
+        const recipe = presetRecipe(preset);
         if (!recipe?.command && !recipe?.url) {
           notify(t('Fetch 由本应用的运行时提供。请刷新连接页后再试。', 'Fetch is provided by this app. Refresh Connections and try again.'), true);
           busy = false; render(); return;
@@ -520,7 +469,7 @@ export function createMcpPanel({ update, post, context, refresh, notify }) {
     if (busy) return;
     const form = new FormData(event.target);
     const setup = context();
-    const presets = serverPresets(setup).length ? serverPresets(setup) : DEFAULT_PRESETS;
+    const presets = serverPresets(setup);
     const funds=(setup.autonomy?.grants || []).filter(grant=>grant.moneyBudget?.available && grant.moneyBudget.capMicros>0 && Date.parse(grant.moneyBudget.expiresAt)>Date.now());
     const fundsOptions=selected=>funds.map(grant=>`<option value="${esc(grant.moneyBudget.grantId)}" ${selected===grant.moneyBudget.grantId?'selected':''}>${esc(grant.moneyBudget.currency)} ${esc(formatMajor(grant.moneyBudget.remainingMicros))} ${t('剩余','remaining')} · ${grant.mode==='task'?t('单件任务','Single task'):t('工作区','Workspace')}</option>`).join('');
     const servers = setup.mcp?.servers || [];
