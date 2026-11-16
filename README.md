@@ -89,7 +89,7 @@ focus or interrupt typing.
 
 ## Quick start
 
-Version **0.4.0** runs as a self-hosted web application on macOS and Windows (Linux can also run the Node service). No desktop app, Docker or paid hosting is required. Install Node.js 22 or newer, then run the commands below in Terminal or Windows PowerShell. Installation, local persistence and browser startup are covered by hosted Windows CI; real Windows runtime acceptance is pending, and Apple sources require macOS.
+Version **0.5.0** runs as a self-hosted web application on macOS and Windows (Linux can also run the Node service). No desktop app, Docker or paid hosting is required. Install Node.js 22 or newer, then run the commands below in Terminal or Windows PowerShell. Installation, local persistence and browser startup are covered by hosted Windows CI; real Windows runtime acceptance is pending, and Apple sources require macOS.
 
 **Try it without any account:**
 
