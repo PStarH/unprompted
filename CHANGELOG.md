@@ -141,7 +141,7 @@ signing and real-account acceptance remain separate work.
 - The Notion broker is not deployed and has no registered publisher identity;
   provider and security review remain external gates.
 
-## 0.4.0 — Unreleased
+## 0.4.0 — 2026-11-06
 
 - Self-hosted browser workspace for macOS and Windows; no desktop installer required. Hosted CI covers Windows installation, persistence and browser startup.
 - Source permissions, scoped platform actions, incremental synchronization and recovery improvements.
