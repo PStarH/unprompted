@@ -224,6 +224,32 @@ for (const harness of ['standard', 'pi']) {
   });
 }
 
+test('a second tool step waits until an accepted write is verified', async t => {
+  const c = await fixture(t);
+  c.runtime.connectorActions.createGrant({ connectorId: 'github', transfer: 'nonfinancial', confirmed: true });
+  const first = input(c);
+  const second = { ...input(c), request: { method: 'PATCH', path: '/repos/owner/repo/issues/43', body: { title: 'Second' } } };
+  let calls = 0;
+  // The model asks for two different writes in one assistant turn. The first
+  // is accepted without a read-back; the second must never reach the provider.
+  const reasoner = new OpenAiCompatibleReasoner({ baseUrl: 'https://model.invalid/v1', model: 'fixture', fetchImpl: async () => {
+    calls += 1;
+    if (calls > 1) return response({ choices: [{ message: { content: JSON.stringify({ nextStep: 'done', probes: [] }) } }] });
+    return response({ choices: [{ message: { content: null, tool_calls: [
+      { id: 'write-1', type: 'function', function: { name: 'platform_api', arguments: JSON.stringify(first) } },
+      { id: 'write-2', type: 'function', function: { name: 'platform_api', arguments: JSON.stringify(second) } }
+    ] } }] });
+  } });
+  c.engine.reasoner = c.engine.bindReasonerUsage(reasoner);
+  c.engine.externalTools = scope => c.runtime.wrapReadTools(c.runtime.tools(scope), scope.taskId);
+  c.runtime.scheduleTask(c.taskId, 'platform-accepted-gate'); c.runtime.kick(); await c.engine.whenSettled();
+  assert.equal(c.writes.length, 1, 'the second write must not run while the first is accepted but unverified');
+  const ledger = c.runtime.ledger.list().filter(item => item.action_family === 'connector.request');
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0].status, 'accepted');
+  assert.notEqual(c.runtime.tasks.get(c.taskId).status, 'completed');
+});
+
 test('missing provider fields never satisfy an expected null readback assertion', async t => {
   const c = await fixture(t), action = input(c);
   c.runtime.connectorActions.createGrant({ connectorId: 'github', confirmed: true });

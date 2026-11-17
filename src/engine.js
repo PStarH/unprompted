@@ -3069,7 +3069,8 @@ export class WorkEngine {
     // safe to retry: the provider never accepted the key.
     const execution = this.durableRuntime?.ledger.byKey(task.action.idempotencyKey);
     const provenNoEffect = task.action.live !== true && Boolean(execution) &&
-      (execution.status === 'cancelled' || (execution.status === 'failed' && execution.last_error_class === 'confirmed_absent'));
+      ((execution.status === 'cancelled' && !execution.dispatched_at) ||
+        (execution.status === 'failed' && execution.last_error_class === 'confirmed_absent'));
     if (task.action.live === true || (execution?.dispatched_at && !provenNoEffect)) {
       throw Object.assign(new Error('A live attempt that already started cannot be sent again under the same identity.'), { code: 'RETRY_NOT_SAFE', status: 409 });
     }

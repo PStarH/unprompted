@@ -2308,7 +2308,9 @@ document.addEventListener('click', async event => {
       const scope = { entity: task.request.subjectEntity, deliverable: task.request.deliverable };
       // First complete this action. A failed delivery never creates a standing grant.
       const result = await postJSON(ui`/api/tasks/${encodeURIComponent(task.id)}/approve`, { reviewToken: automate.dataset.reviewToken });
-      interactions?.noteResult(task.id, 'approve', result);
+      // The local workbench has no decision-receipt deck; the automation flow
+      // must not depend on an export this UI does not ship.
+      interactions?.noteResult?.(task.id, 'approve', result);
       if (result.status !== 'completed') {
         render(await (await fetch('/api/state')).json());
         toast(copy('发送结果尚未确认，暂未开启今后的自动跟进。'), true);

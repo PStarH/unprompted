@@ -3,7 +3,7 @@
 ## 0.5.1 — 2026-11-17
 
 This release merges the published 0.4.x `main` line with the 0.5.0 candidate
-and adds the following verified local behavior. It is a pre-1.0 preview; model
+and adds the following verified local behavior. It is a pre-1.0 preview; app
 signing and real-account acceptance remain separate work.
 
 ### Security and authority
