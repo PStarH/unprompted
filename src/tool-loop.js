@@ -11,7 +11,10 @@ export const TOOL_LOOP_LIMITS = Object.freeze({ turns: 4, calls: 8, contextChars
 const budgetCodes = new Set(['TOKEN_BUDGET_EXHAUSTED', 'MONEY_BUDGET_EXHAUSTED']);
 const sessionError = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
 const unresolved = new Set(['intent', 'dispatched', 'accepted', 'unknown']);
-const reconciled = new Set(['dispatched', 'accepted', 'unknown']);
+// Provider acceptance is not success for task completion, but it is a real
+// result the model may see; only an in-flight or unknown outcome blocks the
+// next model call and tool step.
+const reconciled = new Set(['dispatched', 'unknown']);
 
 function sourceRefs(tool) {
   const sources = Array.isArray(tool?.sources) ? tool.sources : (tool?.source ? [tool.source] : []);

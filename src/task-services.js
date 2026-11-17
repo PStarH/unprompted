@@ -8,6 +8,8 @@ import { rankCandidates } from './correlation.js';
 import { assessPlan } from './probes/assess.js';
 import { buildDeterministicPlan } from './probes/plan.js';
 import { interpretRequest } from './requests.js';
+import { PermissionDeniedError } from './permissions.js';
+import { autonomyCeiling, ceilingAllows, recordFollowThrough } from './follow-through.js';
 
 const stamp = () => new Date().toISOString();
 const normalise = value => String(value ?? '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
@@ -149,6 +151,19 @@ function conditionMet(wait, state, now, event = null) {
     return Boolean(current && current.available !== false && current.version > Number(wait.base?.documentVersion || 0) && eventMatch && (semanticChanged || requestChanged));
   }
   if (wait.kind === 'reply') {
+    const task = state.tasks?.[wait.taskId];
+    // An unknown or uncertain send is not evidence that the waited-for quote arrived.
+    if (['uncertain', 'unknown'].includes(task?.action?.status)) return false;
+    const quote = wait.condition?.quote;
+    if (quote) {
+      if (event?.type !== 'email.received' || !event.relations?.includes(wait.taskId)) return false;
+      const payload = event.payload || {};
+      if (payload.id && payload.id === wait.base?.messageId) return false;
+      const text = `${payload.subject || ''}\n${payload.body || ''}`.toLowerCase();
+      if (!text.includes(String(quote).toLowerCase())) return false;
+      const entity = String(wait.condition.subjectEntity || '').toLowerCase();
+      return !entity || text.includes(entity);
+    }
     const threadId = wait.condition.threadId;
     if (event && (event.type !== 'email.received' || event.payload?.threadId !== threadId || event.payload?.id === wait.base?.messageId)) return false;
     return (state.inbox || []).some(message => message.threadId === threadId && message.id !== wait.base?.messageId && Date.parse(message.receivedAt || '') > Date.parse(wait.createdAt));
@@ -312,10 +327,16 @@ export class TaskServices {
       base.documentContentSignature = hash(String(document.content || '').replace(/\s+/g, ' ').trim());
       base.requestSignature = requestSignature(task);
     } else if (kind === 'reply') {
+      const quote = safeId(dependsOn.quote);
       const threadId = safeId(dependsOn.threadId || message?.threadId || task.request?.source?.threadId);
-      if (!threadId) throw new Error('A reply wait requires the exact email thread ID.');
-      condition.threadId = threadId;
-      condition.label = `a reply in thread ${threadId}`;
+      if (!quote && !threadId) throw new Error('A reply wait requires the exact email thread ID or the missing quote.');
+      if (quote) {
+        condition.quote = quote;
+        condition.subjectEntity = safeId(dependsOn.subjectEntity || task.request?.subjectEntity);
+        condition.label = `the missing quote “${quote}”`;
+      }
+      if (threadId) condition.threadId = threadId;
+      if (!quote) condition.label = `a reply in thread ${threadId}`;
       base.messageId = message?.id || task.sourceEmailId || null;
       base.provider = this.store.state.events?.find(event => event.type === 'email.received' && event.payload?.id === base.messageId)?.source || null;
     } else {
@@ -357,6 +378,21 @@ export class TaskServices {
       };
       state.taskWaits[taskId] = wait;
       insertHistory(state, 'wait_requested', `User set a persistent ${kind} wait for task ${taskId}.`, taskId, at);
+      const waiting = state.tasks[taskId];
+      if (waiting) {
+        waiting.reason = 'Progress depends on an external event. The situation stays open.';
+        recordFollowThrough(waiting, {
+          decision: 'wait',
+          reason: waiting.reason,
+          ceiling: autonomyCeiling({
+            evidenceComplete: waiting.assessment?.complete === true,
+            evidenceMissing: waiting.assessment?.complete !== true,
+            nextStep: 'observe',
+            promisedNudge: Boolean(condition.quote)
+          }),
+          at
+        });
+      }
     });
     this.#changed();
     return wait;
@@ -533,8 +569,8 @@ export class TaskServices {
     const durable = this.engine?.durableRuntime;
     const durableFence = durable?.capture(taskId);
     if (autonomyGrantId) {
-      this.policy.authorize({ actionClass: 'execute_external', taskId,
-        approval: { permission: 'temporary_yolo', taskId, grantId: autonomyGrantId } });
+      const lease = this.engine?.autonomy?.grants().find(item => item.id === autonomyGrantId);
+      if (!this.engine?.autonomy?.valid(lease, taskId)) throw new PermissionDeniedError('The YOLO authorization expired, was revoked, or belongs to a different task.');
       authorization = { kind: 'temporary_yolo', confirmed: true, taskId, patchId, baseDocumentVersion: patch?.baseDocument.version };
     }
     if (task.control?.paused) throw new Error('This task is paused. Resume it before applying a document patch.');
@@ -546,6 +582,28 @@ export class TaskServices {
       throw new Error('Applying a document patch requires explicit consent bound to this task, patch ID, and base document version.');
     }
     if (shadowReviewed && authorization.kind === 'shadow_read_only') return { patch, task, result: patch.result };
+    if (authorization?.kind !== 'shadow_read_only') {
+      const automatic = Boolean(autonomyGrantId);
+      const activation = this.engine?.durableRuntime?.activationFor?.(task);
+      const reviewRequired = automatic && Boolean(task.guidanceReviewRequired || (activation && (!activation.activate || activation.requiresReview)));
+      const ceiling = autonomyCeiling({
+        evidenceComplete: true,
+        evidenceMissing: false,
+        approval: !automatic && authorization?.kind === 'explicit',
+        validGrant: automatic,
+        requiresReview: reviewRequired,
+        consequential: true,
+        nextStep: 'consequential',
+        proposedLevel: task.reasoning?.proposedCeiling || null,
+        paused: task.control?.paused === true
+      });
+      if (!ceilingAllows(ceiling, 'L4')) {
+        const error = new PermissionDeniedError(ceiling.reason);
+        error.code = reviewRequired ? 'REVIEW_REQUIRED' : 'CEILING';
+        error.ceiling = ceiling;
+        throw error;
+      }
+    }
     const consentAt = this.clock();
     this.store.mutate(state => {
       const current = state.documentPatches[patchId];
@@ -654,7 +712,14 @@ export class TaskServices {
       applied = durable ? await durable.external({ ...task, patchAuthorization }, {
         ...writeSpec, deferDispatch: true,
         send: (signal, guard) => provider.apply({ ...input, signal, beforeWrite: () => { guard(); beforeWrite(); } }),
-        verify: result => result?.readbackVerified || result?.simulated ? { status: 'found', receipt: { id: result.revisionId || patch.id, provider: patch.provider, status: 'verified' } } : { status: 'unknown' }
+        verify: async () => {
+          if (typeof provider.read !== 'function') return { status: 'unknown', detail: 'The document provider has no independent read.' };
+          const readback = await provider.read(currentDocument);
+          const actual = String(readback?.content || '').replace(/\r\n?/g, '\n');
+          const actualDigest = crypto.createHash('sha256').update(actual).digest('hex');
+          if (actualDigest !== writeSpec.effect.expectedContentDigest) return { status: 'unknown', detail: 'The independent document read did not match the patch digest.' };
+          return { status: 'found', receipt: { id: readback.revisionId || patch.id, provider: patch.provider, status: 'verified', idempotencyKey: writeSpec.key } };
+        }
       }) : await provider.apply(input);
     } catch (error) {
       if (durable && !durable.isCurrent(taskId, durableFence, { allowDirty: true })) throw Object.assign(new Error('The task was invalidated while the document operation was in flight. Its result requires reconciliation.'), { writeOutcomeUnknown: true });

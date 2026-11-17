@@ -98,6 +98,9 @@ export class DurableDatabase {
             // The current revision is the best available approximation.
             this.db.exec('UPDATE plan_step_experiences SET experience_revision=COALESCE((SELECT revision FROM experiences e WHERE e.id=experience_id),1)');
           }
+          const executions = new Set(this.db.pragma('table_info(tool_executions)').map(column => column.name));
+          if (!executions.has('evidence_json')) this.db.exec('ALTER TABLE tool_executions ADD COLUMN evidence_json TEXT');
+          if (!executions.has('authority_json')) this.db.exec('ALTER TABLE tool_executions ADD COLUMN authority_json TEXT');
           this.migrateMemorySpace();
           this.db.pragma(`user_version=${SQLITE_RUNTIME.schemaVersion}`);
         }
@@ -116,7 +119,7 @@ export class DurableDatabase {
   }
   atomic(callback) { return this.db.inTransaction ? callback(this.db) : this.writes.sync(callback); }
   write(callback) { return this.writes.write(callback); }
-  /** Additive, idempotent upgrade through v7 for the Memory Space storage layer.
+  /** Additive, idempotent upgrade through v8 for the Memory Space storage layer.
    * Existing rows keep their content; inactive task_memory sources become
    * deleted. Each memory gets one labelled baseline snapshot, never a
    * fabricated edit history. */

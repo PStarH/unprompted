@@ -263,6 +263,69 @@ set to one because HTTP servers and scenario runs can otherwise starve each
 other. A passing evaluation is evidence about its fixtures and invariants, not
 proof of production reliability, time savings, or an overall false-positive rate.
 
+## Release acceptance
+
+`test/release-acceptance.test.js` is the cross-module proof for the six scenes in
+[Release acceptance locked](RELEASE_ACCEPTANCE_LOCKED.md). Each scene asserts a
+happy path, a failure path, and a recovery path. The file is part of `npm test`.
+It uses the existing engine, SQLite store, waits, document patches, and simulated
+mail provider. It does not replace the companion suites below, and it does not
+copy them.
+
+| Scene | What the release file shows | Companion proof that stays separate |
+| --- | --- | --- |
+| 1. One commitment from mail and Slack | Gmail `email.received` and the Slack connector's own `email.received` direct-message event attach to one open Situation and the first task | `test/sync.test.js` for replayed provider events |
+| 2. Wait for the vendor, then resume | An active external wait stays in Waiting, a matching reply clears it and records the quote, and the existing prepare path continues without sending | `test/commitment-lifecycle.test.js` for restart that does not rewrite an unchanged wait |
+| 3. Do not overwrite a user's edit | A prepared patch is refused after the document changes; a revision mismatch does not write; an uncertain patch is not retried | `test/task-services.test.js` for the interrupted applying patch that recovers as uncertain |
+| 4. Approve, read back, do not send twice | One reviewed Cedar send is verified once | `test/send-authority-locked.test.js`, `test/workflow.test.js` for ledger, attestation, 429, and hung POST |
+| 5. Undo stops the mistake immediately | A scoped correction persists and the next matching event does not repeat it; a provider-accepted send is not unsent | `test/commitment-lifecycle.test.js` for withdrawal after acceptance |
+| 6. Crash and restart | Restart after acceptance does not send the Cedar reply again. Unknown lookup does not enable a second send | `test/full-chain-recovery.test.js` is the durable crash proof and is not duplicated here |
+
+Connector rows that already have proof stay in `test/connector-harness.test.js`,
+`test/connectors-slack-notion.test.js`, `test/sync.test.js`, and the Google and
+Outlook fixtures. `test/sync.test.js` also covers a scripted connector-pull 429:
+the cursor does not advance, the connector is not marked healthy, and another
+connector still proceeds. These checks are scripted HTTP and simulated providers.
+They are not production validation of live Google, Outlook, Slack, GitHub, or
+Notion accounts, and they do not exercise provider push delivery or macOS
+Automation.
+
+Miss, false-interrupt, and verified-completion counters beyond the existing
+`recordMiss` helper, notification resolution, and verified ledger status are a
+P1 gap. This proof does not add a metrics pipeline for them.
+
+## Product clauses
+
+`test/product-clauses.test.js` proves the four clauses in
+[Product clauses locked](PRODUCT_CLAUSES_LOCKED.md) on the existing WorkEngine
+lifecycle. The independent review is
+[Product clauses review](reviews/PRODUCT_CLAUSES_SPEC_REVIEW.md). The accepted
+contract is [Product contract](PRODUCT_CONTRACT.md). `test/connector-regression.test.js`
+runs the scripted connector matrix from that lock. Both files are part of
+`npm test`. They do not replace send-authority, Needs you, release-acceptance,
+autonomy, notification, or connector-harness suites.
+
+Each clause story asserts a happy path, a failure path, and a recovery path.
+Follow-through decisions (`continue`, `wait`, `ask`, `close`, `blocked`) and
+the L0–L4 ceiling are recorded on the task by the same ceiling function
+WorkEngine consults before execute, approve, document-patch, and send. The
+ceiling is a turn cap. It does not replace task status or the four Field zones.
+
+Recovery in that matrix is a later successful scripted pull on the same
+store after a failed 401, 429, 5xx, or timeout, and a reconnect after
+disconnect. It is not a replay of an already successful cursor. A revoked
+token is refreshed only by the next scripted token response. Withdrawn
+Notion source text is excluded with the same suppression policy the
+connector harness uses. These checks use scripted HTTP, simulated providers,
+and injected native responses. They are not production validation with real
+users, not live-account acceptance for Google, Outlook, Slack, GitHub,
+Notion, or Apple, and they do not exercise provider push delivery or macOS
+Automation. A real Notes, Mail,
+Reminders, Calendar, or Contacts Automation prompt still needs manual
+acceptance. `activationMetrics` may still report labeled rates as unknown.
+This proof does not add a metrics warehouse for Verified Completion Rate or
+the other named product metrics.
+
 ## Where to add a test
 
 | Change | Start here |

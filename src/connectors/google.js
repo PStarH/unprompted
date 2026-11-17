@@ -26,6 +26,8 @@ import { normalizeAddress } from '../commitments.js';
  */
 
 export const gmailMessageId = key => `<unprompted-${createHash('sha256').update(String(key)).digest('hex')}@unprompted.local>`;
+/** Statuses that mean Gmail did not create a message. 429, 401, and 403 are not in this list. */
+export const GMAIL_NO_MESSAGE_CREATED = new Set([400]);
 const legacyMessageId = key => `<unprompted-${String(key).replace(/[^a-zA-Z0-9]/g, '-')}@unprompted.local>`;
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1';
@@ -1087,16 +1089,20 @@ export class GoogleWorkspaceConnector extends Connector {
    * transient failure is reported as unknown so the caller blocks instead of
    * claiming completion.
    */
-  async verifyMessage(messageId, { signal = null } = {}) {
+  async verifyMessage(messageId, { signal = null, idempotencyKey = null } = {}) {
     const id = String(messageId ?? '').trim();
     if (!id) return { status: 'unknown', receipt: null, detail: 'No provider message id was available to read back.' };
     try {
-      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(id)}?format=minimal`, { signal });
-      if (message.id !== id || !message.labelIds?.includes('SENT')) return { status: 'unknown', receipt: null, detail: 'The provider did not confirm this exact message in Sent.' };
+      const message = await this.#request(`${GMAIL}/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Message-ID`, { signal });
+      const header = message.payload?.headers?.find(item => item.name?.toLowerCase() === 'message-id')?.value?.trim();
+      if (message.id !== id || !message.labelIds?.includes('SENT') || !header) return { status: 'unknown', receipt: null, detail: 'The provider did not confirm this exact message in Sent.' };
+      if (!idempotencyKey) return { status: 'unknown', receipt: null, detail: 'A direct read without this attempt\'s Message-ID is not evidence.' };
+      const expected = gmailMessageId(idempotencyKey);
+      if (header !== expected) return { status: 'unknown', receipt: null, detail: 'The direct read Message-ID does not match this attempt.' };
       return {
         status: 'found',
-        receipt: { id: message.id || id, threadId: message.threadId || null },
-        detail: 'Gmail returned the message by id.'
+        receipt: { id: message.id || id, threadId: message.threadId || null, messageId: header, idempotencyKey },
+        detail: 'Gmail returned the message by id and Message-ID.'
       };
     } catch (error) {
       if (error.status === 404) return { status: 'not_found', receipt: null, detail: 'Gmail reports no message with this id.' };

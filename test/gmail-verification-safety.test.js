@@ -25,5 +25,5 @@ test('Gmail search verifies the sent label and exact operation header before acc
 test('legacy Message-ID matches remain manual unless an original provider receipt is known', async () => {
   const provider = connector(async url => response(url.includes(encodeURIComponent(gmailMessageId('operation'))) ? { messages: [] } : url.includes('/messages?q=') ? { messages: [{ id: 'legacy' }] } : { id: 'legacy', labelIds: ['SENT'] }));
   assert.equal((await provider.verify('operation')).status, 'unknown');
-  assert.equal((await provider.verifyMessage('legacy')).status, 'found');
+  assert.equal((await provider.verifyMessage('legacy', { idempotencyKey: 'operation' })).status, 'unknown');
 });

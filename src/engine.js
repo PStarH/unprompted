@@ -4,7 +4,7 @@ import {
 } from './requests.js';
 import { createHash } from 'node:crypto';
 import {
-  commitmentScope, sameCommitment, requestRevisionSignature, isWithdrawalMessage,
+  commitmentScope, sameCommitment, openCommitmentTargets, requestRevisionSignature, isWithdrawalMessage,
   isRescheduleMessage, narrowCommitmentsByMessage, isTrustedThreadSender, unquotedMessageFields
 } from './commitments.js';
 import { rankCandidates } from './correlation.js';
@@ -16,6 +16,9 @@ import { STRATEGY_IDS } from './probes/strategies.js';
 import { determineFreshness, runRecord, relevantRuns } from './freshness.js';
 import { evidenceSignature, claim, unknownItem, sourceRef, evidenceItem } from './evidence.js';
 import { PermissionPolicy, PermissionDeniedError } from './permissions.js';
+import {
+  autonomyCeiling, ceilingAllows, recordFollowThrough, ledgeredSendEcho, userFinishedTask, applyUserFinished
+} from './follow-through.js';
 import { Autonomy } from './autonomy.js';
 import { ToolSafetyGateway, validReceipt } from './tool-gateway.js';
 import { SimulatedMailProvider, UncertainDeliveryError } from './providers.js';
@@ -381,11 +384,196 @@ export class WorkEngine {
       event.disposition = 'timer_due'; event.summary = 'Scheduled Situation reevaluation';
       this.store.mutate(state => state.events.push(event));
       result = { duplicate: false, id: event.id, disposition: event.disposition, relations: [] };
+      this.#evaluateDueTimer(event);
       this.changed();
     }
     else throw new Error(`Unhandled event type: ${event.type}`);
     if (!event.suppressForwardActivation || event.disposition === 'request_withdrawn') this.taskServices.processObservedEvent(event);
+    this.#resumePreparedWork(event);
     return result;
+  }
+
+  /** After a saved quote wait clears, keep preparing the same task. Never send from the reply itself. */
+  #resumePreparedWork(event) {
+    if (event?.type !== 'email.received') return;
+    for (const wait of Object.values(this.store.state.taskWaits || {})) {
+      if (wait.status !== 'resolved' || wait.kind !== 'reply' || wait.resolution?.eventId !== event.id) continue;
+      const task = this.store.state.tasks[wait.taskId];
+      if (!task || isSettled(task)) continue;
+      this.assess(wait.taskId, event.id, { force: true, allowAutomation: false });
+    }
+  }
+
+  /**
+   * A pinned timer reevaluates one Situation. An empty check does not call the
+   * model, notify, send, or open a draft. A promised quote check may prepare
+   * one nudge and still does not send.
+   */
+  #evaluateDueTimer(event) {
+    const situationId = event.payload?.situationId || null;
+    const taskId = event.payload?.taskId || null;
+    const named = Object.values(this.store.state.tasks).filter(task => {
+      if (taskId) return task.id === taskId;
+      if (situationId) return task.situationId === situationId;
+      return false;
+    });
+    const open = named.filter(task => !isSettled(task));
+    if (!open.length) return;
+    const promised = open.filter(task => this.#promisedCheck(task));
+    if (!promised.length) {
+      this.store.mutate(state => {
+        for (const task of open) {
+          const current = state.tasks[task.id];
+          if (!current || isSettled(current)) continue;
+          current.lastEvaluatedAt = event.at || stamp();
+        }
+      });
+      return;
+    }
+    for (const task of promised) this.#preparePromisedNudge(task.id, event);
+  }
+
+  #promisedCheck(task) {
+    const wait = this.store.state.taskWaits?.[task.id];
+    if (wait?.status !== 'active' || wait.kind !== 'reply' || !wait.condition?.quote) return false;
+    return !(task.resumedEvidence || []).some(item => item.quote === wait.condition.quote);
+  }
+
+  #preparePromisedNudge(taskId, event) {
+    const task = this.store.state.tasks[taskId];
+    if (!task || isSettled(task) || !this.#promisedCheck(task)) return;
+    const ceiling = autonomyCeiling({
+      evidenceComplete: false,
+      evidenceMissing: true,
+      promisedNudge: true,
+      nextStep: 'prepare',
+      reversibleDraft: true,
+      proposedLevel: task.reasoning?.proposedCeiling || null
+    });
+    if (!ceilingAllows(ceiling, 'L2')) return;
+    const at = event.at || stamp();
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      const wait = state.taskWaits?.[taskId];
+      if (!current || isSettled(current) || wait?.status !== 'active') return;
+      if (current.draft?.userEdited) return;
+      const provider = this.#providerForTask(current);
+      current.draft = {
+        kind: 'nudge',
+        to: current.sender,
+        subject: `Re: ${current.subject || 'follow-up'}`,
+        body: `Hi,\n\nChecking in on ${current.request?.subjectEntity || 'this request'}: ${wait.condition?.label || 'the promised check'} is still open. Nothing has been sent.\n`,
+        requestVersion: Number(current.commitment?.revision || 1),
+        providerKind: provider.kind,
+        live: Boolean(provider.live),
+        canSend: false,
+        preparedAt: at,
+        simulationOnly: provider.kind === 'simulated' || provider.live !== true
+      };
+      current.status = 'ready_for_approval';
+      current.reason = 'A nudge is prepared for approval. It was not sent.';
+      current.updatedAt = at;
+      recordFollowThrough(current, {
+        decision: 'ask',
+        reason: current.reason,
+        ceiling,
+        at
+      });
+      record(state, 'preparation', 'Prepared a nudge for the promised check. Nothing was sent.', taskId, event.id);
+    });
+  }
+
+  #assertCeiling(task, required, facts) {
+    const ceiling = autonomyCeiling({ ...this.#ceilingFacts(task), ...facts });
+    if (ceilingAllows(ceiling, required)) return ceiling;
+    const error = new Error(ceiling.reason);
+    error.ceiling = ceiling;
+    error.status = 403;
+    if (facts.requiresReview) {
+      error.code = 'REVIEW_REQUIRED';
+      error.message = 'An explicit user policy requires review before this task may act.';
+    } else if (facts.forgedGrant || facts.grantExpired || facts.grantRevoked) {
+      error.code = 'AUTHORIZATION_REQUIRED';
+    } else if (this.policy.shadow && required === 'L4') {
+      error.code = 'SHADOW_READ_ONLY';
+    } else {
+      error.code = 'CEILING';
+    }
+    throw error;
+  }
+
+  #ceilingFacts(task) {
+    const contradictory = (task?.evidence?.conflicts || []).some(item => String(item?.id || '').startsWith('conflicting:'))
+      || task?.evidence?.freshness?.status === 'contradictory';
+    const unavailable = Boolean(task?.documentId && this.store.state.documents?.[task.documentId]?.available === false);
+    const withdrawn = Boolean(task?.sourceUnavailable) || unavailable;
+    const complete = task?.assessment?.complete === true && !contradictory && !withdrawn;
+    return {
+      evidenceComplete: complete,
+      evidenceMissing: !complete,
+      contradictory,
+      sourceWithdrawn: withdrawn,
+      proposedLevel: task?.reasoning?.proposedCeiling || null,
+      paused: task?.control?.paused === true
+    };
+  }
+
+  /** Record the decision and the ceiling this turn actually obeyed. */
+  #stampFollowThrough(task, state, at = stamp(), hints = {}) {
+    if (!task) return;
+    const wait = state?.taskWaits?.[task.id];
+    const contradictory = (task.evidence?.conflicts || []).some(item => String(item.id || '').startsWith('conflicting:'))
+      || task.evidence?.freshness?.status === 'contradictory';
+    const unavailable = hints.unavailableDocument === true || Boolean(task.documentId && state?.documents?.[task.documentId]?.available === false);
+    const withdrawn = Boolean(task.sourceUnavailable) || unavailable;
+    const cannot = contradictory || withdrawn;
+    const asking = task.status === 'ready_for_approval' && !cannot;
+    let decision = 'continue';
+    let closeKind = null;
+    let reason = task.reason || null;
+    if (task.status === 'completed') {
+      decision = 'close';
+      closeKind = task.completion?.kind === 'user_finished' ? 'user_finished' : 'verified';
+      reason = reason || (closeKind === 'user_finished'
+        ? 'The user finished this work. Nothing was sent.'
+        : 'The closure condition was verified.');
+    } else if (task.status === 'cancelled') {
+      decision = 'close';
+      closeKind = 'cancelled';
+      reason = reason || 'The user cancelled this work. Nothing was sent.';
+    } else if (cannot) {
+      decision = 'blocked';
+      reason = reason || (task.sourceUnavailable
+        ? 'The required source is unavailable. The work was not closed.'
+        : unavailable
+          ? 'The required document is unavailable. The work was not closed.'
+          : 'Evidence is contradictory. The work was not closed.');
+      task.reason = reason;
+    } else if (asking) {
+      decision = 'ask';
+      reason = reason || 'A draft is ready and send is not authorized.';
+    } else if (wait?.status === 'active') {
+      decision = 'wait';
+      reason = reason || 'Progress depends on an external event. The situation stays open.';
+    } else {
+      decision = 'continue';
+      reason = reason || 'Evidence is still missing. The agent keeps responsibility and has not closed the work.';
+    }
+    const promised = wait?.status === 'active' && wait.kind === 'reply' && Boolean(wait.condition?.quote);
+    const ceiling = autonomyCeiling({
+      evidenceComplete: task.assessment?.complete === true && !cannot,
+      evidenceMissing: task.assessment?.complete !== true || cannot,
+      contradictory,
+      sourceWithdrawn: withdrawn,
+      nextStep: asking ? 'consequential' : promised || task.draft ? 'prepare' : 'investigate',
+      promisedNudge: promised || task.draft?.kind === 'nudge',
+      reversibleDraft: Boolean(task.draft) && !asking,
+      approval: false,
+      consequential: asking,
+      proposedLevel: task.reasoning?.proposedCeiling || null,
+      paused: task.control?.paused === true
+    });
+    recordFollowThrough(task, { decision, reason, ceiling, at, closeKind });
   }
 
   #requestHistoryEntry(request, message, event, kind, revision, at = sourceTimestamp(message, event)) {
@@ -414,6 +602,38 @@ export class WorkEngine {
       task.requestHistory.push(this.#requestHistoryEntry(request || task.request, message, event, kind, revision, at));
       if (task.requestHistory.length > 100) task.requestHistory.splice(0, task.requestHistory.length - 100);
     }
+  }
+
+  /**
+   * Attach a later source that names an already open subject and deliverable.
+   * Returns 1 when linked, 0 when nothing matches, and more than 1 when the
+   * match is ambiguous. The first task id is kept either way.
+   */
+  #attachLinkedCommitment(state, request, message, event) {
+    const matches = openCommitmentTargets(state.tasks, request, event);
+    if (matches.length !== 1) return matches.length;
+    const task = state.tasks[matches[0].id];
+    this.#appendCommitmentSource(task, request, message, event, 'linked_source');
+    event.relations = [task.id];
+    event.disposition = 'linked_commitment';
+    record(state, 'linked_commitment',
+      'A later message names the same subject and deliverable as an open commitment; it was attached to that task. No second task was created and nothing was sent.',
+      task.id, event.id);
+    return 1;
+  }
+
+  #matchingQuoteWait(state, message) {
+    const text = `${message?.subject || ''}\n${message?.body || ''}`.toLowerCase();
+    const matches = Object.values(state.taskWaits || {}).filter(wait => {
+      if (wait?.status !== 'active' || wait.kind !== 'reply' || !wait.condition?.quote) return false;
+      const task = state.tasks?.[wait.taskId];
+      if (!task || ['uncertain', 'unknown'].includes(task.action?.status)) return false;
+      if (message?.id && message.id === wait.base?.messageId) return false;
+      if (!text.includes(String(wait.condition.quote).toLowerCase())) return false;
+      const entity = String(wait.condition.subjectEntity || '').toLowerCase();
+      return !entity || text.includes(entity);
+    });
+    return matches.length === 1 ? matches[0] : null;
   }
 
   #makeRequestTask(state, request, message, event) {
@@ -646,6 +866,28 @@ export class WorkEngine {
       else current.inbox[messageIndex] = observedMessage;
       event.summary = `Email received · ${message.subject}`;
 
+      if (ledgeredSendEcho(message, current)) {
+        event.disposition = 'self_echo';
+        event.summary = 'A ledgered agent send echoed back and did not start new work.';
+        record(current, 'observation', event.summary, null, event.id);
+        return;
+      }
+
+      const finished = userFinishedTask(message, current, { requestFound: Boolean(request) });
+      if (finished) {
+        const target = current.tasks[finished.id];
+        const at = sourceAt || stamp();
+        applyUserFinished(target, {
+          at,
+          reason: 'The user already finished this deliverable in the thread. Nothing was sent.'
+        });
+        event.disposition = 'user_finished';
+        event.relations = [target.id];
+        event.summary = `User finished · ${target.request?.subjectEntity || message.subject}`;
+        record(current, 'user_finished', target.reason, target.id, event.id);
+        return;
+      }
+
       if (event.meta.originClass === 'AUTOMATION') {
         event.disposition = 'context_only';
         event.rejection = { code: 'automated_response', detail: 'Provider metadata identifies this message as automated; it cannot independently create work.' };
@@ -760,6 +1002,21 @@ export class WorkEngine {
           }
           event.relations = editedTargets.map(task => task.id);
         }
+        const quoteWait = !previousMessage && this.#matchingQuoteWait(current, message);
+        if (quoteWait) {
+          const waiting = current.tasks[quoteWait.taskId];
+          const quote = quoteWait.condition.quote;
+          waiting.resumedEvidence = [...(waiting.resumedEvidence || []), {
+            quote, eventId: event.id, messageId: message.id, at: sourceAt
+          }].slice(-20);
+          event.disposition = 'wait_resumed';
+          event.relations = [waiting.id];
+          event.summary = `Reply supplied the missing quote · ${waiting.request?.subjectEntity || message.subject}`;
+          record(current, 'evidence',
+            `A later message supplied the missing quote “${quote}”. The saved wait can clear and preparation continues. Nothing was sent.`,
+            waiting.id, event.id);
+          return;
+        }
         event.disposition = 'context_only';
         event.rejection = rejection || { code: 'unknown', detail: 'No request was identified.' };
         if (trusted.length > 1 && (isWithdrawalMessage(message) || isRescheduleMessage(message))) {
@@ -804,6 +1061,17 @@ export class WorkEngine {
         allowAutomation = false;
         event.disposition = 'request_revision';
         return;
+      }
+
+      if (matchCandidates.length === 0) {
+        const linked = this.#attachLinkedCommitment(current, request, message, event);
+        if (linked > 1) {
+          event.disposition = 'context_only';
+          event.rejection = { code: 'ambiguous_commitment', detail: 'This request names a subject and deliverable already shared by more than one open commitment; no task was merged or created.' };
+          record(current, 'observation', event.rejection.detail, null, event.id);
+          return;
+        }
+        if (linked === 1) return;
       }
 
       const task = this.#makeRequestTask(current, request, message, event);
@@ -929,6 +1197,14 @@ export class WorkEngine {
             taskId = assess ? task.id : null;
             targetEvent.disposition = 'request_revision';
           }
+        } else if (this.#attachLinkedCommitment(state, request, message, event) === 1) {
+          taskId = null;
+          assess = false;
+        } else if (openCommitmentTargets(state.tasks, request, event).length > 1) {
+          targetEvent.disposition = 'context_only';
+          targetEvent.rejection = { code: 'ambiguous_commitment', detail: 'The grounded request names a subject and deliverable already shared by more than one open commitment; no task was merged or created.' };
+          targetEvent.reasoning = { ...targetEvent.reasoning, status: 'no_candidate', finishedAt: stamp(), detail: targetEvent.rejection.detail };
+          return;
         } else {
           const task = this.#makeRequestTask(state, request, message, event);
           taskId = task.id;
@@ -1111,6 +1387,13 @@ export class WorkEngine {
       for (const id of relations) {
         state.tasks[id].sourceUnavailable = { reason, at: event.at || stamp(), eventId: event.id };
         state.tasks[id].updatedAt = stamp();
+        state.tasks[id].reason = `The source message is no longer available (${reason}). The work was not closed.`;
+        recordFollowThrough(state.tasks[id], {
+          decision: 'blocked',
+          reason: state.tasks[id].reason,
+          ceiling: autonomyCeiling({ sourceWithdrawn: true, evidenceComplete: false, evidenceMissing: true, nextStep: 'observe' }),
+          at: state.tasks[id].updatedAt
+        });
       }
       event.relations = relations;
       event.disposition = relations.length ? 'evidence_invalidated' : 'unrelated_change';
@@ -1611,6 +1894,12 @@ export class WorkEngine {
       : null;
     const observations = [
       ...scan.observations,
+      ...(task.resumedEvidence || []).map(item => ({
+        id: `resumed_quote:${item.messageId || item.eventId}`,
+        detail: `The missing quote arrived: ${item.quote}`,
+        quote: item.quote,
+        eventId: item.eventId || null
+      })),
       ...(unavailable ? [{
         id: `unavailable_document:${unavailable.id}`,
         detail: `Document ${unavailable.id} is no longer available (${unavailable.unavailableReason || 'unknown reason'}); it is not used as current evidence.`
@@ -1656,6 +1945,7 @@ export class WorkEngine {
       unverifiable: plan.unverifiable.map(item => ({ text: item.text, reason: item.reason })),
       feedbackExcluded: feedbackExcluded.sort(),
       ...(plan.restoreBlocked ? { planValidity: 'blocked' } : {}),
+      ...(task.resumedEvidence?.length ? { resumedQuotes: task.resumedEvidence.map(item => [item.messageId || null, item.quote || null]) } : {}),
       // The competing sources and their versions are part of what this
       // assessment depends on: a revision of a runner-up can change the
       // verification outcome even when the chosen document is untouched.
@@ -1901,6 +2191,7 @@ export class WorkEngine {
         ].filter(Boolean).join(' · ');
         record(current, 'assessment', `Checked ${task.request.subjectEntity}: ${why || completion.reason}`, taskId, eventId);
       }
+      this.#stampFollowThrough(target, current, stamp(), { unavailableDocument: Boolean(unavailable) });
     });
 
     this.#addTrace(traceEntry({
@@ -2081,11 +2372,48 @@ export class WorkEngine {
       throw new Error(reason);
     }
 
-    const approval = { permission: options.autonomyGrantId ? 'temporary_yolo' : 'user_approved', taskId,
-      ...(options.autonomyGrantId ? { grantId: options.autonomyGrantId } : {}), approvedAt: stamp() };
+    if (provider.live && !this.policy.shadow && provider.canSend === false) throw new PermissionDeniedError('Delivery is not enabled for this source. The reply remains available to copy.');
+    const priorVerified = this.#verifiedPriorSend(task);
+    if (priorVerified) return this.#completeVerifiedPrior(taskId, priorVerified, provider);
+    const attested = task.lastLiveAttemptClass === 'user_attested_absent' && provider.live !== false;
+    if (options.autonomyGrantId && attested) throw Object.assign(new Error('YOLO will not send a replacement after you confirmed the previous attempt is absent.'), { code: 'AUTHORIZATION_REQUIRED', status: 403, definitiveNoEffect: true });
+    const sendAttempt = attested ? Number(task.sendAttempt || 1) + 1 : Number(task.sendAttempt || 1);
+    const requestVersion = Number(task.commitment?.revision || 1);
+    const actionVersion = Number(task.actionVersion || 0) + 1;
+    const versionSuffix = (requestVersion > 1 ? `:r${requestVersion}` : '') + (this.durableRuntime ? `:i${task.inputVersion}` : '');
+    const attemptSuffix = sendAttempt > 1 ? `:a${sendAttempt}` : '';
+    const idempotencyKey = `send:${taskId}:${document.version}${versionSuffix}${attemptSuffix}`;
+    const payload = {
+      idempotencyKey,
+      to: task.draft.to,
+      subject: task.draft.subject,
+      body: task.draft.body,
+      documentUrl: task.draft.documentUrl,
+      threadId: this.store.state.inbox.find(item => item.id === task.sourceEmailId)?.threadId || null
+    };
+    const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(payload.body).digest('hex') };
+    const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
+    let decision;
     try {
-      this.policy.authorize({ actionClass: 'execute_external', approval, taskId });
-      if (provider.live && provider.canSend === false) throw new PermissionDeniedError('Delivery is not enabled for this source. The reply remains available to copy.');
+      if (this.policy.shadow) this.policy.authorize({ actionClass: 'execute_external', taskId });
+      const automatic = Boolean(options.autonomyGrantId);
+      const lease = automatic ? this.autonomy.grants().find(item => item.id === options.autonomyGrantId) : null;
+      const activation = this.durableRuntime?.activationFor?.(task);
+      this.#assertCeiling(task, 'L4', {
+        evidenceComplete: true,
+        evidenceMissing: false,
+        sourceWithdrawn: false,
+        contradictory: false,
+        approval: !automatic,
+        validGrant: automatic && this.autonomy.valid(lease, taskId),
+        requiresReview: automatic && Boolean(task.guidanceReviewRequired || (activation && (!activation.activate || activation.requiresReview))),
+        forgedGrant: automatic && !this.autonomy.valid(lease, taskId),
+        consequential: true,
+        nextStep: 'consequential',
+        proposedLevel: options.proposedLevel || task.reasoning?.proposedCeiling || null,
+        paused: false
+      });
+      decision = this.toolGateway.decide({ phase: 'issue', origin: options.autonomyGrantId ? 'yolo' : 'approval', grantId: options.autonomyGrantId || null, taskId, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: idempotencyKey, payload, effect });
     } catch (error) {
       if (error instanceof PermissionDeniedError) {
         this.#addTrace(traceEntry({
@@ -2099,16 +2427,21 @@ export class WorkEngine {
       throw error;
     }
 
-    const requestVersion = Number(task.commitment?.revision || 1);
-    const actionVersion = Number(task.actionVersion || 0) + 1;
-    const versionSuffix = (requestVersion > 1 ? `:r${requestVersion}` : '') + (this.durableRuntime ? `:i${task.inputVersion}` : '');
+    const approval = {
+      permission: decision.credential.kind === 'yolo' ? 'temporary_yolo' : 'user_approved',
+      taskId,
+      ...(decision.credential.kind === 'yolo' ? { grantId: decision.credential.id } : {}),
+      approvedAt: stamp()
+    };
     const action = {
-      id: `send:${taskId}:${document.version}${versionSuffix}`,
-      idempotencyKey: `send:${taskId}:${document.version}${versionSuffix}`,
+      id: idempotencyKey,
+      idempotencyKey,
       version: actionVersion,
+      sendAttempt,
       commitmentRevision: requestVersion,
       ...(this.durableRuntime ? { inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch } : {}),
       actionClass: 'execute_external',
+      authority: { kind: decision.credential.kind, id: decision.credential.id, version: decision.credential.version },
       ...approval,
       approvedAt: approval.approvedAt,
       status: 'executing',
@@ -2123,6 +2456,14 @@ export class WorkEngine {
       state.tasks[taskId].action = action;
       delete state.tasks[taskId].autonomyError;
       record(state, 'approval', `${options.autonomyGrantId ? 'Temporary YOLO authorized' : 'User approved'} the reply. Checking the ${provider.kind} provider before and after sending.`, taskId);
+      recordFollowThrough(state.tasks[taskId], {
+        decision: 'continue',
+        reason: 'The approved send is in verification. It is not closed until read-back succeeds.',
+        ceiling: autonomyCeiling({ evidenceComplete: true, approval: !options.autonomyGrantId, validGrant: Boolean(options.autonomyGrantId), consequential: true, nextStep: 'consequential' }),
+        at: stamp()
+      });
+      state.tasks[taskId].sendAttempt = sendAttempt;
+      if (!options.autonomyGrantId) delete state.tasks[taskId].lastLiveAttemptClass;
     });
     this.#addTrace(traceEntry({
       stage: 'policy', taskId,
@@ -2275,12 +2616,49 @@ export class WorkEngine {
   #executeAction(taskId, options = {}) {
     const task = this.#requireTask(taskId);
     if (!task.action) throw new Error('External action has no approval');
-    // The approval lives inside this task's own record, so its ownership is
-    // structural rather than carried in the payload. Bind it explicitly: an
-    // action stored by an older workspace did not record taskId, and it must not
-    // be mistaken for an approval granted to some other task. A stored taskId
-    // that disagrees is still refused by the policy.
-    this.policy.authorize({ actionClass: task.action.actionClass || 'execute_external', approval: { ...task.action, taskId: task.action.taskId ?? taskId }, taskId });
+    const provider = this.#providerForTask(task);
+    const payload = {
+      idempotencyKey: task.action.idempotencyKey,
+      to: task.draft?.to, subject: task.draft?.subject, body: task.draft?.body, documentUrl: task.draft?.documentUrl,
+      threadId: this.store.state.inbox.find(item => item.id === task.sourceEmailId)?.threadId || null
+    };
+    const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(String(payload.body || '')).digest('hex') };
+    const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
+    if (!this.policy.shadow) {
+      const yolo = task.action?.permission === 'temporary_yolo';
+      const lease = yolo ? this.autonomy.grants().find(item => item.id === task.action?.grantId) : null;
+      const standing = task.action?.permission === 'pre_authorized'
+        ? grantFor(this.store.state.calibrations || {}, { entity: task.request?.subjectEntity, deliverable: task.request?.deliverable })
+        : null;
+      this.#assertCeiling(task, 'L4', {
+        evidenceComplete: task.assessment?.complete === true,
+        evidenceMissing: task.assessment?.complete !== true,
+        approval: task.action?.permission === 'user_approved',
+        validGrant: (yolo && this.autonomy.valid(lease, taskId)) || standing?.value === 'allow',
+        forgedGrant: yolo && !this.autonomy.valid(lease, taskId),
+        consequential: true,
+        nextStep: 'consequential',
+        proposedLevel: options.proposedLevel || task.reasoning?.proposedCeiling || null
+      });
+    }
+    // AuthorityGate.decide is the single authorization for this dispatch. It
+    // reads the approval from this task's own action record, binds the action
+    // to this taskId (an older action without one is not an approval granted
+    // elsewhere), and runs the policy once. A separate policy call here would
+    // authorize the same effect twice.
+    this.toolGateway.decide({ phase: 'beforeDispatch', taskId, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: task.action.idempotencyKey, payload, effect });
+    if (provider.live === true && !this.durableRuntime) {
+      this.store.mutate(state => {
+        const current = state.tasks[taskId];
+        current.actionHistory = [...(current.actionHistory || []), { ...current.action, status: 'withheld_before_dispatch' }].slice(-50);
+        current.action = null;
+        current.status = 'ready_for_approval';
+        current.guidanceReviewRequired = true;
+        current.reason = 'This live send needs the local workspace database before anything is sent.';
+      });
+      this.changed();
+      return this.store.state.tasks[taskId];
+    }
 
     const actionId = task.action.id;
     const actionIdentity = { id: actionId, version: task.action.version, ...(this.durableRuntime ? { durableFence: this.durableRuntime.capture(taskId) } : {}) };
@@ -2292,7 +2670,7 @@ export class WorkEngine {
     // Reconcile FIRST: a previous timeout may have occurred after acceptance.
     return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), before => {
       if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
-      if (before.status === 'found') return this.confirm(taskId, before.receipt, true, 'lookup');
+      if (before.status === 'found') return this.#confirmFound(taskId, before.receipt);
       if (before.status === 'unknown') return this.uncertain(taskId, before.detail || 'The provider cannot confirm whether the message was accepted. No retry was attempted.');
       if (!this.#actionIsCurrent(taskId, actionId)) return this.#finalizeSupersededAction(taskId, actionId);
       this.store.mutate(state => {
@@ -2301,6 +2679,7 @@ export class WorkEngine {
       });
       return this.#resolve(this.#sendSafely(task, options), outcome => {
         if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
+        if (outcome.prior) return this.#confirmPrior(taskId, outcome.prior);
         if (outcome.denied) {
           this.store.mutate(state => {
             const current = state.tasks[taskId];
@@ -2309,8 +2688,28 @@ export class WorkEngine {
           });
           this.changed(); return this.store.state.tasks[taskId];
         }
-        if (outcome.blocked) return this.uncertain(taskId, outcome.blocked);
+        if (outcome.blocked) {
+          const execution = this.durableRuntime?.ledger.byKey(this.store.state.tasks[taskId]?.action?.idempotencyKey);
+          if (execution && !execution.dispatched_at && ['cancelled', 'failed'].includes(execution.status)) {
+            this.store.mutate(state => {
+              const current = state.tasks[taskId];
+              if (!current?.action) return;
+              current.status = 'blocked';
+              current.action.status = 'confirmed_absent';
+              current.reason = outcome.blocked;
+              record(state, 'reconciliation', outcome.blocked, taskId);
+            });
+            this.changed();
+            return this.store.state.tasks[taskId];
+          }
+          return this.uncertain(taskId, outcome.blocked);
+        }
         if (outcome.receipt) {
+          if (this.durableRuntime) {
+            const row = this.durableRuntime.ledger.byKey(this.store.state.tasks[taskId]?.action?.idempotencyKey);
+            if (row?.status === 'verified') return this.confirm(taskId, outcome.receipt, false, 'receipt');
+            return this.uncertain(taskId, 'The provider accepted a send, but the message was not read back with the expected Message-ID. It was not sent again.', { status: 'accepted_live', receipt: outcome.receipt });
+          }
           // Accepted is not verified. Read the message back before claiming it exists.
           return this.#resolve(this.#verifyReceiptSafely(outcome.receipt, this.#providerForTask(task)), verification => {
             if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
@@ -2322,9 +2721,13 @@ export class WorkEngine {
             );
           });
         }
+        const failedExecution = this.durableRuntime?.ledger.byKey(this.store.state.tasks[taskId]?.action?.idempotencyKey);
+        if (failedExecution?.provider_receipt_id && ['accepted', 'unknown', 'dispatched'].includes(failedExecution.status)) {
+          return this.uncertain(taskId, failedExecution.status === 'accepted' ? 'The provider accepted the message but it could not be independently verified. Completion was not claimed and no retry was attempted.' : 'The provider cannot confirm whether the message was accepted. No retry was attempted.', { status: failedExecution.provider_receipt_id ? 'accepted_live' : 'uncertain', receipt: failedExecution.provider_receipt_id ? { id: failedExecution.provider_receipt_id } : null });
+        }
         return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), after => {
           if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
-          if (after.status === 'found') return this.confirm(taskId, after.receipt, true, 'lookup');
+          if (after.status === 'found') return this.#confirmFound(taskId, after.receipt);
           if (after.status === 'unknown') return this.uncertain(taskId, after.detail);
           const current = this.store.state.tasks[taskId];
           if (current?.pendingCommitmentChange && !current.action?.receiptId) return this.#finalizeSupersededAction(taskId, actionId);
@@ -2348,30 +2751,127 @@ export class WorkEngine {
       };
       const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(payload.body).digest('hex') };
       const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
-      result = this.durableRuntime ? this.durableRuntime.external(task, {
-        provider, tool: 'send', actionFamily: 'email.send', resourceId,
-        key: task.action.idempotencyKey,
-        effect,
-        payload, deferDispatch: provider.dispatchGuard === true, send: (signal, beforeDispatch) => provider.send(payload, options.failureMode, { signal, beforeDispatch })
-      }) : provider.send(payload, options.failureMode, { beforeDispatch: () => this.toolGateway.authorize({ taskId: task.id, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: task.action.idempotencyKey, payload, effect }) });
+      if (provider.live === true && !this.durableRuntime) {
+        throw Object.assign(new Error('This live send needs the local workspace database before anything is sent.'), { code: 'LEDGER_REQUIRED', status: 409, definitiveNoEffect: true });
+      }
+      const prior = this.durableRuntime ? this.#openPriorSend(task) : null;
+      const dispatched = () => Promise.resolve(this.#dispatchSend(task, provider, payload, effect, resourceId, options)).then(value => ({ receipt: value || null }), error => this.#sendFailure(error));
+      if (prior?.then) return prior.then(found => found ? { prior: found } : dispatched());
+      if (prior) return { prior };
+      result = this.durableRuntime ? dispatched() : this.#dispatchSend(task, provider, payload, effect, resourceId, options);
     } catch (error) {
       return this.#sendFailure(error);
     }
-    if (result && typeof result.then === 'function') {
-      return result.then(value => ({ receipt: value || null }), error => this.#sendFailure(error));
-    }
+    if (result && typeof result.then === 'function') return result;
     return { receipt: result || null };
   }
 
+  #verifiedPriorSend(task) {
+    if (!this.durableRuntime || !task?.draft?.body) return null;
+    const bodyDigest = createHash('sha256').update(task.draft.body).digest('hex');
+    return this.durableRuntime.db.prepare("SELECT * FROM tool_executions WHERE task_id=? AND action_family='email.send' AND status='verified'").all(task.id).find(row => {
+      try { return JSON.parse(row.effect_signature_json).bodyDigest === bodyDigest; } catch { return false; }
+    }) || null;
+  }
+  #completeVerifiedPrior(taskId, execution, provider) {
+    const receipt = JSON.parse(execution.result_json);
+    this.store.mutate(state => {
+      const task = state.tasks[taskId];
+      task.status = 'verifying';
+      task.action = { id: execution.idempotency_key, idempotencyKey: execution.idempotency_key, version: Number(task.actionVersion || 0) + 1, sendAttempt: task.sendAttempt || 1, actionClass: 'execute_external', permission: 'user_approved', status: 'executing', providerKind: provider.kind, live: Boolean(provider.live), receiptId: receipt?.id || execution.provider_receipt_id };
+    });
+    return this.confirm(taskId, receipt, true, 'lookup');
+  }
+  #openPriorSend(task) {
+    if (!task?.action || !task.draft?.body) return null;
+    const bodyDigest = createHash('sha256').update(task.draft.body).digest('hex');
+    const priors = this.durableRuntime.db.prepare("SELECT * FROM tool_executions WHERE task_id=? AND action_family='email.send' AND idempotency_key!=?").all(task.id, task.action.idempotencyKey).filter(row => {
+      try { return JSON.parse(row.effect_signature_json).bodyDigest === bodyDigest; } catch { return false; }
+    });
+    const verified = priors.find(row => row.status === 'verified');
+    if (verified) return verified;
+    if (!priors.length) return null;
+    const provider = this.#providerForTask(task);
+    return (async () => {
+      for (const row of priors) {
+        const lookup = await Promise.resolve(this.#lookupSafely(row.idempotency_key, { receiptId: row.provider_receipt_id }, provider));
+        if (lookup?.status !== 'found') continue;
+        await this.durableRuntime.ledger.reconcile(row.id, { ...provider, live: provider.live === true, lookup: (key, options) => provider.lookup(key, options) });
+        const current = this.durableRuntime.ledger.get(row.id);
+        if (current?.status === 'verified') return current;
+      }
+      return null;
+    })();
+  }
+  #confirmPrior(taskId, execution) {
+    const receipt = JSON.parse(execution.result_json);
+    this.store.mutate(state => {
+      const task = state.tasks[taskId];
+      if (!task?.action) return;
+      task.action.idempotencyKey = execution.idempotency_key;
+      task.action.id = execution.idempotency_key;
+    });
+    return this.confirm(taskId, receipt, true, 'lookup');
+  }
+  attestAbsent(taskId) {
+    const task = this.#requireTask(taskId);
+    if (!task.action || !['uncertain', 'accepted_live', 'executing'].includes(task.action.status)) throw Object.assign(new Error('Attest only an inconclusive attempt that was not verified.'), { code: 'RECONCILIATION_REQUIRED', status: 409 });
+    const execution = this.durableRuntime?.ledger.byKey(task.action.idempotencyKey);
+    if (execution?.status === 'verified') throw Object.assign(new Error('A verified send cannot be attested absent.'), { code: 'RECONCILIATION_REQUIRED', status: 409 });
+    if (execution) this.durableRuntime.ledger.attestAbsent(execution.id);
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      current.actionHistory = [...(current.actionHistory || []), { ...current.action, status: 'user_attested_absent' }].slice(-50);
+      if (current.action.live) current.lastLiveAttemptClass = 'user_attested_absent';
+      current.sendAttempt = current.action.sendAttempt || current.sendAttempt || 1;
+      current.action = null;
+      current.status = 'ready_for_approval';
+      current.reason = 'You confirmed this attempt is not in Sent. Nothing was sent by that confirmation.';
+      record(state, 'attestation', current.reason, taskId);
+    });
+    this.#refreshAttention();
+    this.changed();
+    return this.store.state.tasks[taskId];
+  }
+  #dispatchSend(task, provider, payload, effect, resourceId, options) {
+    const verify = async accepted => {
+      const direct = await Promise.resolve(this.#verifyReceiptSafely(accepted, provider));
+      if (direct?.status === 'found') return direct;
+      if (direct?.status === 'not_found' && typeof provider.lookup === 'function') return Promise.resolve(this.#lookupSafely(accepted?.idempotencyKey, { receiptId: accepted?.id }, provider));
+      return direct;
+    };
+    return this.durableRuntime ? this.durableRuntime.external(task, {
+      provider, tool: 'send', actionFamily: 'email.send', resourceId,
+      key: task.action.idempotencyKey,
+      effect, payload, deferDispatch: provider.dispatchGuard === true,
+      verify, send: (signal, beforeDispatch) => provider.send(payload, options.failureMode, { signal, beforeDispatch })
+    }) : provider.send(payload, options.failureMode, { beforeDispatch: () => this.toolGateway.decide({ taskId: task.id, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: task.action.idempotencyKey, payload, effect, phase: 'beforeDispatch' }) });
+  }
   #sendFailure(error) {
+    if (error.code === 'LEDGER_REQUIRED') return { denied: true, blocked: error.message, code: error.code };
     if (error.definitiveNoEffect && error.code === 'SOURCE_UNAVAILABLE') return { denied: true, blocked: error.message };
-    if (error.definitiveNoEffect && ['AUTHORIZATION_REQUIRED', 'REVIEW_REQUIRED', 'ACTIVATION_SUPPRESSED'].includes(error.code)) return { denied: true, blocked: 'Authorization changed before dispatch. Nothing was sent; review the draft before continuing.' };
+    if (['AUTHORIZATION_REQUIRED', 'REVIEW_REQUIRED', 'ACTIVATION_SUPPRESSED', 'GRANT_INACTIVE', 'GRANT_SCOPE', 'EFFECT_MISMATCH', 'SHADOW_READ_ONLY'].includes(error.code) && error.dispatched !== true) return { denied: true, blocked: 'Authorization changed before dispatch. Nothing was sent; review the draft before continuing.' };
     if (error instanceof UncertainDeliveryError || error.ambiguous) return {};
     return { blocked: `Delivery failed: ${error.message}. No automatic retry was attempted.` };
   }
 
+  #confirmFound(taskId, receipt) {
+    if (!this.durableRuntime) return this.confirm(taskId, receipt, true, 'lookup');
+    const key = this.store.state.tasks[taskId]?.action?.idempotencyKey;
+    const row = key && this.durableRuntime.ledger.byKey(key);
+    if (!row || row.status === 'verified') return this.confirm(taskId, receipt, true, 'lookup');
+    return this.durableRuntime.ledger.reconcile(row.id, this.#providerForTask(this.store.state.tasks[taskId])).then(() => {
+      if (this.durableRuntime.ledger.get(row.id)?.status === 'verified') return this.confirm(taskId, receipt, true, 'lookup');
+      return this.uncertain(taskId, 'The provider accepted a send, but the message was not read back with the expected Message-ID. It was not sent again.', { status: 'accepted_live', receipt });
+    });
+  }
   confirm(taskId, receipt, reconciled, via = reconciled ? 'lookup' : 'receipt') {
     if (this.durableRuntime) {
+      const key = this.store.state.tasks[taskId]?.action?.idempotencyKey;
+      const execution = key && this.durableRuntime.ledger.byKey(key);
+      if (!execution || execution.status !== 'verified') {
+        return this.uncertain(taskId, 'The provider accepted a send, but the message was not read back with the expected Message-ID. It was not sent again.', { status: receipt?.id ? 'accepted_live' : 'uncertain', receipt });
+      }
       this.durableRuntime.verifiedAction(taskId, receipt);
       if (!this.durableRuntime.confirmCurrentContext(taskId, receipt)) return this.store.state.tasks[taskId];
     }
@@ -2413,6 +2913,15 @@ export class WorkEngine {
         task.status = 'completed';
         task.reason = null;
       }
+      recordFollowThrough(task, {
+        decision: 'close',
+        closeKind: task.status === 'cancelled' ? 'cancelled' : task.completion?.kind === 'user_finished' ? 'user_finished' : 'verified',
+        reason: task.status === 'cancelled'
+          ? task.reason
+          : 'The closure condition was read back and verified.',
+        ceiling: autonomyCeiling({ evidenceComplete: true, approval: true, consequential: true, nextStep: 'consequential' }),
+        at: stamp()
+      });
       const how = reconciled
         ? 'by idempotency-key lookup'
         : 'by reading the accepted message back';
@@ -2438,8 +2947,11 @@ export class WorkEngine {
    * message could not be read back: the action is not complete and not retried,
    * and reconciliation can still resolve it.
    */
-  uncertain(taskId, reason, { status = 'uncertain', receipt = null } = {}) {
+  uncertain(taskId, reason, { status = 'uncertain', receipt = null, close = null } = {}) {
     if (typeof reason !== 'string' || !reason.trim()) reason = 'The provider has not confirmed whether this action took effect. No automatic retry was attempted.';
+    // A durable runtime keeps reconciling until the cap writes an explicit close.
+    // Without that runtime, this call is the end of automatic reconciliation.
+    const recordedClose = close || (this.durableRuntime ? null : 'reconciliation_inconclusive');
     this.store.mutate(state => {
       const task = state.tasks[taskId];
       task.status = 'blocked';
@@ -2450,8 +2962,28 @@ export class WorkEngine {
         task.action.phase = 'uncertain';
         if (receipt?.id) task.action.receiptId = receipt.id;
       }
+      if (recordedClose === 'reconciliation_inconclusive') {
+        task.reconciliation_inconclusive = true;
+        if (task.action) task.action.close = 'reconciliation_inconclusive';
+      } else if (recordedClose === 'attestation_request') {
+        task.attestationRequest = true;
+        if (task.action) task.action.close = 'attestation_request';
+      }
       record(state, 'uncertain', reason, taskId);
-      // An unknown external outcome is exactly what the user must decide.
+      recordFollowThrough(task, {
+        decision: 'blocked',
+        reason,
+        ceiling: autonomyCeiling({
+          evidenceComplete: true,
+          consequential: true,
+          nextStep: 'consequential',
+          approval: false,
+          validGrant: false
+        }),
+        at: stamp()
+      });
+      if (!recordedClose) return;
+      // Only a recorded close is a Needs you interruption. In-flight checks stay quiet.
       emitNotification(state.notifications, notification({
         kind: 'blocker', priority: 'high', dedupeKey: `blocker:${taskId}`, taskId, at: stamp(),
         headline: status === 'accepted_live'
@@ -2495,7 +3027,7 @@ export class WorkEngine {
     const startingStatus = task.action.status;
     return this.#resolve(this.#lookupSafely(task.action.idempotencyKey, { receiptId: task.action.receiptId }, this.#providerForTask(task)), result => {
       if (!this.#actionCanRecordResult(taskId, actionIdentity)) return this.store.state.tasks[taskId];
-      if (result.status === 'found') return this.confirm(taskId, result.receipt, true, 'lookup');
+      if (result.status === 'found') return this.#confirmFound(taskId, result.receipt);
       if (this.store.state.tasks[taskId].action.status !== startingStatus) return this.store.state.tasks[taskId];
       // A send the provider already accepted can never reconcile to "confirmed
       // absent": that status enables a retry, and a retry after acceptance could
@@ -2531,6 +3063,16 @@ export class WorkEngine {
     if (this.store.state.tasks[taskId]?.control?.paused) throw new Error('This task is paused. Resume it before retrying.');
     const task = this.#requireTask(taskId);
     if (!task.action || task.action.status !== 'confirmed_absent') throw new Error('Retry requires confirmed absence and prior approval');
+    // A dispatched live attempt can never be repeated under the same identity.
+    // A non-live attempt whose durable row proves no effect (the marker exists
+    // but reconciliation or a definitive rejection established absence) is
+    // safe to retry: the provider never accepted the key.
+    const execution = this.durableRuntime?.ledger.byKey(task.action.idempotencyKey);
+    const provenNoEffect = task.action.live !== true && Boolean(execution) &&
+      (execution.status === 'cancelled' || (execution.status === 'failed' && execution.last_error_class === 'confirmed_absent'));
+    if (task.action.live === true || (execution?.dispatched_at && !provenNoEffect)) {
+      throw Object.assign(new Error('A live attempt that already started cannot be sent again under the same identity.'), { code: 'RETRY_NOT_SAFE', status: 409 });
+    }
     const requestVersion = Number(task.commitment?.revision || 1);
     if (task.pendingCommitmentChange || Number(task.action.commitmentRevision || requestVersion) !== requestVersion ||
         Number(task.draft?.requestVersion || requestVersion) !== requestVersion || task.commitment?.status === 'withdrawn') {
@@ -2593,13 +3135,15 @@ export class WorkEngine {
     if (task.kind === 'external_issue' && (!task.externalSource.assigned || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This issue is no longer actively assigned to the connected account.');
     if (['external_review', 'external_change', 'external_check'].includes(task.kind) && (task.externalSource.active === false || task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.github !== task.externalSource.accountId)) throw new Error('This GitHub work is no longer open for the connected account.');
     if (task.kind === 'observed_task' && (task.externalSource.state !== 'open' || this.store.state.connectionAccounts?.[task.sourceConnectorId] !== task.externalSource.accountId)) throw new Error('This local to-do is no longer open in the connected source.');
-    if (task.action || !['blocked', 'cancelled'].includes(task.status)) {
+    const userFinished = task.status === 'completed' && task.completion?.kind === 'user_finished' && !task.action;
+    if (task.action || (!['blocked', 'cancelled'].includes(task.status) && !userFinished)) {
       throw new Error('Only a declined or closed request without an action can be reopened');
     }
     this.store.mutate(state => {
       const target = state.tasks[taskId];
       target.status = 'waiting_for_information';
       target.userDismissed = false;
+      if (target.completion?.kind === 'user_finished') delete target.completion;
       if (target.control?.paused) target.control = { ...target.control, paused: false, updatedAt: stamp() };
       if (target.draft?.userEdited) target.userDraftStale = true;
       else target.draft = null;
@@ -2743,6 +3287,30 @@ export class WorkEngine {
     return this.taskServices.createFollowUpForOpportunity(opportunityId);
   }
 
+  /** Explicit user completion. This is not an agent-verified send. */
+  markUserFinished(taskId) {
+    const task = this.#requireTask(taskId);
+    if (['executing', 'accepted_live', 'uncertain', 'unknown'].includes(task.action?.status)) {
+      throw new Error('An in-flight send cannot be marked finished.');
+    }
+    if (task.status === 'completed' && task.completion?.kind !== 'user_finished') {
+      throw new Error('Verified work is already closed.');
+    }
+    if (task.status === 'cancelled') throw new Error('A cancelled request cannot be marked finished.');
+    const at = stamp();
+    this.store.mutate(state => {
+      const current = state.tasks[taskId];
+      applyUserFinished(current, {
+        at,
+        reason: 'The user marked this work finished. Nothing was sent.'
+      });
+      record(state, 'user_finished', current.reason, taskId);
+    });
+    this.#refreshAttention();
+    this.changed();
+    return this.store.state.tasks[taskId];
+  }
+
   cancel(taskId) {
     const task = this.#requireTask(taskId);
     if (task.status !== 'waiting_for_information') {
@@ -2757,6 +3325,13 @@ export class WorkEngine {
       current.draft = null;
       this.#supersedeReasoning(current, 'user_closed');
       record(state, 'cancellation', 'The user closed this request while it was waiting for information. Nothing was sent.', taskId);
+      recordFollowThrough(current, {
+        decision: 'close',
+        closeKind: 'cancelled',
+        reason: current.reason,
+        ceiling: autonomyCeiling({ evidenceComplete: false, evidenceMissing: true, nextStep: 'observe' }),
+        at: current.updatedAt
+      });
     });
     this.#refreshAttention();
     this.changed();
@@ -2777,6 +3352,7 @@ export class WorkEngine {
     let entry = null;
     this.store.mutate(state => {
       entry = recordCalibrationEntry(state.calibrations, { key, kind, value, scope, at, origin });
+      if (key === 'permission:send_automation' && value !== 'allow') this.durableRuntime?.ledger.cancelUndispatched({ kind: 'standing', id: entry.id, state });
       for (const clarification of state.clarifications) {
         if (clarification.status !== 'open' || clarification.key !== key) continue;
         if (!scopeCovers(clarification.scope, scope)) continue;
@@ -2801,6 +3377,7 @@ export class WorkEngine {
     let entry = null;
     this.store.mutate(state => {
       entry = correctCalibrationEntry(state.calibrations, { key, kind, value, scope, at });
+      if (entry.key === 'permission:send_automation' && entry.value !== 'allow') this.durableRuntime?.ledger.cancelUndispatched({ kind: 'standing', id: entry.id, state });
       record(state, 'correction', `Corrected the system's understanding: ${describeCalibration(entry)}`);
     });
     this.#refreshAttention();
@@ -3275,7 +3852,18 @@ export class WorkEngine {
     if (!this.#roleAllowsAutomaticWrite(task)) throw Object.assign(new Error('The user\'s responsibility for this message is not established; individual approval is required.'), { code: 'REVIEW_REQUIRED' });
     const activation = this.durableRuntime?.activationFor(task);
     if (activation && (!activation.activate || activation.requiresReview)) throw Object.assign(new Error('An explicit user policy requires review before this task may act.'), { code: 'REVIEW_REQUIRED' });
-    if (task.control?.paused || task.guidanceReviewRequired) throw new Error('The task was paused or corrected by the user. Review the updated task before sending.');
+    if (task.control?.paused || task.guidanceReviewRequired) {
+      const blocked = autonomyCeiling({
+        evidenceComplete: true,
+        approval: false,
+        validGrant: true,
+        requiresReview: Boolean(task.guidanceReviewRequired),
+        paused: task.control?.paused === true,
+        consequential: true,
+        nextStep: 'consequential'
+      });
+      if (!ceilingAllows(blocked, 'L4')) throw new Error('The task was paused or corrected by the user. Review the updated task before sending.');
+    }
     const provider = this.#providerForTask(task);
     if (this.#primaryReviewMissing(task)) throw new Error('Model interpretation is not verified yet.');
     if (task.status !== 'ready_for_approval' || !task.draft) throw new Error('Task is not ready for approval');
@@ -3289,26 +3877,14 @@ export class WorkEngine {
     const resolved = grant || grantFor(this.store.state.calibrations || {}, {
       entity: task.request.subjectEntity, deliverable: task.request.deliverable
     });
-    if (!resolved) throw new Error('No pre-authorisation covers this action');
+    if (!resolved || resolved.value !== 'allow') throw new Error('No pre-authorisation covers this action');
+    if (task.lastLiveAttemptClass === 'user_attested_absent' && provider.live !== false) throw Object.assign(new Error('YOLO will not send a replacement after you confirmed the previous attempt is absent.'), { code: 'AUTHORIZATION_REQUIRED', status: 403 });
     // Strengthened verification is the one case a standing grant cannot cover:
     // a competing plausible source could contradict the draft, so the public
     // entry point refuses even when a caller resolves the grant itself.
     if (task.verification?.depth === 'enhanced') {
       throw new Error('Enhanced verification requires an explicit approval for this action');
     }
-    // Refuse before any state change. A shadowed or invalid grant must not
-    // move the task into verifying or contact the provider.
-    this.policy.authorize({
-      actionClass: 'execute_external',
-      approval: {
-        permission: 'pre_authorized',
-        taskId,
-        source: resolved.source,
-        scope: resolved.scope,
-        grantId: resolved.id
-      },
-      taskId
-    });
     const storedDocument = this.store.state.documents[task.documentId];
     const document = documentAvailable(storedDocument) ? storedDocument : null;
     const recheck = document
@@ -3336,12 +3912,35 @@ export class WorkEngine {
       this.assess(taskId);
       throw new Error(reason);
     }
+    const priorVerified = this.#verifiedPriorSend(task);
+    if (priorVerified) return this.#completeVerifiedPrior(taskId, priorVerified, provider);
     const actionVersion = Number(task.actionVersion || 0) + 1;
+    const sendAttempt = Number(task.sendAttempt || 1);
     const versionSuffix = (requestVersion > 1 ? `:r${requestVersion}` : '') + (this.durableRuntime ? `:i${task.inputVersion}` : '');
+    const attemptSuffix = sendAttempt > 1 ? `:a${sendAttempt}` : '';
+    const idempotencyKey = `send:${taskId}:${document.version}${versionSuffix}${attemptSuffix}`;
+    const payload = { idempotencyKey, to: task.draft.to, subject: task.draft.subject, body: task.draft.body, documentUrl: task.draft.documentUrl, threadId: this.store.state.inbox.find(item => item.id === task.sourceEmailId)?.threadId || null };
+    const effect = { type: 'email_reply', to: payload.to, documentId: task.documentId, bodyDigest: createHash('sha256').update(payload.body).digest('hex') };
+    const resourceId = payload.threadId || `${payload.to}:${payload.subject}`;
+    this.#assertCeiling(task, 'L4', {
+      evidenceComplete: true,
+      evidenceMissing: false,
+      sourceWithdrawn: false,
+      contradictory: false,
+      approval: false,
+      validGrant: resolved?.value === 'allow',
+      requiresReview: Boolean(task.guidanceReviewRequired || (activation && (!activation.activate || activation.requiresReview))),
+      consequential: true,
+      nextStep: 'consequential',
+      proposedLevel: task.reasoning?.proposedCeiling || null,
+      paused: false
+    });
+    const decision = this.toolGateway.decide({ phase: 'issue', origin: 'standing', taskId, provider, tool: 'send', actionFamily: 'email.send', resourceId, key: idempotencyKey, payload, effect });
     const action = {
-      id: `send:${taskId}:${document.version}${versionSuffix}`,
-      idempotencyKey: `send:${taskId}:${document.version}${versionSuffix}`,
+      id: idempotencyKey,
+      idempotencyKey,
       version: actionVersion,
+      sendAttempt,
       commitmentRevision: requestVersion,
       ...(this.durableRuntime ? { inputVersion: task.inputVersion, privacyEpoch: task.privacyEpoch } : {}),
       actionClass: 'execute_external',
@@ -3349,6 +3948,7 @@ export class WorkEngine {
       source: resolved.source,
       grantId: resolved.id,
       scope: resolved.scope,
+      authority: { kind: decision.credential.kind, id: decision.credential.id, version: decision.credential.version },
       approvedAt: stamp(),
       status: 'executing',
       phase: 'approved',

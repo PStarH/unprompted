@@ -4,7 +4,7 @@
 
 ## Requirements
 
-Version 0.5.0 is a self-hosted web app. macOS and Windows use the same Node service and browser interface; Linux can also run it. No App installer or Docker is required. Hosted Windows CI covers installation, selected-folder reads, restart recovery and browser startup; real Windows runtime acceptance is pending. Apple sources are macOS-only.
+Version 0.5.1 is a self-hosted web app. macOS and Windows use the same Node service and browser interface; Linux can also run it. No App installer or Docker is required. Hosted Windows CI covers installation, selected-folder reads, restart recovery and browser startup; real Windows runtime acceptance is pending. Apple sources are macOS-only.
 
 - Node.js **20+** with npm; **22+** is recommended.
 - Git to clone the repository. A source ZIP works too: extract it and open a
@@ -24,7 +24,7 @@ Check Node with `node --version`. Use the commands below in macOS Terminal or Wi
 
 Before replacing an earlier version, stop its service with **Ctrl+C** and back up the entire configuration directory described in [storage](CONFIGURATION.md#persistent-local-setup). Include any separately configured state directory and all SQLite companion files. Keep the backup private: it contains account credentials and source content. Do not copy a live database as an upgrade backup.
 
-Extract the new source into a separate directory, run `npm ci --include=optional`, then `npm start`. Use the same configuration/state paths to retain accounts and work. Do not run both versions against the same workspace. The 0.5.0 database upgrade is additive, but a previous application may refuse the newer schema: rollback requires stopping the new version and restoring the complete pre-upgrade backup before starting the previous version. An old executable alone is not a data rollback.
+Extract the new source into a separate directory, run `npm ci --include=optional`, then `npm start`. Use the same configuration/state paths to retain accounts and work. Do not run both versions against the same workspace. The 0.5.1 database upgrade is additive, but a previous application may refuse the newer schema: rollback requires stopping the new version and restoring the complete pre-upgrade backup before starting the previous version. An old executable alone is not a data rollback.
 
 Deleting the extracted source or an optional App does not delete the platform configuration directory. To remove private local data, stop the service and separately delete the configuration/state directories and any backups you made. Source files in selected folders and records already sent to providers are separate. This source distribution has no automatic updater.
 
@@ -84,8 +84,9 @@ Pause observation or run **Check now** from Connections whenever you want.
 
 Sources start read-only. Google sending and document edits require separate
 permissions; other listed connectors do not send or edit. A configured model
-provider can receive the selected source content. Local state contains source
-content and is not encrypted. Review [data handling](CONFIGURATION.md#what-stays-on-your-machine)
+provider can receive the selected source content. Credentials are encrypted
+at rest. The local workspace still contains source content and is not
+encrypted. Review [secrets at rest](CONFIGURATION.md#secrets-at-rest)
 before connecting sensitive work.
 
 For source permissions, limits and account setup, read [Connectors](CONNECTORS.md)

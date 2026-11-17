@@ -1,3 +1,5 @@
+import { needsUserAttention } from './workspace-model.js';
+
 // Device-local presentation preferences. These never grant execution permission.
 export function readLocal(key, fallback = null) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
@@ -46,6 +48,29 @@ export function evidenceDelta(task, before) {
     fromVersion: before.version, toVersion: after.version };
 }
 
+export function decisionQueue(tasks, notices = [], context = {}) {
+  const admitted = new Set(tasks.filter(task => needsUserAttention(task, context)).map(task => task.id));
+  const items = [
+    ...tasks.filter(task => admitted.has(task.id))
+      .map(task => ({ key: `task:${task.id}`, kind: 'task', value: task })),
+    ...notices.filter(notice => {
+      if (['pending', 'digest'].includes(notice.deliveryState)) return false;
+      if (notice.kind === 'blocker' && notice.taskId && tasks.some(task => task.id === notice.taskId) && !admitted.has(notice.taskId)) return false;
+      return true;
+    }).map(notice => ({ key: `notice:${notice.id}`, kind: 'notice', value: notice }))
+  ];
+  const rank = item => item.kind === 'task' ? (item.value.status === 'blocked' ? 0 : 1) : (item.value.priority === 'high' ? 0 : 2);
+  const score = item => item.kind === 'task' ? Number(item.value.management?.priority?.score) || 0 : item.value.priority === 'high' ? 100 : 0;
+  return items.map((item, index) => ({ item, index })).sort((a, b) =>
+    rank(a.item) - rank(b.item) || score(b.item) - score(a.item) || a.index - b.index
+  ).map(entry => entry.item);
+}
+
+export function decisionCursor(queue, selectedKey, previousIndex = 0) {
+  if (!queue.length) return null;
+  return queue.find(item => item.key === selectedKey)?.key || queue[Math.max(0, Math.min(previousIndex, queue.length - 1))].key;
+}
+
 /** Deduplicate weak stalled prompts when the same open requirement is answered once for several tasks. */
 export function visibleAttentionItems(state) {
   const tasks = state.tasks || [];
@@ -60,6 +85,7 @@ export function visibleAttentionItems(state) {
   return (state.notifications || []).filter(item => {
     if (['pending', 'digest'].includes(item.deliveryState)) return false;
     const task = tasks.find(candidate => candidate.id === item.taskId);
+    if (item.kind === 'blocker' && task && !needsUserAttention(task, state)) return false;
     if (item.kind === 'blocker' && task?.status === 'blocked' && (task.action || task.failure)) return false;
     // Stalled prompts are normal-priority reminders. Keep deadline, risk and
     // uncertain-execution notices intact; those use their own notification IDs.

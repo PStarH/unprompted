@@ -11,6 +11,7 @@ import { DurableDatabase, SQLITE_RUNTIME, iso } from '../src/durable/database.js
 import { DurableJobs } from '../src/durable/jobs.js';
 import { DurableTasks } from '../src/durable/tasks.js';
 import { ToolExecutionLedger } from '../src/durable/execution.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 const workerPath = fileURLToPath(new URL('./fixtures/durable-worker.mjs', import.meta.url));
 function fixture(t, options = {}) {
@@ -29,7 +30,7 @@ function running(context, key = 'work') {
   return { taskId: created.taskId, job, run };
 }
 function intent(context, current, key = 'write', resourceId = 'same-resource') {
-  return context.ledger.intent({ ...current, provider: 'fixture', tool: 'send', actionFamily: 'fixture.send', resourceId, key, effect: { type: 'fixture' }, payload: {}, authorize: () => ({ allowed: true }) });
+  return context.ledger.intent({ ...current, provider: 'fixture', tool: 'send', actionFamily: 'fixture.send', resourceId, key, effect: { type: 'fixture' }, payload: {}, authorize: () => authorizeForTests() });
 }
 function event(context, id, material = id) {
   context.database.atomic(() => {

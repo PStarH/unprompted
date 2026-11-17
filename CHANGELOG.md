@@ -1,10 +1,42 @@
 # Changelog
 
-## 0.5.0 — Unreleased
+## 0.5.1 — 2026-11-17
 
-This candidate merges the tagged 0.4.0 source line and adds the following
-verified local behavior. It is a pre-1.0 preview; publication, signing and
-real-account acceptance remain separate work.
+This release merges the published 0.4.x `main` line with the 0.5.0 candidate
+and adds the following verified local behavior. It is a pre-1.0 preview; model
+signing and real-account acceptance remain separate work.
+
+### Security and authority
+
+- OAuth tokens, model API keys and connector credentials in `setup.json` and
+  `mcp.json` are sealed with AES-256-GCM before they touch disk. The key lives
+  in the OS secret store (macOS login keychain, Linux secret service, Windows
+  DPAPI), with a mode `0600` fallback file when no store is available. Existing
+  installs are sealed on the next launch without another sign-in. The workspace
+  SQLite database is not encrypted.
+- Every approved external write carries a sealed, single-use authority
+  credential bound to its task and effect. The ledger re-decides at the
+  before-dispatch boundary and refuses a missing, replaced or spent credential,
+  so an approval cannot drift to a different action.
+- A dispatched send is read back and verified before the task may complete.
+  Provider acceptance alone is surfaced to the model but is never treated as a
+  completed delivery.
+- The workspace admits an item to "Needs you" only when the next action is the
+  user's own; task counts include every open task rather than only admitted
+  ones.
+
+### Reliability and maintenance
+
+- Release-acceptance scenes and a connector sync matrix exercise the six
+  end-to-end product clauses in the browser and in the repository suite.
+- Expired private reasoning sessions are swept from the runtime maintenance
+  tick, and a schema read-only open now requires the current schema and FTS
+  secure-delete instead of silently proceeding.
+- Retrying a non-live attempt after reconciliation proved no effect is allowed
+  again; a dispatched live attempt still cannot be repeated under the same
+  identity.
+- The browser keeps a single MCP preset catalog, and the docs cover Apple
+  Calendar, Mail and Contacts configuration and credential handling.
 
 ### Sources and delivery
 
@@ -98,8 +130,8 @@ real-account acceptance remain separate work.
   observed through two providers is associated through a Situation, not merged
   into one event.
 - The app is one person, one machine, one process, with one writer per store.
-  It binds to `127.0.0.1` and has no login. The local database, tokens and model
-  keys are not encrypted.
+  It binds to `127.0.0.1` and has no login. Tokens, model keys and connector
+  credentials are encrypted at rest; the workspace database is not.
 - Tests use synthetic providers and invented data. They do not establish
   real-account behavior, real-user value, provider reliability or a five-minute
   non-developer onboarding. Hosted CI for this merged candidate has not been

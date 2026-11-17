@@ -84,6 +84,7 @@ export function pauseTask(engine, taskId, paused) {
     target.updatedAt = at;
     if (paused && target.reasoningWork) target.reasoningWork = { ...target.reasoningWork, status: 'superseded', terminalReason: 'paused_by_user' };
     history(state, taskId, paused ? 'task_paused' : 'task_resumed', paused ? 'Paused by the user. Future task checks and actions are stopped.' : 'Resumed by the user. Current evidence will be checked again.', at);
+    if (paused) engine.durableRuntime?.ledger.cancelUndispatched({ taskId, state });
   });
   if (!paused) {
     if (engine.durableRuntime && engine.store.state.tasks[taskId].action) engine.durableRuntime.scheduleTask(taskId, 'resume_reconciliation');

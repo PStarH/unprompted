@@ -135,7 +135,22 @@ export class DurableRuntime {
     }, recovery: job => this.recover(job) });
     this.reconcileWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'reconcile', id: `${this.owner}:reconcile`, handlers: {
       privacy_reconcile: (job, guard) => this.reconcileExecution(job.payload.executionId, guard),
-      reconcile_execution: (job, guard) => this.reconcileExecution(job.payload.executionId, guard)
+      reconcile_execution: async (job, guard) => {
+        try { await this.reconcileExecution(job.payload.executionId, guard); }
+        catch (error) {
+          if (job.attempts >= Math.min(4, job.max_attempts || 4)) {
+            this.ledger.markInconclusive(job.payload.executionId);
+            const execution = this.ledger.get(job.payload.executionId);
+            // Public's terminal recovery surfaces one Needs-you state for a
+            // send. When there is no such surface (another family, or a row
+            // that no longer exists), fall back to HEAD's terminal path so the
+            // task cannot be left verifying forever.
+            if (!execution || !this.#noteInconclusive(execution)) await this.deadLetter(job, error, { exhausted: true });
+            return;
+          }
+          throw error;
+        }
+      }
     }, recovery: job => this.recover(job) });
     this.privacyWorker = new DurableWorker({ jobs: this.jobs, onDead, queue: 'privacy', id: `${this.owner}:privacy`, handlers: {
       finish_forget: async job => { const result = await this.privacy.finish(job.payload.requestId); if (result?.state === 'pending') throw Object.assign(new Error('Deletion still has unresolved retention.'), { status: 503 }); }
@@ -1823,9 +1838,9 @@ export class DurableRuntime {
         step = selectedStep ? this.db.prepare('SELECT * FROM plan_steps WHERE id=?').get(selectedStep) : this.experiences.step({ taskRunId: run.id, logicalStepId: key, stepKind: 'external_action', actionFamily, expectedEffect: effect });
         if (!step || selectedStep && effectDigest(parse(step.expected_effect_json)) !== effectDigest(effect)) throw durableError('PLAN_CHANGED', 'The approved Experience trial no longer matches this action.');
         if (step.status === 'proposed') this.experiences.transitionStep(step.id, 'proposed', 'approved');
-        const authorize = () => {
+        const authorize = (call = {}) => {
           this.assertPlanningContextCurrent(task.id);
-          return this.gateway.authorize({ taskId: task.id, provider, tool, actionFamily, resourceId, key, payload, effect, conditionalVersion, patchAuthorization: task.patchAuthorization });
+          return this.gateway.decide({ taskId: task.id, provider, tool, actionFamily, resourceId, key, payload, effect, conditionalVersion, patchAuthorization: task.patchAuthorization, phase: call.phase || 'intent' });
         };
         intent = this.ledger.intent({ taskId: task.id, run, job, provider: provider.kind || provider.id || provider, tool, actionFamily, resourceId, key, effect, payload,
           conditionalVersion, providerIdempotent: provider.live === false || provider.nativeIdempotency === true, planStepId: step.id,
@@ -1837,7 +1852,7 @@ export class DurableRuntime {
       // Writes take no worker abort signal: cancelling between the intent and
       // its dispatch would leave an undefined external state. The execution
       // deadline and lease fencing own write cancellation.
-      const result = await this.ledger.dispatch(intent, { run, job, send, verify, deferDispatch });
+      const result = await this.ledger.dispatch(intent, { run, job, send, verify, deferDispatch, live: provider.live === true });
       this.database.atomic(() => {
         if (verify) {
           this.experiences.transitionStep(step.id, 'executing', 'completed');
@@ -1894,18 +1909,23 @@ export class DurableRuntime {
   }
   normalizeLookup(key, provider, result) {
     const execution = this.ledger.byKey(key);
+    if (execution?.status === 'verified') {
+      const evidence = parse(execution.evidence_json);
+      return { status: 'found', receipt: parse(execution.result_json), evidence, detail: 'Stored verification stands. A later search miss does not demote it.' };
+    }
     if (execution && ['dispatched', 'accepted', 'unknown'].includes(execution.status) && result.status === 'not_found' && provider.live !== false && !provider.reliableAbsence && !provider.nativeIdempotency) return { status: 'unknown', receipt: null, detail: 'A search miss cannot prove the earlier write stopped. Manual reconciliation is required.' };
     return result;
   }
   verifiedAction(taskId, receipt) {
     const task = this.store.state.tasks[taskId], key = task?.action?.idempotencyKey;
     const execution = key && this.ledger.byKey(key);
-    if (execution && !execution.privacy_redacted) {
+    if (!execution || execution.status !== 'verified') return;
+    if (receipt?.idempotencyKey && receipt.idempotencyKey !== execution.idempotency_key) return;
+    if (!execution.privacy_redacted) {
       // Verification may be replayed after a crash before the task itself was
       // marked complete. Persist its attribution as one unit and reuse the
       // evidence already recorded for this exact external execution.
       this.database.atomic(() => {
-        this.ledger.verified(execution.id, receipt);
         const step = execution.plan_step_id && this.db.prepare('SELECT * FROM plan_steps WHERE id=?').get(execution.plan_step_id);
         if (step?.status === 'executing') this.experiences.transitionStep(step.id, 'executing', 'completed');
         if (step && !this.db.prepare("SELECT 1 FROM feedback_events WHERE execution_id=? AND kind='supervised_success' AND plan_step_id=?").get(execution.id, step.id))
@@ -2070,9 +2090,23 @@ export class DurableRuntime {
         const result = await this.ledger.reconcile(execution.id, this.providerFor(execution));
         if (result.status === 'not_found') this.releaseTaskCoordination(execution.task_id);
         if (result.status === 'unknown') {
-          // Recovery that can never be reconciled must still end somewhere the
-          // user can see. Deferring forever left the task in its pre-crash status
-          // with no terminal state and no notification.
+          // Automatic reconciliation is bounded: four inconclusive checks close
+          // the reconciliation and surface one Needs-you state. They do not
+          // dead-letter every attempt, which would spam the user with cards.
+          const count = Number(job.payload?.recoveryCount || 0) + 1;
+          if (count >= 4) {
+            this.ledger.markInconclusive(execution.id);
+            // Close the job without dead-letter spam, but guarantee a terminal
+            // task state: if the email-specific surface did not apply, use the
+            // dead-letter path HEAD used for a job that can never reconcile.
+            if (!this.#noteInconclusive(execution)) await this.deadLetter(job, durableError('RECOVERY_UNRESOLVED', 'The outcome of this action could not be reconciled, so the job was dead-lettered.'), { exhausted: true });
+            this.jobs.recover(job.id, () => ({ state: 'completed', safeToRepeat: true, reconciliationClosed: true }));
+            return;
+          }
+          this.database.atomic(() => this.db.prepare('UPDATE jobs SET payload_json=? WHERE id=?').run(json({ ...job.payload, recoveryCount: count }), job.id));
+          // Deferral still escalates when the job's own attempts are exhausted.
+          // That is a job that can never be reconciled, so use the terminal
+          // dead-letter path: the task becomes visibly blocked with one notice.
           const deferred = this.jobs.deferRecovery(job.id, job.lease_token);
           if (deferred?.state === 'dead') await this.deadLetter(deferred.job || this.jobs.get(job.id), durableError('RECOVERY_UNRESOLVED', 'The outcome of this action could not be reconciled, so the job was dead-lettered.'), { exhausted: true });
           return;
@@ -2329,10 +2363,20 @@ export class DurableRuntime {
     // The state projection cannot be mutated inside the SQL transaction.
     for (const item of notDispatched) this.markNotDispatched(item.taskId, item.key);
   }
+  #noteInconclusive(execution) {
+    if (execution.action_family !== 'email.send') return false;
+    const task = this.store.state.tasks[execution.task_id];
+    if (!task?.action || task.action.idempotencyKey !== execution.idempotency_key) return false;
+    this.engine.uncertain(task.id, 'Automatic checks still cannot tell whether this message was sent.', { close: 'reconciliation_inconclusive' });
+    return true;
+  }
   start() {
     // Reconciliation moved to its own queue so a slow publish cannot delay it.
     // Move jobs queued by an earlier build before recovery dedupe looks at them.
     this.db.prepare("UPDATE jobs SET queue_name='reconcile' WHERE queue_name='effects' AND job_type IN ('reconcile_execution','privacy_reconcile')").run();
+    // An intent that never stored a credential can never be dispatched; close
+    // it before any recovery pass tries to reconcile it.
+    this.ledger.cancelMissingAuthority();
     this.repairStandingIntentWork();
     this.importUncertainActions();
     this.ledger.recoverUnfinished();

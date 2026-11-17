@@ -19,7 +19,7 @@ description: 运行模式、设置保存在哪里，以及会改变行为的环�
 
 设置是平台配置目录中的 `setup.json`。macOS 上是 `~/Library/Application Support/Unprompted`。Linux 使用 `${XDG_CONFIG_HOME:-~/.config}/unprompted`。Windows 使用 `%APPDATA%\Unprompted`。系统支持时，目录模式为 `0700`，文件模式为 `0600`。
 
-开发时可以用 `UNPROMPTED_CONFIG_DIR` 和 `UNPROMPTED_SETUP_FILE` 改这些路径。MCP 凭据在设置文件旁的 `mcp.json`。以 `*-state.json` 结尾的正常状态路径实际存成 SQLite。进程运行时不要编辑数据库。
+开发时可以用 `UNPROMPTED_CONFIG_DIR` 和 `UNPROMPTED_SETUP_FILE` 改这些路径。MCP 凭据在设置文件旁的 `mcp.json`。这些文件里的令牌、模型密钥和连接器凭据在写入前加密。macOS 上密钥放在登录钥匙串。以 `*-state.json` 结尾的正常状态路径实际存成 SQLite，工作区数据库不加密。进程运行时不要编辑数据库。迁移和威胁模型见仓库中的[配置说明](https://github.com/PStarH/unprompted/blob/main/docs/CONFIGURATION.md#secrets-at-rest)。
 
 ## 常用设置
 

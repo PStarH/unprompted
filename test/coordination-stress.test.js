@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { DurableDatabase, iso } from '../src/durable/database.js';
 import { DurableJobs } from '../src/durable/jobs.js';
 import { DurableTasks } from '../src/durable/tasks.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 import { ToolExecutionLedger } from '../src/durable/execution.js';
 
 const workerPath = fileURLToPath(new URL('./fixtures/coordination-stress-worker.mjs', import.meta.url));
@@ -102,7 +103,7 @@ function running(context, key) {
 }
 function localIntent(context, current, { key, resourceId }) {
   return context.ledger.intent({ ...current, provider: 'fixture', tool: 'send', actionFamily: 'fixture.send', resourceId, key,
-    effect: { type: 'fixture' }, payload: {}, authorize: () => ({ allowed: true }) });
+    effect: { type: 'fixture' }, payload: {}, authorize: () => authorizeForTests() });
 }
 
 test('two real worker processes behind a barrier claim one SQLite job exactly once', async t => {

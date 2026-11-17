@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { workspaceSnapshot, changesSince, sortTasks, stableTaskOrder, matchesTask, readLocal, evidenceFacts, evidenceDelta, visibleAttentionItems } from '../public/ux-state.js';
+import { workspaceSnapshot, changesSince, sortTasks, stableTaskOrder, matchesTask, readLocal, evidenceFacts, evidenceDelta, decisionQueue, decisionCursor, visibleAttentionItems } from '../public/ux-state.js';
 import { copy, ui, setLocale } from '../public/i18n.js';
 
 test('the return digest counts actual new work and completions without inventing saved time', () => {
@@ -89,6 +89,21 @@ test('task order follows the explainable priority score', () => {
   const routine = { id: 'routine', status: 'ready_for_approval', createdAt: '2026-10-25T01:00:00Z', management: { priority: { score: 35 } } };
   const urgent = { id: 'urgent', status: 'ready_for_approval', createdAt: '2026-10-25T02:00:00Z', management: { priority: { score: 90 } } };
   assert.deepEqual(sortTasks([routine, urgent]).map(task => task.id), ['urgent', 'routine']);
+  const before = decisionQueue([routine, urgent]);
+  assert.equal(before[0].key, 'task:urgent');
+  const after = decisionQueue([routine, urgent, { id: 'new', status: 'ready_for_approval', management: { priority: { score: 100 } } }]);
+  assert.equal(decisionCursor(after, 'task:routine', 0), 'task:routine', 'the current item remains selected after a higher priority item arrives');
+});
+
+test('completed, closed, actively waiting and in-flight tasks never become actionable relay cards', () => {
+  const queue = decisionQueue([
+    { id: 'a', status: 'completed' },
+    { id: 'b', status: 'cancelled' },
+    { id: 'c', status: 'waiting_for_information', wait: { status: 'active', kind: 'document' } },
+    { id: 'd', status: 'blocked' },
+    { id: 'e', status: 'blocked', action: { status: 'unknown' } }
+  ]);
+  assert.deepEqual(queue.map(item => item.key), []);
 });
 
 test('a shared open dependency replaces duplicate stalled prompts without hiding risk or deadline notices', () => {

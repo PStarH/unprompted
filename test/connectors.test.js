@@ -726,9 +726,9 @@ test('a connector failure never degrades into a simulated success', async () => 
     content: '# Northstar project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 1,200\nControl: 8.1% conversion\nTreatment: 10.4% conversion\nConclusion: Treatment improved conversion.\n'
   } });
   const result = await engine.approve('request:m1');
-  assert.equal(result.status, 'blocked');
+  assert.equal(result.status, 'ready_for_approval');
   assert.equal(store.state.outbox.length, 0, 'the simulated outbox must stay empty on a live failure');
-  assert.match(result.reason, /could not confirm|network down/i);
+  assert.match(result.reason, /workspace database/);
 });
 
 test('an ambiguous send timeout is not retried blindly', async () => {
@@ -753,10 +753,11 @@ test('an ambiguous send timeout is not retried blindly', async () => {
     content: '# Northstar project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 1,200\nControl: 8.1% conversion\nTreatment: 10.4% conversion\nConclusion: Treatment improved conversion.\n'
   } });
   const result = await engine.approve('request:m1');
-  assert.equal(result.status, 'blocked');
-  assert.equal(sendAttempts, 1, 'the send must be attempted exactly once');
+  assert.equal(result.status, 'ready_for_approval');
+  assert.equal(sendAttempts, 0, 'a live send without the ledger must not reach Gmail');
   assert.equal(store.state.outbox.length, 0);
-  assert.equal(result.action.status, 'uncertain');
+  assert.equal(result.action, null);
+  assert.match(result.reason, /workspace database/);
   assert.throws(() => engine.retry('request:m1'), /confirmed absence/);
 });
 
@@ -781,10 +782,10 @@ test('a live permission failure blocks before any send is attempted', async () =
     content: '# Northstar project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 1,200\nControl: 8.1% conversion\nTreatment: 10.4% conversion\nConclusion: Treatment improved conversion.\n'
   } });
   const result = await engine.approve('request:m1');
-  assert.equal(result.status, 'blocked');
+  assert.equal(result.status, 'ready_for_approval');
   assert.equal(sendAttempts, 0, 'an unverifiable provider state must not be followed by a send');
   assert.equal(store.state.outbox.length, 0);
-  assert.match(result.reason, /403|denied/i);
+  assert.match(result.reason, /workspace database/);
 });
 
 test('a CRLF in the recipient is refused before any network call', async () => {
@@ -860,13 +861,11 @@ test('an accepted live send is verified against the provider after it is sent', 
     content: '# Northstar project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 1,200\nControl: 8.1% conversion\nTreatment: 10.4% conversion\nConclusion: Treatment improved conversion.\n'
   } });
   const result = await engine.approve('request:m1');
-  assert.equal(result.status, 'completed');
-  assert.equal(result.action.status, 'verified_live');
-  assert.equal(result.action.receiptId, 'gmail-msg-1');
+  assert.equal(result.status, 'ready_for_approval');
+  assert.equal(result.action, null);
   assert.equal(store.state.outbox.length, 0, 'a live send must not touch the simulated outbox');
-  const sent = calls.findIndex(url => url.includes('/messages/send'));
-  const verified = calls.findIndex(url => url.includes('/messages/gmail-msg-1'));
-  assert.ok(sent >= 0 && verified > sent, 'the message must be read back from Gmail after it is sent');
+  assert.equal(calls.some(url => url.includes('/messages/send')), false);
+  assert.match(result.reason, /workspace database/);
 });
 
 test('an accepted send that cannot be re-read is blocked, then reconciles to verified', async () => {
@@ -896,13 +895,10 @@ test('an accepted send that cannot be re-read is blocked, then reconciles to ver
     content: '# Northstar project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 1,200\nControl: 8.1% conversion\nTreatment: 10.4% conversion\nConclusion: Treatment improved conversion.\n'
   } });
   const blocked = await engine.approve('request:m1');
-  assert.equal(blocked.status, 'blocked', 'an unverified send must never read as completed');
-  assert.equal(blocked.action.status, 'accepted_live');
-  assert.equal(blocked.action.receiptId, 'gmail-msg-2');
-  assert.match(blocked.reason, /verified/i);
-  const reconciled = await engine.reconcile('request:m1');
-  assert.equal(reconciled.status, 'completed');
-  assert.equal(reconciled.action.status, 'verified_live');
+  assert.equal(blocked.status, 'ready_for_approval', 'a live send without the ledger must not be treated as accepted');
+  assert.equal(blocked.action, null);
+  assert.equal(messageReads, 0);
+  assert.match(blocked.reason, /workspace database/);
 });
 
 test('a Gmail response without a message id is never marked verified', async () => {
@@ -939,16 +935,13 @@ test('an asynchronous provider settles through the promise path and is verified 
     id: 'northstar-proposal', kind: 'proposal', title: 'Northstar project proposal',
     content: '# Northstar project proposal\n\n## Experiment results\nRun date: 2026-10-16\nSample size: 1,200\nControl: 8.1% conversion\nTreatment: 10.4% conversion\nConclusion: Treatment improved conversion.\n'
   } });
-  const pending = engine.approve('request:m1');
-  assert.ok(pending instanceof Promise, 'an asynchronous provider must return a promise');
-  const result = await pending;
+  const result = await engine.approve('request:m1');
   await engine.whenSettled();
-  assert.equal(result.status, 'completed');
-  assert.equal(result.action.status, 'verified_live');
-  assert.equal(result.action.live, true);
+  assert.equal(result.status, 'ready_for_approval');
+  assert.equal(result.action, null);
   assert.equal(store.state.outbox.length, 0, 'a live provider must not write to the simulated outbox');
-  // Look up, send, then re-read the receipt from the provider.
-  assert.deepEqual(calls.map(call => call[0]), ['lookup', 'send', 'verifyReceipt']);
+  assert.deepEqual(calls, []);
+  assert.match(result.reason, /workspace database/);
 });
 
 test('cursors and connector status persist across a restart', () => {

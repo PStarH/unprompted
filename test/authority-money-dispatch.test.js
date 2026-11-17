@@ -11,6 +11,7 @@ import { ToolExecutionLedger } from '../src/durable/execution.js';
 import { TransactionMoneyService } from '../src/durable/transaction-money.js';
 import { WorkEngine } from '../src/engine.js';
 import { PermissionPolicy } from '../src/permissions.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 /**
  * Native authority + transaction money dispatch.
@@ -80,7 +81,7 @@ test('permits reject spreads, structured clones and foreign ledgers before any s
   const c = await fixture(t);
   const current = scope(c.runtime, c.taskId);
   let sends = 0;
-  const permit = writeIntent(c.runtime, current, 'clone-key', { authorize: () => ({ allowed: true }) });
+  const permit = writeIntent(c.runtime, current, 'clone-key', { authorize: () => authorizeForTests() });
   const send = async (_signal, beforeDispatch) => { sends++; beforeDispatch(); return { id: 'receipt-clone', idempotencyKey: 'clone-key' }; };
   await assert.rejects(c.runtime.ledger.dispatch({ ...permit }, { ...current, send }), { code: 'PERMIT_INVALID' });
   await assert.rejects(c.runtime.ledger.dispatch(structuredClone(permit), { ...current, send }), { code: 'PERMIT_INVALID' });
@@ -92,7 +93,7 @@ test('permits reject spreads, structured clones and foreign ledgers before any s
 test('exposed permit snapshots are frozen and a persisted is_write change cannot bypass verification', async t => {
   const c = await fixture(t);
   const current = scope(c.runtime, c.taskId);
-  const permit = writeIntent(c.runtime, current, 'frozen-key', { authorize: () => ({ allowed: true }) });
+  const permit = writeIntent(c.runtime, current, 'frozen-key', { authorize: () => authorizeForTests() });
   assert.ok(Object.isFrozen(permit.execution));
   assert.throws(() => { permit.execution.is_write = 0; }, TypeError);
   assert.equal(permit.execution.is_write, 1);
@@ -106,7 +107,7 @@ test('a repeated beforeDispatch callback never re-authorizes and SQL rollback le
   const c = await fixture(t);
   const current = scope(c.runtime, c.taskId);
   let authorizations = 0, sends = 0;
-  const permit = writeIntent(c.runtime, current, 'repeat-key', { authorize: () => { authorizations++; return { allowed: true }; } });
+  const permit = writeIntent(c.runtime, current, 'repeat-key', { authorize: () => { authorizations++; return authorizeForTests(); } });
   await assert.rejects(c.runtime.ledger.dispatch(permit, { ...current, deferDispatch: true, send: async (_signal, beforeDispatch) => {
     beforeDispatch(); sends++; beforeDispatch(); sends++;
     return { id: 'receipt-repeat', idempotencyKey: 'repeat-key' };
@@ -119,7 +120,7 @@ test('a repeated beforeDispatch callback never re-authorizes and SQL rollback le
 
   const rollback = scope(c.runtime, c.taskId);
   let rollbackSends = 0;
-  const failed = writeIntent(c.runtime, rollback, 'rollback-key', { authorize: () => ({ allowed: true }) });
+  const failed = writeIntent(c.runtime, rollback, 'rollback-key', { authorize: () => authorizeForTests() });
   c.database.db.exec(`CREATE TRIGGER reject_dispatch BEFORE UPDATE OF status ON tool_executions WHEN NEW.status='dispatched' AND NEW.id='${failed.execution.id}' BEGIN SELECT RAISE(ABORT,'forced rollback'); END`);
   await assert.rejects(c.runtime.ledger.dispatch(failed, { ...rollback, send: async (_s, beforeDispatch) => { rollbackSends++; beforeDispatch(); return { id: 'never' }; } }));
   c.database.db.exec('DROP TRIGGER reject_dispatch');
@@ -133,7 +134,7 @@ test('async authorization decisions are denied and never reach the provider', as
   const current = scope(c.runtime, c.taskId);
   assert.throws(() => writeIntent(c.runtime, current, 'async-intent', { authorize: async () => ({ allowed: true }) }), { code: 'AUTHORIZATION_REQUIRED' });
   let calls = 0;
-  const permit = writeIntent(c.runtime, current, 'async-dispatch', { authorize: () => ++calls === 1 ? { allowed: true } : Promise.resolve({ allowed: true }) });
+  const permit = writeIntent(c.runtime, current, 'async-dispatch', { authorize: () => ++calls === 1 ? authorizeForTests() : Promise.resolve({ allowed: true }) });
   let sends = 0;
   await assert.rejects(c.runtime.ledger.dispatch(permit, { ...current, send: async (_s, beforeDispatch) => { sends++; beforeDispatch(); return { id: 'x' }; } }),
     error => ['AUTHORIZATION_REQUIRED', 'PERMIT_CONSUMED'].includes(error.code));
@@ -152,7 +153,7 @@ test('native transaction money reserves, marks dispatch and settles only from tr
     payload, effect, quoteExpiresAt: new Date(Date.now() + 3600000).toISOString() }, { isCurrent: () => true });
   let sends = 0;
   const permit = c.runtime.ledger.intent({ taskId: c.taskId, run: current.run, job: current.job, provider: 'fixture', tool: 'write',
-    actionFamily: 'fixture.write', resourceId, key: 'money-key', effect, payload, authorize: () => ({ allowed: true, transfer: quote }) });
+    actionFamily: 'fixture.write', resourceId, key: 'money-key', effect, payload, authorize: () => ({ ...authorizeForTests(), transfer: quote }) });
   const result = await c.runtime.ledger.dispatch(permit, { ...current, deferDispatch: true, send: async (_signal, beforeDispatch) => { beforeDispatch(); sends++; return { id: 'money-receipt', idempotencyKey: 'money-key' }; } });
   assert.equal(result.id, 'money-receipt'); assert.equal(sends, 1);
   const binding = c.database.db.prepare('SELECT * FROM execution_money_bindings WHERE execution_id=?').get(permit.execution.id);
@@ -166,9 +167,9 @@ test('native transaction money reserves, marks dispatch and settles only from tr
     payload, effect, quoteExpiresAt: new Date(Date.now() + 3600000).toISOString() }, { isCurrent: () => true });
   const otherScope = scope(c.runtime, c.taskId);
   assert.throws(() => c.runtime.ledger.intent({ taskId: c.taskId, run: otherScope.run, job: otherScope.job, provider: 'fixture', tool: 'write',
-    actionFamily: 'fixture.write', resourceId, key: 'money-clone', effect, payload, authorize: () => ({ allowed: true, transfer: cloned }) }), { code: 'TRANSFER_QUOTE_UNTRUSTED' });
+    actionFamily: 'fixture.write', resourceId, key: 'money-clone', effect, payload, authorize: () => ({ ...authorizeForTests(), transfer: cloned }) }), { code: 'TRANSFER_QUOTE_UNTRUSTED' });
   assert.throws(() => c.runtime.ledger.intent({ taskId: c.taskId, run: otherScope.run, job: otherScope.job, provider: 'fixture', tool: 'write',
-    actionFamily: 'fixture.write', resourceId, key: 'money-foreign', effect, payload, authorize: () => ({ allowed: true, transfer: foreign }) }), { code: 'TRANSFER_QUOTE_UNTRUSTED' });
+    actionFamily: 'fixture.write', resourceId, key: 'money-foreign', effect, payload, authorize: () => ({ ...authorizeForTests(), transfer: foreign }) }), { code: 'TRANSFER_QUOTE_UNTRUSTED' });
   const reconciled = await c.runtime.ledger.reconcile(permit.execution.id, { lookup: async () => ({ status: 'found', actualMicros: 100, receiptRef: 'charge:money-key', receipt: { id: 'money-receipt', idempotencyKey: 'money-key' } }) });
   assert.equal(reconciled.status, 'found');
   assert.equal(c.runtime.ledger.get(permit.execution.id).status, 'verified');

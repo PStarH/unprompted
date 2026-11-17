@@ -8,6 +8,7 @@ import { DurableDatabase } from '../src/durable/database.js';
 import { DurableJobs } from '../src/durable/jobs.js';
 import { DurableTasks } from '../src/durable/tasks.js';
 import { ToolExecutionLedger } from '../src/durable/execution.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'unprompted-permit-'));
@@ -24,7 +25,7 @@ function running(context, key = 'work') {
   context.tasks.checkpoint(run, job, { expectedInputVersion: 0, plan: {} });
   return { taskId: created.taskId, job, run };
 }
-function writeIntent(context, current, key, resourceId, authorize = () => ({ allowed: true })) {
+function writeIntent(context, current, key, resourceId, authorize = () => authorizeForTests()) {
   return context.ledger.intent({ ...current, provider: 'fixture', tool: 'send', actionFamily: 'fixture.send', resourceId, key, effect: { type: 'fixture' }, payload: {}, authorize });
 }
 function readIntent(context, current, key) {
@@ -88,7 +89,7 @@ test('dispatch permit: second and concurrent dispatch are rejected with exactly 
 test('dispatch permit: authorize is private and a changed decision before dispatch is denied', async t => {
   const context = fixture(t), current = running(context);
   let allowed = true;
-  const permit = writeIntent(context, current, 'auth-write', 'auth-resource', () => ({ allowed }));
+  const permit = writeIntent(context, current, 'auth-write', 'auth-resource', () => allowed ? authorizeForTests() : { allowed: false });
   assert.equal(permit.authorize, undefined);
   assert.equal(Reflect.set(permit, 'authorize', () => ({ allowed: false })), false);
   allowed = false;
@@ -172,7 +173,7 @@ test('dispatch authority: public execution mutation cannot classify a write as v
 });
 test('dispatch authority: revocation before adapter call must prevent provider call', async t => {
  const c=fixture(t),cur=running(c);let allowed=true,writes=0;
- const permit=writeIntent(c,cur,'audit-gap','audit-gap-resource',()=>({allowed}));
+ const permit=writeIntent(c,cur,'audit-gap','audit-gap-resource',()=>allowed?authorizeForTests():{allowed:false});
  const pending=c.ledger.dispatch(permit,{...cur,send:async()=>{writes++;return{id:'audit-gap-receipt'};}});allowed=false;
  try{await pending;}catch{}
  assert.equal(writes,0);
@@ -184,7 +185,7 @@ test('dispatch authority: repeated deferred guard must not authorize a second ef
 });
 test('dispatch authority: a newly asynchronous authority decision is refused',async t=>{
  const c=fixture(t),cur=running(c);let checks=0,writes=0;
- const permit=writeIntent(c,cur,'audit-async','audit-async-resource',()=>{checks++;if(checks===1)return{allowed:true};const p=Promise.resolve({allowed:false});p.allowed=true;return p;});
+ const permit=writeIntent(c,cur,'audit-async','audit-async-resource',()=>{checks++;if(checks===1)return authorizeForTests();const p=Promise.resolve({allowed:false});p.allowed=true;return p;});
  try{await c.ledger.dispatch(permit,{...cur,send:async()=>{writes++;return{id:'audit-async-receipt'};}});}catch{}
  assert.equal(writes,0);
 });

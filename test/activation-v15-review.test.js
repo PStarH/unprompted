@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { openActivationReplay, storeActivationReport } from '../src/durable/activation-replay.js';
 import { OpenAiCompatibleReasoner } from '../src/reasoning.js';
 import { iso } from '../src/durable/database.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 const secret = 'SECRET-PURGE-TOKEN-8841';
 function open(t, scripts = {}) {
@@ -170,7 +171,7 @@ test('disconnect and clear removes the local copy and rejects a late checkpoint'
   assert.ok(job);
   const run = env.runtime.tasks.beginRun(job, { advanceGeneration: false });
   env.runtime.tasks.checkpoint(run, job, { expectedInputVersion: run.input_version, plan: { note: clearSecret }, sources: [] });
-  env.runtime.ledger.intent({ taskId: active.taskId, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'clear-write', effect: { type: 'email', body: clearSecret }, payload: { body: clearSecret }, authorize: () => ({ allowed: true }) });
+  env.runtime.ledger.intent({ taskId: active.taskId, run, job, provider: 'gmail', tool: 'send', actionFamily: 'email.send', resourceId: 'thread', key: 'clear-write', effect: { type: 'email', body: clearSecret }, payload: { body: clearSecret }, authorize: () => authorizeForTests() });
   env.runtime.db.prepare('INSERT INTO user_memories(id,user_id,scope_type,scope_key,content,source_kind,source_id,version,privacy_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
     .run('mem-clear', 'local', 'global', 'clear', clearSecret, 'event', storedEvent.id, 1, 0, at, at);
   env.runtime.db.prepare('INSERT INTO memory_fts(id,content) VALUES(?,?)').run('mem-clear', clearSecret);

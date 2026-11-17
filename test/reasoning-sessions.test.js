@@ -6,6 +6,7 @@ import { DurableTasks } from '../src/durable/tasks.js';
 import { ForgetService } from '../src/durable/privacy.js';
 import { DurableReasoningSessions, SESSION_LIMITS, operationContext, runWithOperation } from '../src/durable/reasoning-sessions.js';
 import { ToolExecutionLedger } from '../src/durable/execution.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 import { TokenBudgetService } from '../src/durable/token-budget.js';
 import { OpenAiCompatibleReasoner, createReasoner } from '../src/reasoning.js';
 import { completeWithTools } from '../src/tool-loop.js';
@@ -294,7 +295,7 @@ test('operation context only correlates a ledger execution and never grants auth
   const operation = { sessionId: session.id, operationId: 'op-ledger', turn: 0, callIndex: 0, tool: 'demo', effect: 'write', argsDigest: 'digest' };
   const intent = runWithOperation(operation, () => context.ledger.intent({
     taskId: task.taskId, run: task.run, job: task.job, provider: 'fixture', tool: 'demo', actionFamily: 'fixture.write',
-    resourceId: 'resource', key: 'key-1', effect: { type: 'fixture' }, payload: {}, authorize: () => ({ allowed: true })
+    resourceId: 'resource', key: 'key-1', effect: { type: 'fixture' }, payload: {}, authorize: () => authorizeForTests()
   }));
   assert.equal(operationContext() == null, true);
   const mapped = context.database.db.prepare('SELECT session_id,operation_id,execution_id,status FROM reasoning_session_operations WHERE operation_id=?').get('op-ledger');

@@ -2,6 +2,7 @@ import { DurableDatabase } from '../../src/durable/database.js';
 import { DurableJobs } from '../../src/durable/jobs.js';
 import { DurableTasks } from '../../src/durable/tasks.js';
 import { ToolExecutionLedger } from '../../src/durable/execution.js';
+import { authorizeForTests } from '../../src/authority-credential.js';
 
 const [mode, filename, encoded = '{}'] = process.argv.slice(2);
 const options = JSON.parse(encoded);
@@ -55,7 +56,7 @@ try {
         // The ledger must see an allowed, current review decision before a
         // write can reach the provider. A stale token fails here, never by
         // rewriting a durable status after the fact.
-        authorize: () => ({ allowed: options.reviewToken === options.expectedReviewToken })
+        authorize: () => options.reviewToken === options.expectedReviewToken ? authorizeForTests({ taskId: created.taskId }) : ({ allowed: false })
       });
     } catch (error) {
       send({ stage: 'intent', error: error.code || error.message });

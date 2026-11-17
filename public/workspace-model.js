@@ -5,31 +5,204 @@ export function workspaceConnections(setup) {
     ...(setup?.google ? { google: { connected: setup.google.configuredThisRun === true && !setup.google.runtimeDisabled } } : {}) };
 }
 
-// Presentation states are derived from recorded work, never from a timer or a
-// decorative animation. Provider uncertainty remains distinct from failure.
-export function taskState(task, connections = {}) {
-  if (task.status === 'completed') return task.completion?.kind === 'user_accepted_preparation' ? 'user_accepted' : 'verified';
-  if (task.status === 'cancelled' || task.userDismissed || task.status === 'blocked' && !task.action) return 'closed';
-  if (task.control?.paused) return 'paused_by_user';
-  if (task.status === 'verifying' || ['uncertain', 'executing', 'accepted_live'].includes(task.action?.status)) return 'result_unverified';
-  if (task.activationHold) return 'paused_by_policy';
-  if (task.kind === 'standing_intent' && ['pending', 'running'].includes(task.reasoning?.status)) return 'working';
-  if (task.reasoning?.status === 'failed' || task.action?.status === 'failed') return 'failed';
+const OBSERVING_KINDS = new Set(['external_issue', 'external_review', 'external_change', 'external_check', 'observed_task']);
+const IN_FLIGHT_ACTION = new Set(['executing', 'accepted_live', 'uncertain', 'unknown']);
+const TERMINAL_CLOSES = new Set(['reconciliation_inconclusive', 'attestation_request', 'user_attestation_request']);
+
+function pack(needsUser, state) {
+  return { needsUser, state, group: groupForState(state) };
+}
+
+function groupForState(state) {
+  if (['needs_user', 'failed', 'source_disconnected'].includes(state)) return 'attention';
+  if (state === 'working' || state === 'result_unverified') return 'working';
+  if (state === 'waiting_external') return 'waiting';
+  return 'quiet';
+}
+
+function contextConnections(context) {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return {};
+  if (context.connections && typeof context.connections === 'object') return context.connections;
+  const values = Object.values(context);
+  if (values.length && values.every(value => value && typeof value === 'object' && !Array.isArray(value) && ('connected' in value || 'configuredThisRun' in value))) return context;
+  return {};
+}
+
+function recordedWait(task, context = {}) {
+  if (task.wait?.status) return task.wait;
+  const waits = context.taskWaits || context.state?.taskWaits;
+  if (Array.isArray(waits)) {
+    const match = waits.find(item => item?.taskId === task.id);
+    if (match?.status) return match;
+  } else if (waits && typeof waits === 'object' && waits[task.id]?.status) return waits[task.id];
+  const wake = task.management?.wake;
+  if (wake?.waitId && wake.status) return { id: wake.waitId, status: wake.status, kind: wake.kind, condition: { label: wake.condition } };
+  return null;
+}
+
+/** Explicit send close. `unknown` / `uncertain` alone is not a close. */
+export function terminalAttentionClose(task = {}) {
+  if (task.reconciliation_inconclusive === true) return 'reconciliation_inconclusive';
+  if (task.attestationRequest === true || task.attestation_request === true) return 'attestation_request';
+  const candidates = [task.close, task.action?.close, task.action?.lastErrorClass, task.action?.last_error_class, task.lastErrorClass, task.last_error_class];
+  return candidates.find(value => TERMINAL_CLOSES.has(value)) || null;
+}
+
+function sourceDisconnected(task, context) {
   const provider = task.sourceConnectorId || task.externalSource?.provider;
-  if (provider && connections[provider]?.connected === false) return 'source_disconnected';
-  if (task.status === 'ready_for_approval' || task.status === 'blocked') return 'needs_user';
-  if (task.reasoningWork?.status === 'running') return 'working';
-  if (['external_issue', 'external_review', 'external_change', 'external_check', 'observed_task'].includes(task.kind)) return 'observing';
-  if (task.status === 'waiting_for_information') return 'waiting_external';
-  if (['newly_discovered', 'investigating'].includes(task.status)) return 'working';
-  return 'unknown';
+  if (!provider) return false;
+  return contextConnections(context)[provider]?.connected === false;
+}
+
+function inFlight(task) {
+  if (terminalAttentionClose(task)) return false;
+  if (task.status === 'verifying') return true;
+  return IN_FLIGHT_ACTION.has(task.action?.status);
+}
+
+function reasoningStillRunning(task) {
+  const work = task.reasoningWork;
+  if (work && ['pending', 'running'].includes(work.status)) return true;
+  if (['pending', 'running'].includes(task.reasoning?.status)) return true;
+  return false;
+}
+
+function reasoningWillRetry(task) {
+  const work = task.reasoningWork;
+  if (!work || work.status === 'running' || work.status === 'pending') return false;
+  if (work.retryable === false || work.terminalReason || work.budgetExhausted || task.reasoning?.budgetExhausted) return false;
+  if (task.reasoning?.status !== 'failed' && work.status !== 'failed') return false;
+  return Boolean(work.retryAt && Number.isFinite(Date.parse(work.retryAt)) && Date.parse(work.retryAt) > Date.now());
+}
+
+function failedNeedsUser(task) {
+  const reasoningFailed = task.reasoning?.status === 'failed' || task.reasoningWork?.status === 'failed';
+  const actionFailed = task.action?.status === 'failed';
+  if (!reasoningFailed && !actionFailed) return false;
+  if (reasoningFailed && !actionFailed && (reasoningStillRunning(task) || reasoningWillRetry(task))) return false;
+  return true;
+}
+
+function reviewReady(task) {
+  return task.status === 'ready_for_approval' || Boolean(task.preparedWork?.requiresReview && !task.preparedWork.acceptedAt);
+}
+
+function ledgerOnlyUnverifiable(task) {
+  const action = task.action;
+  const actionIsWrite = action?.ledgerOnlyUnverified === true || action?.family === 'mcp.tool' || action?.family === 'connector.request';
+  const requests = task.platformRequests || [];
+  const requestIsWrite = requests.some(item => !item?.verification && item?.verified !== true && (item.ledgerOnlyUnverified === true || item.family === 'mcp.tool' || item.family === 'connector.request'));
+  if (task.ledgerOnlyUnverified !== true && !actionIsWrite && !requestIsWrite) return false;
+  if (reviewReady(task) && !actionIsWrite) return false;
+  if (terminalAttentionClose(task) && !actionIsWrite) return false;
+  if (action?.status === 'failed' && !actionIsWrite) return false;
+  if (action && !actionIsWrite && action.family !== 'mcp.tool' && action.family !== 'connector.request' && action.ledgerOnlyUnverified !== true) return false;
+  return true;
+}
+
+function sharedHumanDependency(task) {
+  return (task.management?.dependencies || []).find(item => {
+    if ((item?.taskIds || []).length < 2) return false;
+    if (item.status === 'open' || item.status === 'failed_unresolved' || item.status === 'dismissed_unresolved') return true;
+    if (item.status === 'deferred') return !(item.wake || item.decision?.wake || item.decision?.until);
+    return false;
+  }) || null;
+}
+
+function nextKind(task, context) {
+  const recorded = task.management?.nextAction?.kind;
+  if (recorded) return recorded;
+  const wait = recordedWait(task, context);
+  if (wait?.status === 'active') return 'wait';
+  if (wait?.status === 'interrupted') return 'decide';
+  if (task.status === 'ready_for_approval') return 'approve';
+  if (task.preparedWork?.requiresReview && !task.preparedWork.acceptedAt) return 'approve';
+  if (task.action?.status === 'confirmed_absent') return 'decide';
+  if (task.status === 'waiting_for_information') return 'provide_information';
+  if (['newly_discovered', 'investigating', 'verifying'].includes(task.status)) return 'assess';
+  return null;
+}
+
+function coveredBySharedBand(task, context) {
+  if (!sharedHumanDependency(task)) return false;
+  if (reviewReady(task) || terminalAttentionClose(task) || failedNeedsUser(task)) return false;
+  if (task.action?.status === 'confirmed_absent') return false;
+  const kind = nextKind(task, context);
+  return ['resolve_dependency', 'decide', 'provide_information'].includes(kind);
+}
+
+function blockingConflict(task) {
+  if (reasoningStillRunning(task)) return false;
+  const incomplete = task.assessment?.complete === false || task.evidence?.completion?.complete === false || task.assessment?.complete == null;
+  if (!incomplete && task.assessment?.complete === true) return false;
+  return (task.evidence?.conflicts || []).some(item => String(item?.id || '').startsWith('conflicting:'));
+}
+
+function agentOwnsNext(task, context) {
+  const kind = nextKind(task, context);
+  if (['assess', 'recheck', 'reassess', 'verify', 'wait'].includes(kind)) return true;
+  if (['provide_information', 'resolve_dependency', 'decide', 'approve'].includes(kind)) return false;
+  return reasoningStillRunning(task) || ['newly_discovered', 'investigating', 'verifying'].includes(task.status);
+}
+
+/**
+ * One admission decision for Field zones, the decision queue, and J/K.
+ * Presentation state is derived from this result; it is not a second list.
+ */
+export function classifyTask(task, context = {}) {
+  if (!task || typeof task !== 'object') return pack(false, 'unknown');
+  if (task.status === 'completed') return pack(false, task.completion?.kind === 'user_accepted_preparation' ? 'user_accepted' : 'verified');
+  if (task.status === 'cancelled' || task.userDismissed || (task.status === 'blocked' && !task.action)) return pack(false, 'closed');
+  if (task.control?.paused) return pack(false, 'paused_by_user');
+  if (task.activationHold) return pack(false, 'paused_by_policy');
+  if (ledgerOnlyUnverifiable(task)) {
+    return pack(false, ['newly_discovered', 'investigating'].includes(task.status) || reasoningStillRunning(task) ? 'working' : 'result_unverified');
+  }
+  const observing = OBSERVING_KINDS.has(task.kind);
+  const close = terminalAttentionClose(task);
+  const failed = failedNeedsUser(task);
+  const disconnected = sourceDisconnected(task, context);
+  const flight = inFlight(task);
+  const ready = reviewReady(task);
+  const wait = recordedWait(task, context);
+  const activeWait = wait?.status === 'active';
+  if (observing && !ready && !close && !failed && !(disconnected && flight)) return pack(false, 'observing');
+  if (close || failed || (disconnected && (ready || flight || (!observing && !activeWait)))) {
+    if (disconnected && !close) return pack(true, 'source_disconnected');
+    if (failed && !close) return pack(true, 'failed');
+    return pack(true, 'needs_user');
+  }
+  if (flight) return pack(false, 'result_unverified');
+  if (ready) return pack(true, 'needs_user');
+  if (reasoningStillRunning(task)) return pack(false, 'working');
+  if (reasoningWillRetry(task)) return pack(false, 'working');
+  if (wait?.status === 'interrupted') return pack(true, 'needs_user');
+  if (coveredBySharedBand(task, context)) return pack(false, 'waiting_external');
+  if (activeWait) return pack(false, 'waiting_external');
+  if (blockingConflict(task)) return pack(true, 'needs_user');
+  if (task.action?.status === 'confirmed_absent') return pack(true, 'needs_user');
+  const kind = nextKind(task, context);
+  if (kind === 'decide' || kind === 'provide_information' || kind === 'resolve_dependency') return pack(true, 'needs_user');
+  if (['newly_discovered', 'investigating'].includes(task.status) || task.reasoningWork?.status === 'running') return pack(false, 'working');
+  if (observing) return pack(false, 'observing');
+  if (activeWait) return pack(false, 'waiting_external');
+  if (agentOwnsNext(task, context)) return pack(false, 'working');
+  return pack(false, 'unknown');
+}
+
+export function needsUserAttention(task, context = {}) {
+  return classifyTask(task, context).needsUser;
+}
+
+// Presentation states are derived from the admission predicate, never from a
+// timer or a decorative animation. In-flight uncertainty stays in motion.
+export function taskState(task, context = {}) {
+  return classifyTask(task, context).state;
 }
 
 export function stateGroup(state) {
-  if (['needs_user', 'failed', 'source_disconnected', 'result_unverified', 'unknown'].includes(state)) return 'attention';
-  if (state === 'working') return 'working';
-  if (state === 'waiting_external') return 'waiting';
-  return 'quiet';
+  if (state && typeof state === 'object') return classifyTask(state).group;
+  return groupForState(state);
 }
 
 export function taskSources(task, state) {

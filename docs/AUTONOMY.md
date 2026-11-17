@@ -12,8 +12,16 @@ reply, task follow-up settings, and Settings under standing agreements.
 
 An active authorization appears above the workspace with a Revoke button.
 Revocation stops operations that have not yet been dispatched; it cannot undo
-an operation already accepted by a provider. Expiration is checked at dispatch,
-independently of how often the interface refreshes its remaining time.
+an operation already accepted by a provider. Revoke, expiry, and replacement
+cancel undispatched `intent` rows for that lease in the same stored update.
+Expiration is checked again at dispatch.
+
+A standing send agreement for a named scope is a credential only when
+`AuthorityGate.decide` loads it and the effect is in that scope. It does not
+bypass the execution gate. A time lease also approves prepared mail and
+source-backed document patches, not only MCP or platform writes. After you
+attest that a live attempt is absent from Sent, YOLO will not send the
+replacement; that draft needs a direct approval.
 
 The execution layer checks the stored user authorization. A model response or
 tool argument cannot create a lease. Actions retain their existing source,

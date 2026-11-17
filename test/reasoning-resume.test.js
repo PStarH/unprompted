@@ -9,6 +9,7 @@ import { ToolExecutionLedger } from '../src/durable/execution.js';
 import { TokenBudgetService } from '../src/durable/token-budget.js';
 import { OpenAiCompatibleReasoner } from '../src/reasoning.js';
 import { completeWithTools } from '../src/tool-loop.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 /**
  * Real classic and tool-loop continuation.
@@ -332,7 +333,7 @@ test('an unknown write outcome is not resent and blocks further model and tool w
       executes += 1;
       const intent = context.ledger.intent({ taskId: current.taskId, run: current.run, job: current.job,
         provider: 'fixture', tool: 'send_report', actionFamily: 'fixture.send_report', resourceId: 'remote-report',
-        key: 'unknown-report-write', effect: { type: 'report' }, payload: args, authorize: () => ({ allowed: true }) });
+        key: 'unknown-report-write', effect: { type: 'report' }, payload: args, authorize: () => authorizeForTests() });
       return context.ledger.dispatch(intent, { ...current, send: async (_signal, beforeDispatch) => {
         sends += 1; beforeDispatch(); throw Object.assign(new Error('provider failed after dispatch'), { code: 'PROVIDER_FAILED' });
       } });
@@ -490,7 +491,7 @@ function writeTool(context, current, onExecute) {
       onExecute();
       const intent = context.ledger.intent({ taskId: current.taskId, run: current.run, job: current.job,
         provider: 'fixture', tool: 'send_report', actionFamily: 'fixture.send_report', resourceId: 'remote-report',
-        key: 'session-report-write', effect: { type: 'report' }, payload: args, authorize: () => ({ allowed: true }) });
+        key: 'session-report-write', effect: { type: 'report' }, payload: args, authorize: () => authorizeForTests() });
       const result = await context.ledger.dispatch(intent, { ...current,
         send: async () => ({ id: 'remote-report' }),
         verify: async () => ({ status: 'found', receipt: { id: 'remote-report' } }) });

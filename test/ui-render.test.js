@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { visibleAttentionItems } from '../public/ux-state.js';
-import { taskState, stateGroup, workspaceConnections } from '../public/workspace-model.js';
+import { taskState, stateGroup, workspaceConnections, terminalAttentionClose } from '../public/workspace-model.js';
 import { copy as localizedCopy, ui as localizedUi, setLocale } from '../public/i18n.js';
 
 /**
@@ -53,8 +53,8 @@ const renderTaskManagement = new Function('escapeHtml', 'current', 'copy', 'ui',
 );
 
 const runtimeState = { shadow: true, mode: 'simulation' };
-const renderApproval = new Function('escapeHtml', 'current', 'runtime', 'renderVerification', 'time',
-  `${extractFunction('renderApproval')}\nreturn renderApproval;`)(escapeHtml, { documents: [] }, runtimeState, () => '', () => '12:00:00');
+const renderApproval = new Function('escapeHtml', 'current', 'runtime', 'renderVerification', 'time', 'terminalAttentionClose',
+  `${extractFunction('renderApproval')}\nreturn renderApproval;`)(escapeHtml, { documents: [] }, runtimeState, () => '', () => '12:00:00', terminalAttentionClose);
 
 test('a parked decision renders with its recorded reason, and proposed ones do not', () => {
   const html = renderParked([
@@ -216,11 +216,12 @@ const needsTaskDecision = task => task.status === 'ready_for_approval' || (task.
 const attentionItems = new Function('visibleAttentionItems', `${extractFunction('attentionItems')}\nreturn attentionItems;`)(visibleAttentionItems);
 const agentPresentation = new Function('needsTaskDecision', 'attentionItems', 'taskState', 'stateGroup', 'workspaceConnections', 'setupState',
   `${extractFunction('agentPresentation')}\nreturn agentPresentation;`)(needsTaskDecision, attentionItems, taskState, stateGroup, workspaceConnections, null);
-const taskPresentation = new Function(`${extractFunction('taskPresentation')}\nreturn taskPresentation;`)();
+const taskPresentation = new Function('taskState', 'stateGroup', 'workspaceConnections', 'terminalAttentionClose', 'setupState',
+  `${extractFunction('taskPresentation')}\nreturn taskPresentation;`)(taskState, stateGroup, workspaceConnections, terminalAttentionClose, null);
 const taskTitle = new Function(`${extractFunction('taskTitle')}\nreturn taskTitle;`)();
-const renderTaskAction = new Function('escapeHtml', 'runtime', 'taskTitle', 'taskState', 'workspaceConnections', 'setupState', 'nativeCopy', 'safeLink', 'current', 'sourceFollow',
+const renderTaskAction = new Function('escapeHtml', 'runtime', 'taskTitle', 'taskState', 'workspaceConnections', 'setupState', 'nativeCopy', 'safeLink', 'current', 'sourceFollow', 'terminalAttentionClose',
   `${extractFunction('renderTaskAction')}\nreturn renderTaskAction;`)(escapeHtml, runtimeState, taskTitle, taskState, workspaceConnections, null, zh => zh, value => value, { durable: true },
-  task => task?.kind === 'observed_task' || ['external_issue', 'external_review', 'external_change', 'external_check'].includes(task?.kind));
+  task => task?.kind === 'observed_task' || ['external_issue', 'external_review', 'external_change', 'external_check'].includes(task?.kind), terminalAttentionClose);
 
 test('an offline workspace never claims to be idle, working or up to date', () => {
   for (const status of ['completed', 'investigating', 'waiting_for_information', 'ready_for_approval']) {
@@ -230,30 +231,37 @@ test('an offline workspace never claims to be idle, working or up to date', () =
   }
 });
 
-test('waiting for evidence has no working state and explains what will resume it', () => {
+test('missing evidence without a persisted wait asks the user, and an active wait does not', () => {
   const task = { status: 'waiting_for_information', evidence: { criteria: [{ status: 'satisfied' }, { status: 'unverified' }] } };
-  assert.equal(taskPresentation(task).tone, 'waiting');
+  assert.equal(taskPresentation(task).tone, 'attention');
   assert.match(taskPresentation(task).description, /1 项要求缺少证据/);
-  assert.equal(agentPresentation({ tasks: [task] }, true).tone, 'waiting');
-  // An unconfirmed outcome is in the Needs you zone (taskState → result_unverified);
-  // the status line uses the same classification, so it asks rather than says "working".
-  assert.equal(agentPresentation({ tasks: [{ status: 'verifying' }] }, true).tone, 'needs');
+  assert.equal(agentPresentation({ tasks: [task] }, true).tone, 'needs');
+  const watching = { status: 'waiting_for_information', wait: { status: 'active', kind: 'document', condition: { label: 'a new version' } }, evidence: { criteria: [{ status: 'unverified' }] } };
+  assert.equal(taskPresentation(watching).tone, 'waiting');
+  assert.equal(agentPresentation({ tasks: [watching] }, true).tone, 'waiting');
+  assert.equal(agentPresentation({ tasks: [{ status: 'verifying' }] }, true).tone, 'working');
   assert.equal(agentPresentation({ tasks: [{ status: 'investigating', reasoningWork: { status: 'running' } }] }, true).tone, 'working');
   assert.equal(agentPresentation({ tasks: [{ status: 'completed' }] }, true).tone, 'idle');
 });
 
-test('delivery uncertainty offers reconciliation rather than unconfirmed duplicate sending', () => {
+test('in-flight uncertainty stays in motion until a recorded close, which offers reconcile or attest', () => {
   const task = { id: 'request:uncertain', status: 'blocked', action: { status: 'unknown' } };
   const html = renderTaskAction(task);
-  assert.match(html, /data-action="reconcile"/);
-  assert.doesNotMatch(html, /data-action="(?:approve|retry)"|data-automate/);
+  assert.doesNotMatch(html, /data-action="(?:reconcile|approve|retry|attest)"|data-automate/);
   assert.equal(isClosedTask(task), false);
   assert.equal(isClosedTask({ status: 'blocked' }), true);
-  assert.equal(attentionItems({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }).length, 0);
-  const needsYou = agentPresentation({ tasks: [task], notifications: [{ kind: 'blocker', taskId: task.id }] }, true);
+  assert.equal(agentPresentation({ tasks: [task] }, true).tone, 'working');
+  const closed = { ...task, reconciliation_inconclusive: true, action: { status: 'unknown', live: true, close: 'reconciliation_inconclusive' } };
+  const closedHtml = renderTaskAction(closed);
+  assert.match(closedHtml, /data-action="reconcile"/);
+  assert.match(closedHtml, /data-action="attest"/);
+  assert.doesNotMatch(closedHtml, /data-action="(?:approve|retry)"|data-automate/);
+  const needsYou = agentPresentation({ tasks: [closed], notifications: [{ kind: 'blocker', taskId: closed.id }] }, true);
   assert.equal(needsYou.tone, 'needs');
   assert.equal(needsYou.title, '');
   assert.equal(needsYou.label, '需要你');
+  const dispatched = { id: 'request:failed', status: 'blocked', action: { status: 'failed', live: true, dispatched: true } };
+  assert.doesNotMatch(renderTaskAction(dispatched), /data-action="retry"/);
 });
 
 test('standing authority is offered only with a named scope, standard evidence and writable runtime', () => {

@@ -7,6 +7,7 @@ import { SqliteStore } from '../src/durable/store.js';
 import { WorkEngine } from '../src/engine.js';
 import { DurableRuntime } from '../src/durable/runtime.js';
 import { NullReasoner, OpenAiCompatibleReasoner } from '../src/reasoning.js';
+import { authorizeForTests } from '../src/authority-credential.js';
 
 function fixture(t, reasoner = new NullReasoner('fixture')) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'planning-freshness-'));
@@ -101,7 +102,7 @@ test('a stale manifest blocks a new external intent with confirmed no effect', a
 test('expiry during authorization is rechecked at the real dispatch boundary and cancels the undispatched intent', async t => {
   const f = fixture(t), { experience } = sourceExperience(f), taskId = taskWithManifest(f, [{ kind: 'experience', id: experience.id }]);
   let sends = 0, authorizations = 0;
-  f.engine.toolGateway.authorize = () => { if (++authorizations === 1) f.advance(1500); return { allowed: true }; };
+  f.engine.toolGateway.decide = () => { if (++authorizations === 1) f.advance(1500); return authorizeForTests(); };
   await assert.rejects(() => f.runtime.external(f.store.tasks.get(taskId), { provider: { kind: 'fixture', live: false }, tool: 'patch',
     actionFamily: 'document.patch', resourceId: 'doc', key: 'expired-at-dispatch', effect: { type: 'document_patch' }, payload: {}, send: async () => { sends++; return {}; } }),
   error => error.code === 'CONTEXT_CHANGED' && error.definitiveNoEffect === true && !error.ambiguous);
@@ -135,7 +136,7 @@ test('a queued context refresh preserves user-edited draft text and marks it sta
 
 test('expiry after dispatch preserves the real verified receipt and idempotent replay never sends twice', async t => {
   const f = fixture(t), { experience } = sourceExperience(f), taskId = taskWithManifest(f, [{ kind: 'experience', id: experience.id }]);
-  f.engine.toolGateway.authorize = () => ({ allowed: true }); let sends = 0;
+  f.engine.toolGateway.decide = () => authorizeForTests(); let sends = 0;
   const receipt = { id: 'actual-fixture-receipt', idempotencyKey: 'verified-before-expiry' };
   const options = { provider: { kind: 'fixture', live: false }, tool: 'patch', actionFamily: 'document.patch', resourceId: 'doc',
     key: 'verified-before-expiry', effect: { type: 'document_patch' }, payload: {},

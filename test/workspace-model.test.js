@@ -13,7 +13,8 @@ test('local draft acceptance is distinct from provider verification and pending 
 });
 
 test('provider uncertainty and a user pause remain distinct from failure and completion', () => {
-  assert.equal(taskState({ status: 'blocked', action: { status: 'uncertain' }, reasoning: { status: 'failed' } }), 'result_unverified');
+  assert.equal(taskState({ status: 'blocked', action: { status: 'uncertain' } }), 'result_unverified');
+  assert.equal(taskState({ status: 'blocked', action: { status: 'uncertain' }, reasoning: { status: 'failed' } }), 'failed');
   assert.equal(taskState({ status: 'waiting_for_information', control: { paused: true }, reasoning: { status: 'failed' } }), 'paused_by_user');
   assert.equal(taskState({ status: 'waiting_for_information', reasoning: { status: 'failed' } }), 'failed');
   assert.equal(taskState({ status: 'cancelled', kind: 'external_issue' }), 'closed');

@@ -7,7 +7,7 @@ import { createMcpPanel } from './mcp.js';
 import { createDurablePanel } from './durable.js';
 import { createMemorySpace } from './memory-space.js?v=ix2';
 import { createArtifactPanel } from './artifacts.js';
-import { taskState, stateGroup, workspaceConnections } from './workspace-model.js';
+import { taskState, stateGroup, workspaceConnections, needsUserAttention, terminalAttentionClose } from './workspace-model.js';
 import { preserveInteraction } from './dom-state.js';
 import { copy, ui, getLocale, setLocale, applyLanguage, formatTime, formatDate } from './i18n.js?v=ix2';
 import { readLocal, writeLocal, workspaceKey, workspaceSnapshot, changesSince, stableTaskOrder, matchesTask, visibleAttentionItems } from './ux-state.js';
@@ -309,7 +309,13 @@ function renderApproval(task) {
     return ui`<div class="approval-done"><span class="status-pill completed">Verified complete</span><h3>Action confirmed</h3><p>${verifiedLive ? copy('Gmail confirmed the message exists. The result came from the provider, not from a local record.') : copy('After approval the simulated provider accepted the reply. The result was verified by receipt lookup, not assumed from the send attempt.')}</p><div class="receipt">${copy('回执 {id} · {kind} · {time}', { id: escapeHtml(task.action?.receiptId || ''), kind: verifiedLive ? copy('真实提供方') : copy('模拟发送'), time: time(task.action?.verifiedAt) })}</div></div>`;
   }
   if (task.status === 'blocked' && task.action) {
-    return ui`<div class="approval-blocked"><span class="status-pill blocked">Outcome needs attention</span><h3>Delivery not confirmed</h3><p>${escapeHtml(task.reason)}</p><div class="receipt">No automatic retry. The provider is checked before any further attempt.</div><div class="approval-buttons"><button class="secondary-button" data-action="reconcile" data-id="${escapeHtml(task.id)}">Reconcile outcome</button>${task.action.status === 'confirmed_absent' && !runtime?.shadow ? ui`<button class="primary-button" data-action="retry" data-id="${escapeHtml(task.id)}">Retry after confirmed absence</button>` : ''}</div></div>`;
+    const close = terminalAttentionClose(task);
+    const inFlight = !close && ['unknown', 'uncertain', 'executing', 'accepted_live'].includes(task.action.status);
+    if (inFlight) return ui`<div class="approval-blocked"><span class="status-pill">Result not confirmed</span><h3>Still checking</h3><p>${escapeHtml(task.reason || copy('行动已经发起，正在向提供方核实结果。尚未标记完成。'))}</p><div class="receipt">Automatic checks are still running. Nothing is sent again.</div></div>`;
+    const dispatched = Boolean(task.action.live || task.action.dispatched || task.action.dispatchedAt || task.action.dispatched_at);
+    const showRetry = task.action.status === 'confirmed_absent' && !runtime?.shadow && !dispatched;
+    const showAttest = Boolean(close) && task.action.live === true;
+    return ui`<div class="approval-blocked"><span class="status-pill blocked">Outcome needs attention</span><h3>Delivery not confirmed</h3><p>${escapeHtml(task.reason)}</p><div class="receipt">No second send of this attempt. Reconcile it, or confirm it is absent.</div><div class="approval-buttons"><button class="secondary-button" data-action="reconcile" data-id="${escapeHtml(task.id)}">Reconcile outcome</button>${showRetry ? ui`<button class="primary-button" data-action="retry" data-id="${escapeHtml(task.id)}">Retry after confirmed absence</button>` : ''}${showAttest ? ui`<button class="secondary-button" data-action="attest" data-id="${escapeHtml(task.id)}">${copy('我已查看，这次没有发出')}</button>` : ''}</div></div>`;
   }
   if (task.status === 'blocked' && task.failure) return ui`<div class="approval-blocked"><span class="status-pill blocked">${copy('已停止')}</span><h3>${copy('Work stopped before it was finished')}</h3><p>${escapeHtml(task.reason)}</p><div class="receipt">${copy('Failed {attempts} of {maxAttempts} attempts · last failure: {kind}. Nothing was sent by the failed attempt.', { attempts: String(task.failure.attempts ?? 0), maxAttempts: String(task.failure.maxAttempts ?? 0), kind: escapeHtml(String(task.failure.errorClass || 'unknown').replaceAll('_', ' ')) })}</div><div class="approval-buttons"><button class="secondary-button" data-action="reopen" data-id="${escapeHtml(task.id)}">${copy('Try again')}</button></div></div>`;
   if (task.status === 'blocked') return ui`<div class="approval-blocked"><span class="status-pill blocked">Not sent</span><h3>Draft declined</h3><p>${escapeHtml(task.reason)}</p></div>`;
@@ -549,26 +555,35 @@ let durableUI = null;
 let memorySpaceUI = null;
 const viewNames = { home: '工作台', activity: '日志', attention: '需要你', memory: '记忆', sources: '连接', preferences: '设置' };
 const isClosedTask = task => ['completed', 'cancelled'].includes(task.status) || (task.status === 'blocked' && !task.action && !task.failure);
+const attentionContext = () => ({ connections: workspaceConnections(setupState), taskWaits: current?.taskWaits });
+const needsTaskDecision = task => needsUserAttention(task, attentionContext());
 
 function taskTitle(task) {
   return task.subject || [task.request?.subjectEntity, task.request?.deliverable].filter(Boolean).join(' · ') || copy('待跟进的请求');
 }
 
 function taskPresentation(task) {
+  const state = taskState(task, { connections: workspaceConnections(setupState), taskWaits: typeof current === 'undefined' ? undefined : current?.taskWaits });
+  const group = stateGroup(state);
   const missing = (task.evidence?.criteria || []).filter(item => item.status !== 'satisfied').length;
-  const presentations = {
-    newly_discovered: ['working', copy('刚刚发现'), copy('从收到的请求中发现了值得跟进的事，正在关联上下文。')],
-    investigating: ['working', copy('正在核对'), copy('正在关联相关文档，核对这次请求需要的结果。')],
-    waiting_for_information: ['waiting', copy('等待变化'), missing ? copy('还有 {count} 项要求缺少证据。文档更新后，我会继续核对。', { count: missing }) : copy('还没有足够的证据。相关内容更新后，我会接着跟进。')],
-    ready_for_approval: ['attention', copy('需要你'), copy('内容已核对，回复已备好。你可以直接发送，或约定今后的自动跟进。')],
-    verifying: ['working', copy('核验结果中'), copy('行动已经发起，正在向提供方核实结果。尚未标记完成。')],
-    completed: ['done', copy('已核验完成'), task.action?.status === 'verified_live' ? copy('已向 Gmail 核实发送结果，这件事已跟进完成。') : copy('回复已进入本地模拟发件箱，并核验了模拟回执。')],
-    blocked: ['attention', copy('需要判断'), copy('行动结果尚未确认，需要先核实，再决定下一步。')],
-    cancelled: ['waiting', copy('已关闭'), copy('这件事已停止跟进，没有发送回复。')]
-  };
-  if (task.status === 'blocked' && !task.action) return { tone: 'waiting', label: copy('已搁下'), description: copy('你已放下这份回复，没有发送。') };
-  const [tone, label, description] = presentations[task.status] || ['waiting', copy('状态待核实'), copy('查看记录，了解当前进展。')];
-  return { tone, label, description };
+  if (task.status === 'completed' || state === 'verified' || state === 'user_accepted') {
+    return { tone: 'done', label: copy('已核验完成'), description: task.action?.status === 'verified_live' ? copy('已向 Gmail 核实发送结果，这件事已跟进完成。') : copy('回复已进入本地模拟发件箱，并核验了模拟回执。') };
+  }
+  if (state === 'paused_by_user') return { tone: 'waiting', label: copy('已暂停'), description: copy('由你暂停，恢复后继续核对') };
+  if (state === 'paused_by_policy') return { tone: 'waiting', label: copy('因规则暂停'), description: copy('修改或停用对应规则后，会重新核对来源并继续准备。') };
+  if (state === 'observing') return { tone: 'waiting', label: copy('观察中'), description: copy('只读跟进，不会修改来源') };
+  if (state === 'closed' || (task.status === 'blocked' && !task.action) || task.status === 'cancelled') {
+    return { tone: 'waiting', label: task.status === 'cancelled' ? copy('已关闭') : copy('已搁下'), description: task.status === 'cancelled' ? copy('这件事已停止跟进，没有发送回复。') : copy('你已放下这份回复，没有发送。') };
+  }
+  if (state === 'result_unverified') return { tone: 'working', label: copy('核验结果中'), description: copy('行动已经发起，正在向提供方核实结果。尚未标记完成。') };
+  if (state === 'failed') return { tone: 'attention', label: copy('需要判断'), description: task.reason || copy('检查连接后重新核对') };
+  if (state === 'source_disconnected') return { tone: 'attention', label: copy('需要你'), description: copy('来源已断开。重新连接后才能继续。') };
+  if (group === 'attention' && terminalAttentionClose(task)) return { tone: 'attention', label: copy('需要你'), description: copy('结果仍未确认。请说明它是否已经送达。') };
+  if (group === 'attention' && task.status === 'ready_for_approval') return { tone: 'attention', label: copy('需要你'), description: copy('内容已核对，回复已备好。你可以直接发送，或约定今后的自动跟进。') };
+  if (group === 'attention') return { tone: 'attention', label: copy('需要你'), description: missing ? copy('还有 {count} 项要求缺少证据。需要你补充后才能继续。', { count: missing }) : copy('需要你补充信息后才能继续。') };
+  if (group === 'waiting') return { tone: 'waiting', label: copy('等待变化'), description: missing ? copy('还有 {count} 项要求缺少证据。文档更新后，我会继续核对。', { count: missing }) : copy('还没有足够的证据。相关内容更新后，我会接着跟进。') };
+  if (group === 'working') return { tone: 'working', label: task.status === 'newly_discovered' ? copy('刚刚发现') : copy('正在核对'), description: task.status === 'newly_discovered' ? copy('从收到的请求中发现了值得跟进的事，正在关联上下文。') : copy('正在关联相关文档，核对这次请求需要的结果。') };
+  return { tone: 'waiting', label: copy('状态待核实'), description: copy('查看记录，了解当前进展。') };
 }
 
 function managementActionLabel(action, dependencies) {
@@ -671,7 +686,10 @@ function renderTaskManagement(task, { compact = false } = {}) {
 function renderCommonDependencies(state) {
   const unique = new Map();
   for (const task of state.tasks || []) for (const dependency of task.management?.dependencies || []) {
-    if (dependency.status !== 'open' || (dependency.taskIds || []).length < 2) continue;
+    const shared = (dependency.taskIds || []).length > 1;
+    const open = dependency.status === 'open' || dependency.status === 'failed_unresolved' || dependency.status === 'dismissed_unresolved';
+    const deferred = dependency.status === 'deferred' && !(dependency.wake || dependency.decision?.wake || dependency.decision?.until);
+    if (!shared || (!open && !deferred)) continue;
     unique.set(dependency.id, dependency);
   }
   const dependencies = [...unique.values()];
@@ -691,9 +709,9 @@ function agentPresentation(state, online) {
   if (!online) return { tone: 'offline', label: copy('状态待同步'), title: copy('连接暂时中断，正在重新同步。'), description: copy('下方保留上次收到的进展，连接恢复后会自动更新。') };
   const tasks = state.tasks || [];
   // Same classification as the Work zones, so the sentence and the zones never disagree.
-  const states = tasks.map(task => taskState(task, workspaceConnections(setupState)));
-  const working = states.filter(item => item === 'working');
-  const waiting = states.filter(item => item === 'waiting_external');
+  const states = tasks.map(task => taskState(task, { connections: workspaceConnections(setupState), taskWaits: typeof current === 'undefined' ? undefined : current?.taskWaits }));
+  const working = states.filter(item => stateGroup(item) === 'working');
+  const waiting = states.filter(item => stateGroup(item) === 'waiting');
   const decisions = states.filter(item => stateGroup(item) === 'attention').length + attentionItems(state).length;
   if (working.length) return { tone: 'working', label: copy('处理中'), title: copy('我在推进 {count} 件事。', { count: working.length }), description: copy('正在核对上下文和结果，你可以先忙自己的。') };
   // The Needs you zone is the list and the entry. The status line stays empty.
@@ -773,16 +791,25 @@ function renderTaskAction(task) {
     ${errorHTML}</div>`;
   }
   if (task.status === 'blocked' && task.action) {
-    return ui`<div class="task-action"><h4>先确认上次行动的结果</h4><p>${escapeHtml(task.reason || copy('提供方尚未确认结果，我没有自动重试。'))}</p><div class="action-row"><button class="primary-button" data-action="reconcile" data-id="${id}">核实发送结果</button>${task.action.status === 'confirmed_absent' && !runtime?.shadow ? ui`<button class="secondary-button" data-action="retry" data-id="${id}">已确认未发送，重试</button>` : ''}</div>${errorHTML}</div>`;
+    const close = terminalAttentionClose(task);
+    const inFlight = !close && ['unknown', 'uncertain', 'executing', 'accepted_live'].includes(task.action.status);
+    if (inFlight) return `<div class="task-action"><p>${nativeCopy('行动已发起，提供方尚未确认结果。正在自动核对，不会把这件事标成完成。', 'The action started and the result is not confirmed yet. Automatic checks are still running. This is not marked done.')}</p>${errorHTML}</div>`;
+    const dispatched = Boolean(task.action.live || task.action.dispatched || task.action.dispatchedAt || task.action.dispatched_at || task.action.retrySafe === false);
+    const showRetry = task.action.status === 'confirmed_absent' && !runtime?.shadow && !dispatched;
+    const showAttest = Boolean(close) && task.action.live === true;
+    if (task.action.status === 'failed' && dispatched) {
+      return `<div class="task-action"><h4>${nativeCopy('这次发送不能再试一次', 'This attempt cannot be sent again')}</h4><p>${escapeHtml(task.reason || nativeCopy('已经发出的尝试不会再次 POST。', 'A dispatched attempt is not posted again.'))}</p>${errorHTML}</div>`;
+    }
+    return ui`<div class="task-action"><h4>先确认上次行动的结果</h4><p>${escapeHtml(task.reason || copy('提供方尚未确认结果，我没有自动重试。'))}</p><div class="action-row"><button class="primary-button" data-action="reconcile" data-id="${id}">核实发送结果</button>${showRetry ? ui`<button class="secondary-button" data-action="retry" data-id="${id}">已确认未发送，重试</button>` : ''}${showAttest ? ui`<button class="secondary-button" data-action="attest" data-id="${id}">${copy('我已查看，这次没有发出')}</button>` : ''}</div>${errorHTML}</div>`;
   }
   return errorHTML;
 }
 
 const githubCardCopy = {
   external_issue: { label: '跟进已分配的 issue', open: '这个 issue 当前分配给你。我会留意状态和负责人变化。', marker: issue => `${issue.repository} #${issue.number}`, who: issue => issue.assignee },
-  external_review: { label: '跟进需要你处理的 PR', open: '这个 pull request 需要你评审，或需要你处理别人的评审意见。', marker: issue => `${issue.repository} #${issue.number}`, who: issue => issue.author },
+  external_review: { label: '跟进待评审的 PR', open: '这个 pull request 等待评审，或有评审意见需要处理。', marker: issue => `${issue.repository} #${issue.number}`, who: issue => issue.author },
   external_change: { label: '跟进仓库内容变化', open: '仓库有新的提交。这里保留提交说明和变更的文件路径。', marker: issue => `${issue.repository} · ${issue.marker}`, who: issue => issue.author },
-  external_check: { label: '跟进 GitHub Actions', open: '这条 Actions 运行有变化，需要你处理。', marker: issue => `${issue.repository} · ${issue.marker}`, who: issue => issue.author }
+  external_check: { label: '跟进 GitHub Actions', open: '这条 Actions 运行有变化，正在留意。', marker: issue => `${issue.repository} · ${issue.marker}`, who: issue => issue.author }
 };
 function renderIssueCard(task, { detailed = false } = {}) {
   const issue = task.externalSource || {}, id = escapeHtml(task.id), copyFor = githubCardCopy[task.kind] || githubCardCopy.external_issue;
@@ -841,7 +868,7 @@ let activityQuery = '';
 let activityFilter = 'all';
 const connectionPopups = new Map();
 const providerNames = { google: 'Google Workspace', github: 'GitHub', microsoft: 'Microsoft Outlook', slack: 'Slack', notion: 'Notion', todoist: 'Todoist', apple_reminders: 'Apple Reminders' };
-const cloudCopy = { todoist: '读取 Todoist 中的待办；个人 API token，无需注册开发者应用。', google: '读取 Gmail 和 Google Docs，关联邮件请求与文档证据。', github: '跟进分配给你的 issue、需要你处理的 PR、仓库提交和 Actions 变化。', microsoft: '读取 Outlook 收件箱，从邮件中发现需要跟进的工作。', slack: '读取你参与的私信和群组私信，从对话里发现需要跟进的事。', notion: '读取你在授权时选中的 Notion 页面。' };
+const cloudCopy = { todoist: '读取 Todoist 中的待办；个人 API token，无需注册开发者应用。', google: '读取 Gmail 和 Google Docs，关联邮件请求与文档证据。', github: '跟进分配给你的 issue、待评审的 PR、仓库提交和 Actions 变化。', microsoft: '读取 Outlook 收件箱，从邮件中发现需要跟进的工作。', slack: '读取你参与的私信和群组私信，从对话里发现需要跟进的事。', notion: '读取你在授权时选中的 Notion 页面。' };
 const cloudAccess = { todoist: 'Todoist tasks', github: 'issue、PR、提交和 Actions', microsoft: '收件箱邮件', slack: '私信', notion: '选中的页面' };
 const githubWorkKinds = ['external_issue', 'external_review', 'external_change', 'external_check'];
 const sourceFollow = task => task?.kind === 'observed_task' || githubWorkKinds.includes(task?.kind);
@@ -1417,7 +1444,7 @@ function renderDemoJourney() {
 }
 
 function privacyFacts() {
-  return ui`<ul class="privacy-facts"><li>${copy('邮件、文档和任务内容会发送给你选择的模型。')}</li><li>${copy('本机数据库和密钥不加密，请只在你自己的电脑上运行。')}</li><li>${copy('断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。')}</li></ul>`;
+  return ui`<ul class="privacy-facts"><li>${copy('邮件、文档和任务内容会发送给你选择的模型。')}</li><li>${copy('令牌和密钥在本机加密保存。工作区里的邮件和文档不加密，请只在你自己的电脑上运行。')}</li><li>${copy('断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。')}</li></ul>`;
 }
 
 function modelProtocolLabel(value) {
@@ -1535,19 +1562,19 @@ function renderDashboard() {
     sidebarMode.textContent = mode;
   }
   byId('taskTotal').textContent = tasks.length;
-  byId('attentionCount').textContent = active.filter(task => stateGroup(taskState(task, workspaceConnections(setupState))) === 'attention').length;
-  byId('workingCount').textContent = active.filter(task => taskState(task, workspaceConnections(setupState)) === 'working').length;
-  byId('waitingCount').textContent = active.filter(task => taskState(task, workspaceConnections(setupState)) === 'waiting_external').length;
+  byId('attentionCount').textContent = active.filter(task => stateGroup(taskState(task, attentionContext())) === 'attention').length;
+  byId('workingCount').textContent = active.filter(task => stateGroup(taskState(task, attentionContext())) === 'working').length;
+  byId('waitingCount').textContent = active.filter(task => stateGroup(taskState(task, attentionContext())) === 'waiting').length;
   byId('doneCount').textContent = done.length;
-  // The heading follows the visible list, including an active search or filter.
-  const filtered = selectedFilter === 'attention' ? active.filter(task => stateGroup(taskState(task, workspaceConnections(setupState))) === 'attention') : selectedFilter === 'done' ? done : selectedFilter === 'working' ? active.filter(task => taskState(task, workspaceConnections(setupState)) === 'working') : selectedFilter === 'waiting' ? active.filter(task => taskState(task, workspaceConnections(setupState)) === 'waiting_external') : selectedFilter === 'active' ? active : tasks;
+  // One number for the whole system; the zones below carry the breakdown.
+  const filtered = selectedFilter === 'attention' ? active.filter(needsTaskDecision) : selectedFilter === 'done' ? done : selectedFilter === 'working' ? active.filter(task => stateGroup(taskState(task, attentionContext())) === 'working') : selectedFilter === 'waiting' ? active.filter(task => stateGroup(taskState(task, attentionContext())) === 'waiting') : selectedFilter === 'active' ? active : tasks;
   const visible = filtered.filter(task => matchesTask(task, searchQuery));
   const selectedId = workspaceUI?.selection?.();
   const selectedTask = selectedId ? tasks.find(task => task.id === selectedId) : null;
   const shown = selectedTask && !visible.some(task => task.id === selectedTask.id) ? [selectedTask, ...visible] : visible;
   const countRoot = byId('homeCounts');
-  const unit = document.documentElement.lang.startsWith('zh') ? '件事' : (visible.length === 1 ? 'task' : 'tasks');
-  const countHTML = `<strong>${visible.length}</strong><span>${unit}</span>`;
+  const unit = document.documentElement.lang.startsWith('zh') ? '件事' : (tasks.length === 1 ? 'task' : 'tasks');
+  const countHTML = `<strong>${tasks.length}</strong><span>${unit}</span>`;
   if (countRoot && countRoot._renderedHTML !== countHTML) {
     countRoot._renderedHTML = countHTML;
     countRoot.innerHTML = countHTML;
@@ -2133,6 +2160,7 @@ document.addEventListener('click', async event => {
       approve: result.status === 'completed' ? copy('回复已发送，结果已核验。') : copy('已发起发送，结果仍需核实。'),
       reject: copy('已搁下这次回复，没有发送。'),
       retry: copy('已重试并向提供方核实结果。'),
+      attest: copy('我已查看，这次没有发出'),
       reconcile: copy('已向提供方核实结果。'),
       cancel: copy('已关闭这件事，没有发送回复。'),
       reopen: copy('已恢复跟进，已重新核对当前证据。没有发送回复。')
@@ -2337,7 +2365,7 @@ document.addEventListener('keydown', event => {
   }
 });
 interactions = createInteractions({
-  context: () => ({ state: current, workspace: localWorkspace, visitBaseline }),
+  context: () => ({ state: current, workspace: localWorkspace, visitBaseline, connections: workspaceConnections(setupState) }),
   update: updateContent, refresh: renderDashboard, escape: escapeHtml, title: taskTitle, sourceLabel
 });
 mcpUI = createMcpPanel({ update: updateContent, post: postJSON,

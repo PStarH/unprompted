@@ -5,7 +5,7 @@ description: What Unprompted does, where each guide goes, and how to report a ga
 
 Unprompted is a local-first prototype. It watches sources you authorize, notices work that was not assigned as a prompt, checks the evidence, and prepares the next step. You review the result. External actions stay behind an approval or a separate permission.
 
-This site matches the current `main` branch, version 0.5.0. It is for someone running the app, and for someone changing the code or calling the local API.
+This site matches the current `main` branch, version 0.5.1. It is for someone running the app, and for someone changing the code or calling the local API.
 
 ## What it does
 
@@ -23,7 +23,7 @@ authorized source → observed change → evidence check → prepared work
 
 ## Current limits
 
-The app is one person, one machine, one process. It binds to `127.0.0.1` and has no login. The local database, tokens, and model keys are not encrypted. A source starts read-only. Sending, drafts, and other writes stay off until you grant them. [Permissions and privacy](permissions.md) states the boundary. [Connectors](connectors.md) states what each source can do.
+The app is one person, one machine, one process. It binds to `127.0.0.1` and has no login. OAuth tokens, model keys, and connector credentials are encrypted at rest. The workspace database that holds synced mail and documents is not. A source starts read-only. Sending, drafts, and other writes stay off until you grant them. [Permissions and privacy](permissions.md) states the boundary. [Connectors](connectors.md) states what each source can do.
 
 Normal startup does not insert sample tasks. `npm run demo` is a separate disposable simulation. It does not use saved accounts.
 

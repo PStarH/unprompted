@@ -115,15 +115,25 @@ const messages = {
   "正在检查 已连接来源的最新变化。": "Checking the latest changes in connected sources.",
   "已停止跟进": "Tracking stopped",
   "跟进已分配的 issue": "Following assigned issue",
-  "跟进需要你处理的 PR": "Following a pull request that needs you",
-  "这个 pull request 需要你评审，或需要你处理别人的评审意见。": "This pull request needs your review, or needs you to address review comments.",
+  "跟进待评审的 PR": "Following a pull request",
+  "这个 pull request 等待评审，或有评审意见需要处理。": "This pull request is waiting for a review, or has review comments to address.",
   "跟进仓库内容变化": "Following a repository change",
   "仓库有新的提交。这里保留提交说明和变更的文件路径。": "The repository has a new commit. The message and changed file paths are kept here.",
   "跟进 GitHub Actions": "Following a GitHub Actions run",
-  "这条 Actions 运行有变化，需要你处理。": "This Actions run changed and needs you to handle it.",
+  "这条 Actions 运行有变化，正在留意。": "This Actions run changed and is being watched.",
+  "来源已断开。重新连接后才能继续。": "The source is disconnected. Reconnect it before this can continue.",
+  "结果仍未确认。请说明它是否已经送达。": "The result is still unconfirmed. Say whether it arrived.",
+  "还有 {count} 项要求缺少证据。需要你补充后才能继续。": "Evidence still missing: {count}. Provide it before this can continue.",
+  "需要你补充信息后才能继续。": "Provide the missing information before this can continue.",
+  "来源已断开，仍在观察": "Source disconnected. Still watching.",
+  "由你暂停，恢复后继续核对": "Paused by you. Resume to continue checks.",
+  "因规则暂停": "Paused by a rule",
+  "修改或停用对应规则后，会重新核对来源并继续准备。": "Update or disable the matching rule to recheck sources and continue preparation.",
+  "观察中": "Observing",
+  "只读跟进，不会修改来源": "Read-only monitoring. The source is unchanged.",
   "连接器只读，不会评论、合并、修改文件或重跑 Actions。": "The connector is read-only. It does not comment, merge, edit files, or rerun Actions.",
   "issue、PR、提交和 Actions": "Issues, pull requests, commits, and Actions",
-  "跟进分配给你的 issue、需要你处理的 PR、仓库提交和 Actions 变化。": "Follow assigned issues, pull requests that need you, repository commits, and Actions changes.",
+  "跟进分配给你的 issue、待评审的 PR、仓库提交和 Actions 变化。": "Follow assigned issues, pull requests awaiting review, repository commits, and Actions changes.",
   "来源状态或你的选择已停止本次跟进；这不代表 Agent 完成了工作。": "Tracking stopped because of the source state or your choice. This is not a verified agent completion.",
   "这个 issue 当前分配给你。我会留意状态和负责人变化。": "This issue is assigned to you. I will follow its state and assignment changes.",
   "负责人": "Assignee",
@@ -390,7 +400,7 @@ const messages = {
   "这个来源已断开，本机副本已清除。": "This source is disconnected and its local copy has been cleared.",
   "Google 已断开，这个来源的本机副本已清除。": "Google is disconnected and its local copy has been cleared.",
   "邮件、文档和任务内容会发送给你选择的模型。": "Email, documents, and task content are sent to the model you choose.",
-  "本机数据库和密钥不加密，请只在你自己的电脑上运行。": "The local database and keys are not encrypted. Run this only on your own computer.",
+  "令牌和密钥在本机加密保存。工作区里的邮件和文档不加密，请只在你自己的电脑上运行。": "Tokens and keys are encrypted on this computer. Mail and documents in the workspace are not. Run this only on your own computer.",
   "断开连接会停止读取，但不会删除已保存的记录。要删除本机副本，使用「断开并清除」。": "Disconnecting stops reading but does not delete saved records. To delete the local copy, use Disconnect and clear.",
   "断开 Google": "Disconnect Google",
   "连接用于理解工作的模型": "Connect a model to understand your work",
@@ -1018,7 +1028,8 @@ const messages = {
   ,"有 {count} 处证据冲突需要复核。": "{count} evidence conflict(s) need review."
   ,"证据已有 {days} 天没有变化。": "The evidence hasn't changed for {days} day(s)."
   ,"有 {count} 件事项共享这项未满足的要求。": "{count} active task(s) share this unmet requirement."
-  ,"证据充分时自动发送后续回复 · {time} 约定": "Later replies send automatically once the evidence is complete · agreed {time}"
+  ,"证据充分时自动发送后续回复 · {time} 约定": "Later replies in this scope send only when the execution check accepts them · agreed {time}"
+  ,"我已查看，这次没有发出": "I checked Sent: this attempt is absent"
   ,"演示不会连接真实账号。要用自己的邮件和文档，退出后运行 npm start。": "This demo does not connect real accounts. Quit and run npm start to use your own mail and documents."
   ,"获取授权码": "Get a sign-in code"
   ,"选择备忘录文件夹": "Choose Notes folders"
