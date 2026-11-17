@@ -10,6 +10,7 @@ import { TokenBudgetService } from '../src/durable/token-budget.js';
 import { ModelCommits } from '../src/durable/model-commits.js';
 import { ModelRoutingService, applyModelRequestLimit } from '../src/durable/model-routing.js';
 import { OpenAiCompatibleReasoner, PiReasoner } from '../src/reasoning.js';
+import { piSupported } from '../src/pi-runtime.js';
 import { bindReasonerTokenBudget } from '../src/reasoner-scope.js';
 import { brandModelStage, directModelRoutingContext, requireAccountingContext, requireSessionAccountingContext } from '../src/model-request.js';
 
@@ -172,7 +173,9 @@ test('persisted routing group rejects Pi on native bind before changing its acco
   assert.throws(() => bindReasonerTokenBudget(pi, f.tokens), { code: 'MODEL_ROUTING_UNSUPPORTED_HARNESS', status: 409 });
   assert.equal(pi.accounting, oldAccounting); assert.equal(pi.tokenBudget, null); assert.equal(sdk, 0); assert.equal(f.wire.length, 0);
 });
-test('saved Standard routing group cannot be bypassed by synthetic Pi model setup', async t => {
+// On an unsupported Node version createReasoner refuses Pi before routing can
+// be consulted, so this ordering assertion only applies where Pi can load.
+test('saved Standard routing group cannot be bypassed by synthetic Pi model setup', { skip: !piSupported() }, async t => {
   const f = fixture(t); let fetches = 0, sdk = 0;
   await assert.rejects(validateModelSettings({ baseUrl: 'https://example.test/v1', model: 'base', protocol: 'chat-completions', harness: 'pi' }, {
     tokenBudget: f.tokens, fetchImpl: async () => { fetches++; return response(); }, piRuntimeOptions: { loadSdk: async () => { sdk++; throw new Error('must not run'); } }

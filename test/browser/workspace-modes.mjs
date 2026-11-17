@@ -257,7 +257,9 @@ try {
   await page.waitForFunction(() => window.__workspaceStreams?.at(-1)?.onmessage && document.querySelector('#taskContent [data-select-task]'));
   const snapshot = await state();
   const original = structuredClone(snapshot.tasks[0]);
-  const make = (id, subject, status, extra = {}) => ({ ...structuredClone(original), id, subject, status, action: null, guidance: null, control: null, reasoning: null, draft: null, ...extra });
+  // The admission predicate trusts a recorded next action, so a synthetic row
+  // must not inherit the live task's management record when its status changes.
+  const make = (id, subject, status, extra = {}) => ({ ...structuredClone(original), id, subject, status, action: null, guidance: null, control: null, reasoning: null, draft: null, management: null, ...extra });
   snapshot.tasks = [
     make('needs', 'Reply to Mei', 'ready_for_approval', { draft: { to: 'mei@example.test', subject: 'Re: update', body: 'A source-backed fixture draft.', canSend: false }, reviewToken: 'a'.repeat(64) }),
     make('working-a', 'Compare renovation quotes', 'investigating'),
